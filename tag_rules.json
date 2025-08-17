@@ -1,0 +1,57 @@
+{
+  "barrier": {
+    "bollard": true,
+    "bump_gate": true,
+    "cattle_grid": true,
+    "chain": true,
+    "cycle_barrier": true,
+    "entrance": true,
+    "full-height_turnstile": true,
+    "gate": true,
+    "hampshire_gate": true,
+    "height_restrictor": true,
+    "horse_stile": true,
+    "kissing_gate": true,
+    "lift_gate": true,
+    "motorcycle_barrier": true,
+    "rope": true,
+    "stile": true,
+    "sump_buster": true,
+    "swing_gate": true,
+    "toll_booth": true,
+    "turnstile": true
+  },
+  "route": {
+    "foot": true,
+    "hiking": true,
+    "running": true
+  },
+  "restrictions" : {
+    "foot": true
+  },
+  "highway" : {
+    "living_street" : true,
+    "service" : true,
+    "pedestrian" : true,
+    "track" : true,
+    "bridleway" : true,
+    "steps" : true,
+    "corridor" : true,
+    "road" : true,
+    "path" : true,
+    "footway" : {
+      "sidewalk" : true,
+      "crossing" : true,
+      "traffic_island" : true
+    }
+  },
+  "sidewalk" : {
+    "both" : true,
+    "right" : true,
+    "left" : true,
+    "lane" : true,
+    "yes" : true,
+    "separate" : true
+  }
+
+}

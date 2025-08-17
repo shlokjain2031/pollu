@@ -1,0 +1,19 @@
+# Build artifacts
+/cmake-build-*
+/build/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS cruft
+.DS_Store
+
+# Large data files
+.osm.pbf/
