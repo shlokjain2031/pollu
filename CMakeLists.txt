@@ -33,14 +33,16 @@ set(SOURCES
         main.cpp
         third_party/fileformat.pb.cc
         third_party/osmformat.pb.cc
-        src/takshashila/pbf_reader.h
-        src/takshashila/pbf_reader.cpp
+        src/takshashila/pbfgraphparser.h
+        src/takshashila/pbfgraphparser.cpp
         src/takshashila/graphbuilder.cpp
         src/takshashila/graphbuilder.h
         src/nalanda/edge.h
         src/nalanda/node.h
         src/nalanda/osmnode.h
         src/nalanda/osmway.h
+        src/nalanda/osmdata.h
+        src/nalanda/uniquenames.h
 )
 
 add_executable(pollu ${SOURCES})
