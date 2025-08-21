@@ -35,7 +35,12 @@ set(SOURCES
         third_party/osmformat.pb.cc
         src/takshashila/pbf_reader.h
         src/takshashila/pbf_reader.cpp
-        src/nalanda/osm_structures.h
+        src/takshashila/graphbuilder.cpp
+        src/takshashila/graphbuilder.h
+        src/nalanda/edge.h
+        src/nalanda/node.h
+        src/nalanda/osmnode.h
+        src/nalanda/osmway.h
 )
 
 add_executable(pollu ${SOURCES})
