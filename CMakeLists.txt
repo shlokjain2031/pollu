@@ -43,6 +43,7 @@ set(SOURCES
         src/nalanda/osmway.h
         src/nalanda/osmdata.h
         src/nalanda/uniquenames.h
+        src/nalanda/disk_seq.h
 )
 
 add_executable(pollu ${SOURCES})
