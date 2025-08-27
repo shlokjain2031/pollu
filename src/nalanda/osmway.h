@@ -30,6 +30,9 @@ namespace pollu {
         uint32_t indoor_     : 1;
         uint32_t lit_        : 1;
 
+        // --- Travel hints ---
+        uint32_t duration_;   // optional duration in seconds (ferries/hiking)
+
         uint32_t pedestrian_fwd_ : 1;
         uint32_t pedestrian_bwd_ : 1;
         uint32_t sidewalk_left_  : 1;
@@ -86,6 +89,9 @@ namespace pollu {
 
         void set_lit(bool v) { lit_ = v; }
         bool lit() const { return lit_; }
+
+        void set_duration(uint32_t d) { duration_ = d; }
+        uint32_t duration() const { return duration_; }
 
         void set_pedestrian_fwd(bool v) { pedestrian_fwd_ = v; }
         bool pedestrian_fwd() const { return pedestrian_fwd_; }
