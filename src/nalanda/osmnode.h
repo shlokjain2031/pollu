@@ -18,20 +18,9 @@ struct OSMNode {
   // OSM node id (64-bit from raw data)
   uint64_t osmid_;
 
-  // ---- Interned indexes (21 bits each) ----
-  uint64_t name_idx_   : 21;
-  uint64_t ref_idx_    : 21;
-  uint64_t exit_to_idx_: 21;
-  uint64_t named_intersection_ : 1;
-
-  // ---- ISO indexes ----
-  uint64_t country_iso_idx_ : 21;
-  uint64_t state_iso_idx_   : 21;
-
   // ---- Routing-relevant flags ----
   uint64_t traffic_signal_ : 1;
   uint64_t stop_sign_      : 1;
-  uint64_t yield_sign_     : 1;
   uint64_t minor_          : 1;
   uint64_t direction_      : 1;
   uint64_t spare_bits_     : 16; // reserved for Pollu-specific flags later
@@ -88,45 +77,12 @@ struct OSMNode {
   }
 
   // ---- Index setters & guards ----
-  void set_name_idx(uint32_t idx) {
-    if (idx > kMaxNodeNameIndex) throw std::runtime_error("Exceeded max name index");
-    name_idx_ = idx;
-  }
-  bool has_name() const { return name_idx_ > 0; }
-
-  void set_ref_idx(uint32_t idx) {
-    if (idx > kMaxNodeNameIndex) throw std::runtime_error("Exceeded max ref index");
-    ref_idx_ = idx;
-  }
-  bool has_ref() const { return ref_idx_ > 0; }
-
-  void set_exit_to_idx(uint32_t idx) {
-    if (idx > kMaxNodeNameIndex) throw std::runtime_error("Exceeded max exit_to index");
-    exit_to_idx_ = idx;
-  }
-  bool has_exit_to() const { return exit_to_idx_ > 0; }
-
-  void set_country_iso_idx(uint32_t idx) {
-    if (idx > kMaxNodeNameIndex) throw std::runtime_error("Exceeded max country iso index");
-    country_iso_idx_ = idx;
-  }
-  bool has_country_iso() const { return country_iso_idx_ > 0; }
-
-  void set_state_iso_idx(uint32_t idx) {
-    if (idx > kMaxNodeNameIndex) throw std::runtime_error("Exceeded max state iso index");
-    state_iso_idx_ = idx;
-  }
-  bool has_state_iso() const { return state_iso_idx_ > 0; }
-
   // ---- Routing flags ----
   void set_traffic_signal(bool v) { traffic_signal_ = v; }
   bool traffic_signal() const { return traffic_signal_; }
 
   void set_stop_sign(bool v) { stop_sign_ = v; }
   bool stop_sign() const { return stop_sign_; }
-
-  void set_yield_sign(bool v) { yield_sign_ = v; }
-  bool yield_sign() const { return yield_sign_; }
 
   void set_minor(bool v) { minor_ = v; }
   bool minor() const { return minor_; }
