@@ -31,10 +31,6 @@ namespace pollu {
       uint64_t node_count = 0;           // compact nodes written to nodes_file (after filtering)
       uint64_t edge_count = 0;           // estimated edges for prealloc in graph build
 
-      uint64_t node_ref_count = 0;       // nodes with 'ref'
-      uint64_t node_name_count = 0;      // nodes with 'name'
-      uint64_t node_exit_to_count = 0;   // nodes with 'exit_to'
-
       // -------- relation-driven name updates (kept; harmless) --------
       OSMStringMap way_ref;              // way_id -> name index (forward)
       OSMStringMap way_ref_rev;          // way_id -> name index (reverse)
