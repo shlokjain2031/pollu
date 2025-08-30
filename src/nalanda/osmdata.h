@@ -8,13 +8,22 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-#include "UniqueNames.h"   // your interning table
+
+#include "osmnode.h"
+#include "/Users/shlokjain/CLionProjects/pollu/src/nalanda/uniquenames.h"   // your interning table
 // (OSMNode/OSMWay *definitions* are still used for POD record I/O, but not stored here as vectors)
 
 namespace pollu {
   namespace nalanda {
     // way_id -> name index (forward / reverse)
     using OSMStringMap = std::unordered_map<uint64_t, uint32_t>;
+
+    // Structure to store OSM node information and associate it to an OSM way
+    struct OSMWayNode {
+      OSMNode node;
+      uint32_t way_index = 0;
+      uint32_t way_shape_node_index = 0;
+    };
 
     struct OSMData {
       // -------- lifecycle --------
