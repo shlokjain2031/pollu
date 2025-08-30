@@ -5,7 +5,7 @@
 #ifndef PBFGRAPHPARSER_H
 #define PBFGRAPHPARSER_H
 
-#include "src/nalanda/osmdata.h"  // Pollu's slim OSMData (file-backed)
+#include "/Users/shlokjain/CLionProjects/pollu/src/nalanda/osmdata.h"  // Pollu's slim OSMData (file-backed)
 #include <boost/property_tree/ptree.hpp>
 #include <string>
 #include <vector>
@@ -41,12 +41,14 @@ namespace pollu {
              *
              * @param pt                 Read-only config (Boost.PropertyTree).
              * @param input_files        List of .osm.pbf input paths.
+             * @param way_nodes_file     Output: contiguous references to nodes by Way IDs
              * @param nodes_file         Output: contiguous POD OSMNode records (fixed-point coords, flags).
              * @param osmdata            In/out: OSMData from ParseWays (provides needed-node set via internal state).
              *                           On success, osmdata.nodes_path is set and counters updated.
              */
             static void ParseNodes(const boost::property_tree::ptree& pt,
                                    const std::vector<std::string>& input_files,
+                                   const std::string& way_nodes_file,
                                    const std::string& nodes_file,
                                    nalanda::OSMData& osmdata);
 
