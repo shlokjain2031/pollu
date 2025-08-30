@@ -44,6 +44,9 @@ set(SOURCES
         src/nalanda/osmdata.h
         src/nalanda/uniquenames.h
         src/nalanda/disk_seq.h
+        src/nalanda/graph_constants.h
+        src/takshashila/util.h
+        src/takshashila/util.cpp
 )
 
 add_executable(pollu ${SOURCES})
