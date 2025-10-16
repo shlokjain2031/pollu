@@ -17,8 +17,15 @@ std::vector<std::string> GetTagTokens(const std::string& tag_value, const std::s
 /**
  * Remove double quotes.
  * @param  s
- * @return string string with no quotes.
+ * @return string with no quotes.
  */
 std::string remove_double_quotes(const std::string& s);
+
+/**
+ *
+ * @param s
+ * @return string that is in lower case.
+ */
+std::string to_lower(const std::string& s);
 
 #endif //UTIL_H

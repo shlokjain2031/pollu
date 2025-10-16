@@ -10,7 +10,9 @@
 #include <osmium/visitor.hpp>
 #include <osmium/handler.hpp>
 #include </Users/shlokjain/CLionProjects/pollu/src/nalanda/graph_constants.h>
+#include <unordered_set>
 
+#include "tag_rules.h"
 #include "util.h"
 #include "../nalanda/osmway.h"
 #include "unordered_dense/include/ankerl/unordered_dense.h"
@@ -35,67 +37,6 @@ struct graph_parser {
       empty_node_tags_ = Tags{};
 
       // --- initialise tag handlers ---
-      tag_handlers_["use"] = [this]() {
-        Use use = static_cast<Use>(std::stoi(tag_.second));
-          switch (use) {
-            case Use::kCycleway:
-              way_.set_use(Use::kCycleway);
-              break;
-            case Use::kFootway:
-              way_.set_use(Use::kFootway);
-              break;
-            case Use::kSidewalk:
-              way_.set_use(Use::kSidewalk);
-              break;
-            case Use::kPedestrian:
-              way_.set_use(Use::kPedestrian);
-              break;
-            case Use::kPath:
-              way_.set_use(Use::kPath);
-              break;
-            case Use::kElevator:
-              way_.set_use(Use::kElevator);
-              break;
-            case Use::kSteps:
-              way_.set_use(Use::kSteps);
-              break;
-            case Use::kEscalator:
-              way_.set_use(Use::kEscalator);
-              break;
-            case Use::kBridleway:
-              way_.set_use(Use::kBridleway);
-              break;
-            case Use::kPedestrianCrossing:
-              way_.set_use(Use::kPedestrianCrossing);
-              break;
-            case Use::kLivingStreet:
-              way_.set_use(Use::kLivingStreet);
-              break;
-            case Use::kAlley:
-              way_.set_use(Use::kAlley);
-              break;
-            case Use::kEmergencyAccess:
-              way_.set_use(Use::kEmergencyAccess);
-              break;
-            case Use::kServiceRoad:
-              way_.set_use(Use::kServiceRoad);
-              break;
-            case Use::kTrack:
-              way_.set_use(Use::kTrack);
-              break;
-            case Use::kOther:
-              way_.set_use(Use::kOther);
-              break;
-            case Use::kConstruction:
-              way_.set_use(Use::kConstruction);
-              break;
-            case Use::kRoad:
-            default:
-              way_.set_use(Use::kRoad);
-              break;
-          }
-      };
-
       tag_handlers_["duration"] = [this]() {
         std::size_t found = tag_.second.find(":");
         if (found != std::string::npos) {
@@ -133,65 +74,6 @@ struct graph_parser {
         way_.set_indoor(tag_.second == "true" ? true : false); ;
       };
 
-      tag_handlers_["surface"] = [this]() {
-          std::string value = tag_.second;
-          std::transform(value.begin(), value.end(), value.begin(),
-                     [](unsigned char c){ return std::tolower(c); });
-
-          // Find unpaved before paved since they have common string
-          if (value.find("unpaved") != std::string::npos) {
-            way_.set_surface(Surface::kGravel);
-
-          } else if (value.find("paved") != std::string::npos ||
-                     value.find("pavement") != std::string::npos ||
-                     value.find("asphalt") != std::string::npos ||
-                     // concrete, concrete:lanes, concrete:plates
-                     value.find("concrete") != std::string::npos ||
-                     value.find("cement") != std::string::npos ||
-                     value.find("chipseal") != std::string::npos ||
-                     value.find("metal") != std::string::npos) {
-            way_.set_surface(Surface::kPavedSmooth);
-
-          } else if (value.find("tartan") != std::string::npos ||
-                     value.find("pavingstone") != std::string::npos ||
-                     value.find("paving_stones") != std::string::npos ||
-                     value.find("sett") != std::string::npos ||
-                     value.find("grass_paver") != std::string::npos) {
-            way_.set_surface(Surface::kPaved);
-
-          } else if (value.find("cobblestone") != std::string::npos ||
-                     value.find("brick") != std::string::npos) {
-            way_.set_surface(Surface::kPavedRough);
-
-          } else if (value.find("compacted") != std::string::npos ||
-                     value.find("wood") != std::string::npos ||
-                     value.find("boardwalk") != std::string::npos) {
-            way_.set_surface(Surface::kCompacted);
-
-          } else if (value.find("dirt") != std::string::npos ||
-                     value.find("natural") != std::string::npos ||
-                     value.find("earth") != std::string::npos ||
-                     value.find("ground") != std::string::npos ||
-                     value.find("mud") != std::string::npos) {
-            way_.set_surface(Surface::kDirt);
-
-          } else if (value.find("gravel") != std::string::npos || // gravel, fine_gravel
-                     value.find("pebblestone") != std::string::npos ||
-                     value.find("sand") != std::string::npos) {
-            way_.set_surface(Surface::kGravel);
-          } else if (value.find("grass") != std::string::npos ||
-                     value.find("stepping_stones") != std::string::npos) {
-            way_.set_surface(Surface::kPath);
-            // We have to set a flag as surface may come before Road classes and Uses
-          } else {
-            has_surface_ = false;
-          }
-        };
-
-      tag_handlers_["roundabout"] = [this]() {
-        way_.set_roundabout(tag_.second == "true" ? true : false); ;
-      };
-
       tag_handlers_["tunnel"] = [this]() {
         way_.set_tunnel(tag_.second == "true" ? true : false); ;
       };
@@ -208,22 +90,6 @@ struct graph_parser {
         way_.set_pedestrian_bwd(tag_.second == "true" ? true : false);
       };
 
-      tag_handlers_["sidewalk"] = [this]() {
-        if (tag_.second == "both" || tag_.second == "yes" || tag_.second == "shared" ||
-            tag_.second == "raised") {
-          way_.set_sidewalk_left(true);
-          way_.set_sidewalk_right(true);
-          } else if (tag_.second == "left") {
-            way_.set_sidewalk_left(true);
-          } else if (tag_.second == "right") {
-            way_.set_sidewalk_right(true);
-          }
-      };
-
-      tag_handlers_["lit"] = [this]() {
-        way_.set_lit(tag_.second == "true" ? true : false); ;
-      };
-
       tag_handlers_["oneway"] = [this]() {
         way_.set_oneway(tag_.second == "true" ? true : false); ;
       };
@@ -232,6 +98,126 @@ struct graph_parser {
         way_.set_oneway_rev(tag_.second == "true" ? true : false); ;
       };
   }
+
+  struct Way {
+    uint64_t osmid;
+    std::vector<uint64_t> nodes;
+    Tags tags;
+    uint64_t changeset_id;
+  };
+
+static void transform_way(const osmium::Way& way,
+                          const Tags& empty_way_tags,
+                          std::vector<Way>& transformed) {
+  // --- 1. Collect node references ---
+  std::vector<uint64_t> nodes;
+  nodes.reserve(way.nodes().size());
+  for (const auto& node : way.nodes()) {
+    nodes.push_back(node.ref());
+  }
+
+  // Skip degenerate ways (<2 nodes)
+  if (nodes.size() < 2) {
+    return;
+  }
+
+  // --- 2. Skip closed polygons representing non-routable areas ---
+  if (nodes.front() == nodes.back()) {
+    for (const auto& tag : way.tags()) {
+      std::string_view key = tag.key();
+      if (key == "building" || key == "landuse" ||
+          key == "leisure" || key == "natural") {
+        return; // skip closed non-routable area
+      }
+    }
+  }
+
+  // --- 3. Load tag rules (once) ---
+  static TagRules pedestrian_rules =
+      TagRules::LoadFromJSON("/Users/shlokjain/CLionProjects/pollu/tag_rules.json");
+
+  bool walkable = false;
+  bool explicitly_unwalkable = false;
+  bool has_relevant_tag = false;
+
+  Tags tags; // transformed tags to retain
+
+  const osmium::TagList& map_tags = way.tags();
+  for (const auto& tag : map_tags) {
+    const char* key_c = tag.key();
+    const char* value_c = tag.value();
+    if (!key_c || !value_c) continue;
+
+    std::string key = to_lower(std::string(key_c));
+    std::string value = to_lower(std::string(value_c));
+
+    // --- A. Keep only relevant tags (defined in JSON) ---
+    if (pedestrian_rules.relevant_keys.count(key)) {
+      has_relevant_tag = true;
+      tags.emplace(key, value);
+    }
+
+    // --- B. Check for explicit unwalkable values (from JSON) ---
+    if (pedestrian_rules.unwalkable_values.count(value)) {
+      explicitly_unwalkable = true;
+      break;
+    }
+
+    // --- C. Access logic for pedestrian/foot tags ---
+    if (key == "foot" || key == "pedestrian") {
+      if (pedestrian_rules.unwalkable_values.count(value)) {
+        explicitly_unwalkable = true;
+        break;
+      }
+      if (value == "yes" || value == "allowed" || value == "public" ||
+          value == "permissive" || value == "designated" ||
+          value == "official" || value == "sidewalk" || value == "footway" ||
+          value == "passable") {
+        walkable = true;
+      }
+      else if (value == "private" || value == "permit" || value == "residents") {
+        explicitly_unwalkable = true;
+        break;
+      }
+    }
+
+    // --- D. Conditional restrictions ---
+    else if (key.find(":conditional") != std::string::npos) {
+      if (value.rfind("no", 0) == 0) {  // starts with "no"
+        explicitly_unwalkable = true;
+        break;
+      } else {
+        walkable = true;
+      }
+    }
+
+    // --- E. Highway-based defaults (from JSON) ---
+    else if (key == "highway") {
+      if (pedestrian_rules.walkable_highways.count(value)) {
+        walkable = true;
+      }
+    }
+  }
+
+  // --- 4. Filtering decisions ---
+  if (!has_relevant_tag) {
+    return; // no relevant tags → skip
+  }
+  if (explicitly_unwalkable || !walkable) {
+    return; // unsuitable for pedestrian routing
+  }
+  if (tags.empty()) {
+    return;
+  }
+
+  transformed.emplace_back(
+      Way{
+        static_cast<uint64_t>(way.id()),
+        std::move(nodes),
+        std::move(tags),
+        way.changeset()
+      });
+}
 
 
   using TagHandler = std::function<void()>;

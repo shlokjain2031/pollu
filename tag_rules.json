@@ -1,57 +1,542 @@
 {
-  "barrier": {
-    "bollard": true,
-    "bump_gate": true,
-    "cattle_grid": true,
-    "chain": true,
-    "cycle_barrier": true,
-    "entrance": true,
-    "full-height_turnstile": true,
-    "gate": true,
-    "hampshire_gate": true,
-    "height_restrictor": true,
-    "horse_stile": true,
-    "kissing_gate": true,
-    "lift_gate": true,
-    "motorcycle_barrier": true,
-    "rope": true,
-    "stile": true,
-    "sump_buster": true,
-    "swing_gate": true,
-    "toll_booth": true,
-    "turnstile": true
+  "data_format": 1,
+  "data_url": "",
+  "project": {
+    "name": "Pollu",
+    "description": "Open Source Tile-Based Routing Applications and APIs",
+    "project_url": "https://github.com/valhalla",
+    "doc_url": "",
+    "icon_url": "https://avatars0.githubusercontent.com/u/10232331",
+    "contact_name": "Greg Knisely",
+    "contact_email": "greg@hammerhead.io"
   },
-  "route": {
-    "foot": true,
-    "hiking": true,
-    "running": true
-  },
-  "restrictions" : {
-    "foot": true
-  },
-  "highway" : {
-    "living_street" : true,
-    "service" : true,
-    "pedestrian" : true,
-    "track" : true,
-    "bridleway" : true,
-    "steps" : true,
-    "corridor" : true,
-    "road" : true,
-    "path" : true,
-    "footway" : {
-      "sidewalk" : true,
-      "crossing" : true,
-      "traffic_island" : true
+  "tags": [
+    {
+      "key": "foot",
+      "value": "no",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "foot",
+      "value": "agricultural",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "foot",
+      "value": "discouraged",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "foot",
+      "value": "forestry",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "foot",
+      "value": "official",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "restricted",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "yes",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "private",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "permit",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "residents",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "permissive",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "use_sidepath",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "delivery",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "designated",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "destination",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "customers",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "public",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "crossing",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed.  For nodes: Allows access for all modes unless the mode override is set."
+    },
+    {
+      "key": "foot",
+      "value": "sidewalk",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "allowed",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "passable",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "foot",
+      "value": "footway",
+      "object_types": [
+        "node",
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "highway",
+      "value": "living_street",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "footway",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "pedestrian",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "corridor",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "elevator",
+      "object_types": [
+        "node",
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "steps",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "bridleway",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "path",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "highway",
+      "value": "residential",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "key": "oneway:foot",
+      "value": "-1",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides oneway flag.  Sets foot reverse flag to true.  A value of -1 will flip the direction of the oneway for pedestrians."
+    },
+    {
+      "key": "oneway:foot",
+      "value": "yes",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides oneway flag.  Sets foot reverse flag to true."
+    },
+    {
+      "key": "oneway:foot",
+      "value": "true",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides oneway flag.  Sets foot reverse flag to true."
+    },
+    {
+      "key": "oneway:foot",
+      "value": "1",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides oneway flag.  Sets foot reverse flag to true."
+    },
+    {
+      "key": "oneway:foot",
+      "value": "no",
+      "object_types": [
+        "way"
+      ],
+      "description": "If oneway = yes and oneway:foot = no then set the foot reverse flag to true."
+    },
+    {
+      "key": "pedestrian",
+      "value": "no",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "agricultural",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "discouraged",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing not allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "forestry",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "official",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "restricted",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "yes",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "private",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "permit",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "residents",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "permissive",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "use_sidepath",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "delivery",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "designated",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "destination",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "customers",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "public",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "crossing",
+      "object_types": [
+        "way",
+        "node"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed.  For nodes: Allows access for all modes unless the mode override is set."
+    },
+    {
+      "key": "pedestrian",
+      "value": "sidewalk",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "allowed",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "passable",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "key": "pedestrian",
+      "value": "footway",
+      "object_types": [
+        "way"
+      ],
+      "description": "Overrides access flags for pedestrian.  Pedestrian Routing allowed."
+    },
+    {
+      "description": "Adds conditional access to an edge with a time dependency in opening_hours format, see: https://wiki.openstreetmap.org/wiki/Key:opening_hours",
+      "value": "no @ (opening_hours format)",
+      "key": "pedestrian:conditional",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "description": "Adds conditional access to an edge with a time dependency in opening_hours format, see: https://wiki.openstreetmap.org/wiki/Key:opening_hours",
+      "value": "yes @ (opening_hours format)",
+      "key": "pedestrian:conditional",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "description": "Adds conditional access to an edge with a time dependency in opening_hours format, see: https://wiki.openstreetmap.org/wiki/Key:opening_hours",
+      "value": "private @ (opening_hours format)",
+      "key": "pedestrian:conditional",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "description": "Adds conditional access to an edge with a time dependency in opening_hours format, see: https://wiki.openstreetmap.org/wiki/Key:opening_hours",
+      "value": "delivery @ (opening_hours format)",
+      "key": "pedestrian:conditional",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "description": "Adds conditional access to an edge with a time dependency in opening_hours format, see: https://wiki.openstreetmap.org/wiki/Key:opening_hours",
+      "value": "designated @ (opening_hours format)",
+      "key": "pedestrian:conditional",
+      "object_types": [
+        "way"
+      ]
+    },
+    {
+      "description": "Adds conditional access to an edge with a time dependency in opening_hours format, see: https://wiki.openstreetmap.org/wiki/Key:opening_hours",
+      "value": "destination @ (opening_hours format)",
+      "key": "pedestrian:conditional",
+      "object_types": [
+        "way"
+      ]
     }
-  },
-  "sidewalk" : {
-    "both" : true,
-    "right" : true,
-    "left" : true,
-    "lane" : true,
-    "yes" : true,
-    "separate" : true
-  }
-
+  ]
 }

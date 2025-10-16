@@ -47,6 +47,8 @@ set(SOURCES
         src/nalanda/graph_constants.h
         src/takshashila/util.h
         src/takshashila/util.cpp
+        src/takshashila/tag_rules.h
+        src/takshashila/tag_rules.cpp
 )
 
 add_executable(pollu ${SOURCES})
