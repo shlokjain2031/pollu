@@ -33,6 +33,8 @@ namespace pollu {
       // ---- Coordinates (1e7 fixed-point) ----
       uint32_t lon_e7_;
       uint32_t lat_e7_;
+      uint32_t flat_loop_;
+      uint32_t intersection_;
 
       // ---- Constructors ----
       OSMNode() { memset(this, 0, sizeof(OSMNode)); }

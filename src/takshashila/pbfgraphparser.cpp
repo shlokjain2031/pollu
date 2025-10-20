@@ -103,121 +103,182 @@ struct graph_parser {
     uint64_t osmid;
     std::vector<uint64_t> nodes;
     Tags tags;
-    uint64_t changeset_id;
   };
 
-static void transform_way(const osmium::Way& way,
-                          const Tags& empty_way_tags,
-                          std::vector<Way>& transformed) {
-  // --- 1. Collect node references ---
-  std::vector<uint64_t> nodes;
-  nodes.reserve(way.nodes().size());
-  for (const auto& node : way.nodes()) {
-    nodes.push_back(node.ref());
-  }
+  static void transform_way(const osmium::Way& way,
+                            const Tags& empty_way_tags,
+                            std::vector<Way>& transformed) {
+    // --- 1. Collect node references ---
+    std::vector<uint64_t> nodes;
+    nodes.reserve(way.nodes().size());
+    for (const auto& node : way.nodes()) {
+      nodes.push_back(node.ref());
+    }
 
-  // Skip degenerate ways (<2 nodes)
-  if (nodes.size() < 2) {
-    return;
-  }
+    // Skip degenerate ways (<2 nodes)
+    if (nodes.size() < 2) {
+      return;
+    }
 
-  // --- 2. Skip closed polygons representing non-routable areas ---
-  if (nodes.front() == nodes.back()) {
-    for (const auto& tag : way.tags()) {
-      std::string_view key = tag.key();
-      if (key == "building" || key == "landuse" ||
-          key == "leisure" || key == "natural") {
-        return; // skip closed non-routable area
+    // --- 2. Skip closed polygons representing non-routable areas ---
+    if (nodes.front() == nodes.back()) {
+      for (const auto& tag : way.tags()) {
+        std::string_view key = tag.key();
+        if (key == "building" || key == "landuse" ||
+            key == "leisure" || key == "natural") {
+          return; // skip closed non-routable area
+        }
       }
     }
-  }
 
-  // --- 3. Load tag rules (once) ---
-  static TagRules pedestrian_rules =
-      TagRules::LoadFromJSON("/Users/shlokjain/CLionProjects/pollu/tag_rules.json");
+    // --- 3. Load tag rules (once) ---
+    static TagRules pedestrian_rules =
+        TagRules::LoadFromJSON("/Users/shlokjain/CLionProjects/pollu/tag_rules.json");
 
-  bool walkable = false;
-  bool explicitly_unwalkable = false;
-  bool has_relevant_tag = false;
+    bool walkable = false;
+    bool explicitly_unwalkable = false;
+    bool has_relevant_tag = false;
 
-  Tags tags; // transformed tags to retain
+    Tags tags; // transformed tags to retain
 
-  const osmium::TagList& map_tags = way.tags();
-  for (const auto& tag : map_tags) {
-    const char* key_c = tag.key();
-    const char* value_c = tag.value();
-    if (!key_c || !value_c) continue;
+    const osmium::TagList& map_tags = way.tags();
+    for (const auto& tag : map_tags) {
+      const char* key_c = tag.key();
+      const char* value_c = tag.value();
+      if (!key_c || !value_c) continue;
 
-    std::string key = to_lower(std::string(key_c));
-    std::string value = to_lower(std::string(value_c));
+      std::string key = to_lower(std::string(key_c));
+      std::string value = to_lower(std::string(value_c));
 
-    // --- A. Keep only relevant tags (defined in JSON) ---
-    if (pedestrian_rules.relevant_keys.count(key)) {
-      has_relevant_tag = true;
-      tags.emplace(key, value);
-    }
+      // --- A. Keep only relevant tags (defined in JSON) ---
+      if (pedestrian_rules.relevant_keys.count(key)) {
+        has_relevant_tag = true;
+        tags.emplace(key, value);
+      }
 
-    // --- B. Check for explicit unwalkable values (from JSON) ---
-    if (pedestrian_rules.unwalkable_values.count(value)) {
-      explicitly_unwalkable = true;
-      break;
-    }
-
-    // --- C. Access logic for pedestrian/foot tags ---
-    if (key == "foot" || key == "pedestrian") {
+      // --- B. Check for explicit unwalkable values (from JSON) ---
       if (pedestrian_rules.unwalkable_values.count(value)) {
         explicitly_unwalkable = true;
         break;
       }
-      if (value == "yes" || value == "allowed" || value == "public" ||
-          value == "permissive" || value == "designated" ||
-          value == "official" || value == "sidewalk" || value == "footway" ||
-          value == "passable") {
-        walkable = true;
+
+      // --- C. Access logic for pedestrian/foot tags ---
+      if (key == "foot" || key == "pedestrian") {
+        if (pedestrian_rules.unwalkable_values.count(value)) {
+          explicitly_unwalkable = true;
+          break;
+        }
+        if (value == "yes" || value == "allowed" || value == "public" ||
+            value == "permissive" || value == "designated" ||
+            value == "official" || value == "sidewalk" || value == "footway" ||
+            value == "passable") {
+          walkable = true;
+        }
+        else if (value == "private" || value == "permit" || value == "residents") {
+          explicitly_unwalkable = true;
+          break;
+        }
       }
-      else if (value == "private" || value == "permit" || value == "residents") {
-        explicitly_unwalkable = true;
-        break;
+
+      // --- D. Conditional restrictions ---
+      else if (key.find(":conditional") != std::string::npos) {
+        if (value.rfind("no", 0) == 0) {  // starts with "no"
+          explicitly_unwalkable = true;
+          break;
+        } else {
+          walkable = true;
+        }
+      }
+
+      // --- E. Highway-based defaults (from JSON) ---
+      else if (key == "highway") {
+        if (pedestrian_rules.walkable_highways.count(value)) {
+          walkable = true;
+        }
       }
     }
 
-    // --- D. Conditional restrictions ---
-    else if (key.find(":conditional") != std::string::npos) {
-      if (value.rfind("no", 0) == 0) {  // starts with "no"
-        explicitly_unwalkable = true;
-        break;
-      } else {
-        walkable = true;
-      }
+    // --- 4. Filtering decisions ---
+    if (!has_relevant_tag) {
+      return; // no relevant tags → skip
+    }
+    if (explicitly_unwalkable || !walkable) {
+      return; // unsuitable for pedestrian routing
+    }
+    if (tags.empty()) {
+      return;
     }
 
-    // --- E. Highway-based defaults (from JSON) ---
-    else if (key == "highway") {
-      if (pedestrian_rules.walkable_highways.count(value)) {
-        walkable = true;
+    transformed.emplace_back(
+        Way{
+          static_cast<uint64_t>(way.id()),
+          std::move(nodes),
+          std::move(tags),
+        });
+  }
+
+
+
+  void way(const Way& way) {
+    osmid_ = way.osmid;
+
+    // This means that the ways are unsorted and we don't want that in our process
+    if (osmid_ < last_way_) {
+      throw std::runtime_error("Detected unsorted input data");
+    }
+    last_way_ = osmid_;
+
+    const auto& nodes = way.nodes;
+    const auto& tags = way.tags;
+
+    // Add the refs to the reference list and mark the nodes that care about when processing nodes
+    loop_nodes_.clear();
+    auto way_node_index = way_nodes_->size();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+      const auto& node = nodes[i];
+
+      // Check whether the node is on a part of a way doubling back on itself
+      pollu::nalanda::OSMNode osm_node{node};
+      auto inserted = loop_nodes_.emplace(node, i);
+      bool flattening = inserted.first->second > 0 && i < nodes.size() - 1 &&
+                        nodes[i + 1] == nodes[inserted.first->second - 1];
+      bool unflattening = i > 0 && inserted.first->second < nodes.size() - 1 &&
+                          nodes[i - 1] == nodes[inserted.first->second + 1];
+      osm_node.flat_loop_ = flattening || unflattening;
+      osm_node.intersection_ = i == 0 || i == nodes.size() - 1;
+
+      // Keep the node
+      way_nodes_->push_back(
+          {osm_node, static_cast<uint32_t>(ways_->size()), static_cast<uint32_t>(i)});
+
+      // If this way is a loop (node occurs twice) we can make our lives way easier if we simply
+      // split it up into multiple edges in the graph. If a problem is hard, avoid the problem!
+      if (!inserted.second) {
+        // We'll make an intersection in the middle of the loop
+        auto way_node_itr = (*way_nodes_)[way_node_index + (i + inserted.first->second) / 2];
+        auto way_node = *way_node_itr;
+        way_node.node.intersection_ = true;
+        way_node_itr = way_node;
+        // Update the index in case the node is used again (a future loop)
+        inserted.first->second = i;
       }
     }
-  }
+    ++osmdata_.osm_way_count;
+    osmdata_.osm_way_node_count += nodes.size();
 
-  // --- 4. Filtering decisions ---
-  if (!has_relevant_tag) {
-    return; // no relevant tags → skip
-  }
-  if (explicitly_unwalkable || !walkable) {
-    return; // unsuitable for pedestrian routing
-  }
-  if (tags.empty()) {
-    return;
-  }
+    average_speed_ = 0.0f, has_surface_ = true;
 
-  transformed.emplace_back(
-      Way{
-        static_cast<uint64_t>(way.id()),
-        std::move(nodes),
-        std::move(tags),
-        way.changeset()
-      });
-}
+    // Process tags
+    way_ = pollu::nalanda::OSMWay{osmid_};
+    way_.set_node_count(nodes.size());
+
+    const auto& surface_exists = tags.find("surface");
+    has_surface_tag_ = (surface_exists != tags.end());
+    if (!has_surface_tag_) {
+      has_surface_ = false;
+    }
+
+  }
 
 
   using TagHandler = std::function<void()>;
