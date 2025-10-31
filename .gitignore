@@ -1,0 +1,24 @@
+# Python virtual env
+.venv/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# pytest cache
+.pytest_cache/
+
+# data and large artifacts
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# environment files
+.env
+
+# VSCode
+.vscode/

@@ -1,0 +1,22 @@
+[project]
+name = "pollu"
+version = "0.1.0"
+description = "Pollu routing and pollution estimation system"
+authors = [{ name="Shubham Jain" }]
+dependencies = [
+  "numpy",
+  "pandas",
+  "geopandas",
+  "rasterio",
+  "rioxarray",
+  "scikit-learn",
+  "mgwr",
+  "fastapi",
+  "uvicorn[standard]",
+  "sqlalchemy",
+  "duckdb"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
