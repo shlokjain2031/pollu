@@ -13,6 +13,11 @@ __pycache__/
 
 # data and large artifacts
 data/
+cache/
+
+# Landsat/cache artifacts produced by processing - keep out of VCS
+# (cached mosaics, tiles, and per-date parquet outputs)
+cache/**
 
 # Jupyter
 .ipynb_checkpoints/
