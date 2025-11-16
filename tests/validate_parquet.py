@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 import argparse
 import traceback
+from typing import Iterable, Sequence
 
 try:
     import geopandas as gpd
@@ -22,6 +23,9 @@ except Exception:  # pragma: no cover - optional dependency
 
 import pandas as pd
 import numpy as np
+
+S5P_DEFAULT_PATH = Path("cache/landsat_2025-03-25.parquet")
+S5P_REQUIRED_COLUMNS = ("s5p_no2", "s5p_no2_is_nodata", "s5p_no2_meta")
 
 try:
     from tabulate import tabulate  # optional nice table formatter
@@ -43,18 +47,58 @@ def load_parquet(path: Path):
     return pd.read_parquet(path)
 
 
+def has_columns(path: Path, columns: Sequence[str]) -> bool:
+    """Return True if every column exists in the parquet schema."""
+    df = pd.read_parquet(path, columns=list(columns))
+    return all(col in df.columns for col in columns)
+
+
+def report_s5p_status(target_path: Path = S5P_DEFAULT_PATH) -> None:
+    if not target_path.exists():
+        print(f"S5P check: {target_path} is missing")
+        return
+    try:
+        present = has_columns(target_path, S5P_REQUIRED_COLUMNS)
+    except Exception as exc:
+        print(f"S5P check: failed to inspect {target_path}: {exc}")
+        return
+    if present:
+        print(
+            f"S5P check: {target_path.name} contains columns {', '.join(S5P_REQUIRED_COLUMNS)}"
+        )
+    else:
+        print(
+            f"S5P check: {target_path.name} is missing one of {', '.join(S5P_REQUIRED_COLUMNS)}"
+        )
+
+
 def main():
     p = argparse.ArgumentParser(description="Validate a landsat parquet file")
     p.add_argument("path", nargs="?", default="/tmp/landsat8.parquet")
     p.add_argument(
         "-n", "--nrows", type=int, default=3, help="Number of random rows to print"
     )
+    p.add_argument(
+        "--s5p-path",
+        type=Path,
+        default=S5P_DEFAULT_PATH,
+        help="Path to landsat parquet that should include S5P NO2 columns",
+    )
+    p.add_argument(
+        "--no-s5p-check",
+        action="store_true",
+        help="Disable the S5P NO2 column presence check",
+    )
+
     args = p.parse_args()
 
     path = Path(args.path)
     if not path.exists():
         print(f"File not found: {path}")
         sys.exit(2)
+
+    if not args.no_s5p_check:
+        report_s5p_status(args.s5p_path)
 
     try:
         obj = load_parquet(path)

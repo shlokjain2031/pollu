@@ -2,7 +2,8 @@
 
 Reads the canonical `landsat8_image_dates.txt`, fetches COPERNICUS/
 S5P/OFFL/L3_NO2 for each date, reprojects to EPSG:32643 at 30 m, samples
-on the same GeoParquet grid, and writes outputs under cache/copernicus_DATE/.
+on the same GeoParquet grid, and updates cache/landsat_DATE.parquet with
+a set of S5P-derived columns.
 Missing days fall back to linear interpolation between the nearest
 available S5P observations.
 """
@@ -14,6 +15,7 @@ import datetime as dt
 import json
 import logging
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 from zipfile import ZipFile
@@ -22,6 +24,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import requests
+import pyarrow.parquet as pq
 from shapely.geometry import Point
 
 from patliputra.backends.earthengine import EarthEngineClient
@@ -37,11 +40,20 @@ DEFAULT_DATES = Path("patliputra/landsat8_image_dates.txt")
 DEFAULT_CACHE_ROOT = Path("cache")
 DEFAULT_BBOX = (72.7763, 18.8939, 72.9797, 19.2701)
 DEFAULT_ESTIMATE_WINDOW = 7
-PARQUET_TEMPLATE = "copernicus_{date}.parquet"
+LANDSAT_TEMPLATE = "landsat_{date}.parquet"
 TIF_TEMPLATE = "copernicus_{date}.tif"
+S5P_VALUE_COLUMN = "s5p_no2"
+S5P_FLAG_COLUMN = "s5p_no2_is_nodata"
+S5P_META_COLUMN = "s5p_no2_meta"
 
 logger = logging.getLogger("s5p_no2_signals")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+@dataclass
+class SampledSeries:
+    values: pd.Series
+    nodata: pd.Series
 
 
 def _init_client(project_id: Optional[str]) -> EarthEngineClient:
@@ -157,12 +169,22 @@ def _neighbor_dates(
     return prev_date, next_date
 
 
-def _cache_layout(cache_root: Path, date_str: str) -> Tuple[Path, Path, Path]:
+def _cache_layout(cache_root: Path, date_str: str) -> Tuple[Path, Path]:
     base = Path(cache_root) / f"copernicus_{date_str}"
     base.mkdir(parents=True, exist_ok=True)
     tif_path = base / TIF_TEMPLATE.format(date=date_str)
-    parquet_path = base / PARQUET_TEMPLATE.format(date=date_str)
-    return base, tif_path, parquet_path
+    return base, tif_path
+
+
+def _landsat_parquet_path(cache_root: Path, date_str: str) -> Path:
+    return Path(cache_root) / LANDSAT_TEMPLATE.format(date=date_str)
+
+
+def _landsat_has_s5p_column(landsat_parquet: Path) -> bool:
+    if not landsat_parquet.exists():
+        return False
+    schema = pq.ParquetFile(landsat_parquet).schema
+    return S5P_VALUE_COLUMN in schema.names
 
 
 def _grid_template(grid_parquet: Path) -> Tuple[pd.DataFrame, List[Point]]:
@@ -189,31 +211,46 @@ def _serialize_meta(extra: Optional[dict] = None) -> str:
     return json.dumps(meta)
 
 
-def _write_series(
-    series: pd.Series,
-    grid_parquet: Path,
-    out_parquet: Path,
-    extra_meta: Optional[dict] = None,
+def _series_from_df(df: pd.DataFrame, date_str: str) -> SampledSeries:
+    if "grid_id" not in df.columns:
+        raise KeyError("Sampled DataFrame is missing 'grid_id'")
+    if "toa_b2" not in df.columns and "toa_b1" in df.columns:
+        df = df.rename(columns={"toa_b1": "toa_b2"})
+    values = df["toa_b2"].astype("float64").copy()
+    grid_index = df["grid_id"].to_numpy()
+    values.index = grid_index
+    values.name = date_str
+    nodata = df["is_nodata"].astype("bool").copy()
+    nodata.index = grid_index
+    nodata.name = f"{date_str}_nodata"
+    return SampledSeries(values=values, nodata=nodata)
+
+
+def _empty_sample(grid_parquet: Path, date_str: str) -> SampledSeries:
+    base, _ = _grid_template(grid_parquet)
+    values = pd.Series(np.nan, index=base.index, name=date_str, dtype="float64")
+    nodata = pd.Series(True, index=base.index, name=f"{date_str}_nodata", dtype="bool")
+    return SampledSeries(values=values, nodata=nodata)
+
+
+def _update_landsat_parquet(
+    landsat_parquet: Path, sample: SampledSeries, extra_meta: Optional[dict] = None
 ) -> Path:
-    base, geom = _grid_template(grid_parquet)
-    aligned = series.reindex(base.index).to_numpy(dtype="float64")
-    nodata = ~np.isfinite(aligned)
-    df = pd.DataFrame(
-        {
-            "grid_id": base["grid_id"].values,
-            "x": base["x"].values,
-            "y": base["y"].values,
-            "geometry": geom,
-            "toa_b2": aligned,
-            "is_nodata": nodata,
-            "raster_meta": _serialize_meta(extra_meta),
-        }
-    )
-    gdf_out = gpd.GeoDataFrame(
-        df.drop(columns=["geometry"]), geometry=df["geometry"], crs=TARGET_CRS
-    )
-    gdf_out.to_parquet(out_parquet, engine="pyarrow", index=False)
-    return out_parquet
+    if not landsat_parquet.exists():
+        raise FileNotFoundError(f"Landsat parquet not found: {landsat_parquet}")
+    gdf = gpd.read_parquet(landsat_parquet)
+    if "grid_id" not in gdf.columns:
+        raise KeyError("landsat parquet missing 'grid_id'")
+    gdf = gdf.set_index("grid_id", drop=False)
+    aligned_values = sample.values.reindex(gdf.index)
+    aligned_nodata = sample.nodata.reindex(gdf.index).fillna(True)
+    gdf[S5P_VALUE_COLUMN] = aligned_values.to_numpy(dtype="float64")
+    gdf[S5P_FLAG_COLUMN] = aligned_nodata.astype("bool").to_numpy(dtype="bool")
+    gdf[S5P_META_COLUMN] = _serialize_meta(extra_meta)
+    gdf.reset_index(drop=True, inplace=True)
+    gdf.to_parquet(landsat_parquet, engine="pyarrow", index=False)
+    logger.info("Updated %s with S5P NO2 columns", landsat_parquet)
+    return landsat_parquet
 
 
 def _sample_series(
@@ -222,8 +259,8 @@ def _sample_series(
     grid_parquet: Path,
     cache_root: Path,
     bbox: Tuple[float, float, float, float],
-) -> pd.Series:
-    tile_dir, tif_path, _ = _cache_layout(cache_root, date_str)
+) -> SampledSeries:
+    tile_dir, tif_path = _cache_layout(cache_root, date_str)
     if not tif_path.exists():
         image = _image_for_date(client, date_str)
         if image is None:
@@ -239,12 +276,7 @@ def _sample_series(
         use_vrt=True,
         parallel=False,
     )
-    series = df.get("toa_b2")
-    if series is None and "toa_b1" in df.columns:
-        series = df["toa_b1"]
-    series = series.astype("float64")
-    series.name = date_str
-    return series
+    return _series_from_df(df, date_str)
 
 
 def _interpolate_series(
@@ -284,16 +316,24 @@ def process_date(
     cache_root = Path(cache_root)
     bbox = bbox or DEFAULT_BBOX
 
-    cache_dir, tif_path, parquet_path = _cache_layout(cache_root, date_str)
-    if parquet_path.exists() and not force:
-        logger.info("Parquet already exists for %s", date_str)
-        return parquet_path
+    landsat_parquet = _landsat_parquet_path(cache_root, date_str)
+    if not landsat_parquet.exists():
+        raise FileNotFoundError(
+            f"Landsat parquet for {date_str} not found: {landsat_parquet}"
+        )
+    if not force and _landsat_has_s5p_column(landsat_parquet):
+        logger.info("S5P NO2 already stored for %s", date_str)
+        return landsat_parquet
 
+    cache_dir, tif_path = _cache_layout(cache_root, date_str)
     client = _init_client(ee_project)
     image = _image_for_date(client, date_str)
 
     if image is not None:
-        _download_image(client, image, tif_path, bbox)
+        if force and tif_path.exists():
+            tif_path.unlink()
+        if not tif_path.exists():
+            _download_image(client, image, tif_path, bbox)
         df = raster_to_grid_df(
             tif_path,
             grid_parquet,
@@ -304,38 +344,45 @@ def process_date(
             use_vrt=True,
             parallel=False,
         )
-        if "toa_b2" not in df.columns and "toa_b1" in df.columns:
-            df = df.rename(columns={"toa_b1": "toa_b2"})
-        gdf_out = gpd.GeoDataFrame(
-            df.drop(columns=["geometry"]), geometry=df["geometry"], crs=TARGET_CRS
-        )
-        gdf_out.to_parquet(parquet_path, engine="pyarrow", index=False)
-        logger.info("Wrote NO2 parquet: %s", parquet_path)
-        return parquet_path
+        sample = _series_from_df(df, date_str)
+        return _update_landsat_parquet(landsat_parquet, sample, {"method": "observed"})
 
     prev_date, next_date = _neighbor_dates(client, date_str, estimate_window_days)
     if prev_date is None and next_date is None:
-        template, _ = _grid_template(grid_parquet)
-        blank = pd.Series(np.nan, index=template.index, name=date_str, dtype="float64")
-        return _write_series(
-            blank, grid_parquet, parquet_path, {"estimated_from": None}
+        sample = _empty_sample(grid_parquet, date_str)
+        return _update_landsat_parquet(
+            landsat_parquet, sample, {"estimated_from": None, "method": "blank"}
         )
 
-    prev_series = (
+    prev_sample = (
         _sample_series(client, prev_date, grid_parquet, cache_root, bbox)
         if prev_date
         else None
     )
-    next_series = (
+    next_sample = (
         _sample_series(client, next_date, grid_parquet, cache_root, bbox)
         if next_date
         else None
     )
-    estimate = _interpolate_series(
-        prev_series, next_series, prev_date, next_date, date_str
+    estimate_values = _interpolate_series(
+        prev_sample.values if prev_sample else None,
+        next_sample.values if next_sample else None,
+        prev_date,
+        next_date,
+        date_str,
     )
-    meta = {"estimated_from": {"prev": prev_date, "next": next_date}}
-    return _write_series(estimate, grid_parquet, parquet_path, meta)
+    estimate_nodata = pd.Series(
+        ~np.isfinite(estimate_values.to_numpy()),
+        index=estimate_values.index,
+        dtype="bool",
+        name=f"{date_str}_nodata",
+    )
+    meta = {
+        "estimated_from": {"prev": prev_date, "next": next_date},
+        "method": "interpolated",
+    }
+    estimate_sample = SampledSeries(values=estimate_values, nodata=estimate_nodata)
+    return _update_landsat_parquet(landsat_parquet, estimate_sample, meta)
 
 
 def process_dates(
@@ -385,7 +432,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--cache-root",
         type=Path,
         default=DEFAULT_CACHE_ROOT,
-        help="Cache root to write copernicus_YYYY-MM-DD folders",
+        help="Cache root containing landsat_YYYY-MM-DD.parquet files",
     )
     parser.add_argument(
         "--ee-project",
