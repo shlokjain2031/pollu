@@ -20,7 +20,9 @@ def iter_cache_dirs(cache_root: Path) -> List[Path]:
     if not cache_root.exists():
         raise FileNotFoundError(f"Cache root not found: {cache_root}")
     for child in sorted(cache_root.iterdir()):
-        if child.is_dir() and (child.name.startswith("copernicus_") or child.name.startswith("copetnicus_")):
+        if child.is_dir() and (
+            child.name.startswith("copernicus_") or child.name.startswith("copetnicus_")
+        ):
             dirs.append(child)
     if not dirs:
         raise RuntimeError(f"No copernicus directories found in {cache_root}")
@@ -48,15 +50,26 @@ def validate_parquet(parquet_path: Path, required_columns: Sequence[str]) -> Non
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate cache/copernicus_* GeoParquet outputs")
-    parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT, help="Root directory that contains copernicus_* folders")
+    parser = argparse.ArgumentParser(
+        description="Validate cache/copernicus_* GeoParquet outputs"
+    )
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        default=DEFAULT_CACHE_ROOT,
+        help="Root directory that contains copernicus_* folders",
+    )
     parser.add_argument(
         "--require-columns",
         nargs="*",
         default=list(DEFAULT_REQUIRED_COLUMNS),
         help="List of column names that must exist in every parquet",
     )
-    parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failure instead of continuing")
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop at the first failure instead of continuing",
+    )
     return parser.parse_args(argv)
 
 
@@ -72,14 +85,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         total += 1
         try:
             validate_parquet(parquet_path, args.require_columns)
-        except Exception as exc:  # noqa: BLE001 - want to log any failure and keep going
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - want to log any failure and keep going
             failures.append(f"{parquet_path}: {exc}")
             LOGGER.error("FAILED %s: %s", parquet_path, exc)
             if args.fail_fast:
                 break
 
     if failures:
-        LOGGER.error("Validation finished with %d failure(s) out of %d files", len(failures), total)
+        LOGGER.error(
+            "Validation finished with %d failure(s) out of %d files",
+            len(failures),
+            total,
+        )
         for failure in failures:
             LOGGER.error("  %s", failure)
         return 1
