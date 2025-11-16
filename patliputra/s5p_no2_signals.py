@@ -274,7 +274,7 @@ def _sample_series(
         target_crs=TARGET_CRS,
         target_res=TARGET_RES,
         use_vrt=True,
-        parallel=False,
+        parallel=True,
     )
     return _series_from_df(df, date_str)
 
@@ -342,7 +342,7 @@ def process_date(
             target_crs=TARGET_CRS,
             target_res=TARGET_RES,
             use_vrt=True,
-            parallel=False,
+            parallel=True,
         )
         sample = _series_from_df(df, date_str)
         return _update_landsat_parquet(landsat_parquet, sample, {"method": "observed"})
