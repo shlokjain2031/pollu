@@ -18,8 +18,8 @@ def main():
     collection = (
         ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA")
         .filterBounds(bbox)
-        .filterDate("2019-01-01", "2025-11-01")
-        .filter(ee.Filter.lt("CLOUD_COVER", 0.5))  # less than 10% cloud cover
+        .filterDate("2018-01-01", "2025-11-01")
+        .filter(ee.Filter.lt("CLOUD_COVER", 15))
         .sort("system:time_start")
     )
 
@@ -31,16 +31,17 @@ def main():
         img = ee.Image(image_list.get(i))
         date = ee.Date(img.get("system:time_start")).format("YYYY-MM-dd").getInfo()
         all_dates.append(date)
+    unique_dates = sorted(set(all_dates))
 
-    output_dir = Path("/Users/shlokjain/pollu/patliputra/signals")
+    output_dir = Path("/Users/shlokjain/pollu/patliputra")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / "landsat8_image_dates.txt"
 
     with open(output_file, "w") as f:
-        for d in all_dates:
+        for d in unique_dates:
             f.write(d + "\n")
 
-    print(f"Saved {len(all_dates)} image dates to {output_file}")
+    print(f"Saved {len(unique_dates)} image dates to {output_file}")
 
 
 if __name__ == "__main__":
