@@ -38,7 +38,7 @@ DEFAULT_CACHE_ROOT = Path("cache")
 DEFAULT_BBOX = (72.7763, 18.8939, 72.9797, 19.2701)
 DEFAULT_ESTIMATE_WINDOW = 7
 TIF_TEMPLATE = "sentinel2_{date}.tif"
-LANDSAT_TEMPLATE = "landsat_{date}.parquet"
+LANDSAT_TEMPLATE = "landsat_processed/landsat8_{date}_signals.parquet"
 EVI_VALUE_COLUMN = "sentinel2_evi"
 EVI_FLAG_COLUMN = "sentinel2_evi_is_nodata"
 EVI_META_COLUMN = "sentinel2_evi_meta"
@@ -386,13 +386,52 @@ def process_date(
     if monthly_s2_dates is not None:
         key = (target_dt.year, target_dt.month)
         source_dt = monthly_s2_dates.get(key)
+
+        # Fallback: search backward month-by-month until we find a mapping
         if source_dt is None:
             logger.warning(
-                "No Sentinel-2 monthly date mapped for %s (key=%s)", date_str, key
+                "No Sentinel-2 monthly date mapped for %s (key=%s), searching backward...",
+                date_str,
+                key,
             )
-        else:
+            current_date = target_dt
+            max_lookback_months = 12
+
+            for _ in range(max_lookback_months):
+                # Go back one month
+                if current_date.month == 1:
+                    current_date = current_date.replace(
+                        year=current_date.year - 1, month=12
+                    )
+                else:
+                    current_date = current_date.replace(month=current_date.month - 1)
+
+                fallback_key = (current_date.year, current_date.month)
+                source_dt = monthly_s2_dates.get(fallback_key)
+
+                if source_dt is not None:
+                    logger.info(
+                        "Found fallback for %s: using %s-%02d data (%s)",
+                        date_str,
+                        current_date.year,
+                        current_date.month,
+                        source_dt.isoformat(),
+                    )
+                    break
+
+            if source_dt is None:
+                logger.warning(
+                    "No fallback found for %s after %d months lookback",
+                    date_str,
+                    max_lookback_months,
+                )
+
+        if source_dt is not None:
             source_date_str = source_dt.isoformat()
-            logger.info("Mapped Landsat %s to Sentinel-2 %s", date_str, source_date_str)
+            if source_date_str != date_str:
+                logger.info(
+                    "Mapped Landsat %s to Sentinel-2 %s", date_str, source_date_str
+                )
 
     client = _init_client(ee_project)
     cache_dir, tif_path = _cache_layout(cache_root, source_date_str)

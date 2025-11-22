@@ -2,7 +2,7 @@
 name = "pollu"
 version = "0.1.0"
 description = "Pollu routing and pollution estimation system"
-authors = [{ name="Shubham Jain" }]
+authors = [{ name="Shlok Jain" }]
 dependencies = [
   "numpy",
   "pandas",
@@ -20,3 +20,6 @@ dependencies = [
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages]
+find = {include = ["patliputra", "patliputra.*"]}
