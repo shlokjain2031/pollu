@@ -28,7 +28,7 @@ import pyarrow.parquet as pq
 from shapely.geometry import Point
 
 from patliputra.backends.earthengine import EarthEngineClient
-from patliputra.utils.landsat8_signals import raster_to_grid_df, _ensure_cache_dir
+from patliputra.utils.raster_sampling import raster_to_grid_df, _ensure_cache_dir
 
 
 COLLECTION_ID = "COPERNICUS/S5P/OFFL/L3_NO2"

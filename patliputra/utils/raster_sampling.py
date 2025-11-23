@@ -1,9 +1,15 @@
 """
-landsat8_signals.py
+raster_sampling.py
 
-Utility helpers for sampling a raster to the 30 m grid. This module mirrors the
-primary `patliputra.landsat8_signals` module but exposes a smaller, utility-focused
-surface for quick calls. It contains the same core helpers used by the main code.
+Generic raster sampling utilities for any raster dataset.
+
+This module provides reusable functions for:
+- Reprojecting and resampling rasters to target CRS/resolution
+- Sampling raster values at point locations from grid
+- Handling nodata, scale/offset corrections
+- VRT-based on-the-fly reprojection or cached GeoTIFF approach
+
+Used by multiple signal extraction modules (Landsat, Sentinel, SVF, etc.).
 """
 
 from __future__ import annotations
@@ -30,13 +36,13 @@ from rasterio.windows import from_bounds
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Configure simple logger
-logger = logging.getLogger("landsat8_signals")
+logger = logging.getLogger("raster_sampling")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def _ensure_cache_dir(cache_dir: Optional[Union[str, Path]]) -> Path:
     if cache_dir is None:
-        tmp = Path(tempfile.mkdtemp(prefix="landsat8_signals_cache_"))
+        tmp = Path(tempfile.mkdtemp(prefix="raster_sampling_cache_"))
         logger.debug("No cache_dir provided; using temporary: %s", tmp)
         return tmp
     p = Path(cache_dir)

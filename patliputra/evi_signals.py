@@ -25,7 +25,7 @@ import pyarrow.parquet as pq
 import requests
 
 from patliputra.backends.earthengine import EarthEngineClient
-from patliputra.utils.landsat8_signals import raster_to_grid_df
+from patliputra.utils.raster_sampling import raster_to_grid_df
 
 
 COLLECTION_ID = "COPERNICUS/S2_SR_HARMONIZED"
