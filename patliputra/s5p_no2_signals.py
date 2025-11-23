@@ -27,7 +27,7 @@ import requests
 import pyarrow.parquet as pq
 from shapely.geometry import Point
 
-from patliputra.backends.earthengine import EarthEngineClient
+from patliputra.utils.earthengine import EarthEngineClient
 from patliputra.utils.raster_sampling import raster_to_grid_df, _ensure_cache_dir
 
 

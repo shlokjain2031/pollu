@@ -107,28 +107,18 @@ class _ReprojectedRasterContext:
         self._src = rasterio.open(self.dataset_path)
         if self._src.crs is None:
             raise RuntimeError(f"Source raster has no CRS: {self.dataset_path}")
-        if self.clip_bounds is not None:
-            left, bottom, right, top = self.clip_bounds
-            transform, width, height = calculate_default_transform(
-                self._src.crs,
-                self.target_crs,
-                self._src.width,
-                self._src.height,
-                left,
-                bottom,
-                right,
-                top,
-                resolution=self.target_res,
-            )
-        else:
-            transform, width, height = calculate_default_transform(
-                self._src.crs,
-                self.target_crs,
-                self._src.width,
-                self._src.height,
-                *self._src.bounds,
-                resolution=self.target_res,
-            )
+        
+        # Calculate transform using full source bounds (not clip_bounds)
+        # clip_bounds are in target CRS and can't be used directly here
+        transform, width, height = calculate_default_transform(
+            self._src.crs,
+            self.target_crs,
+            self._src.width,
+            self._src.height,
+            *self._src.bounds,
+            resolution=self.target_res,
+        )
+        
         width = max(1, int(math.ceil(width)))
         height = max(1, int(math.ceil(height)))
         if self.use_vrt:

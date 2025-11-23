@@ -345,6 +345,9 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Track failed dates
+    failed_dates = []
+
     # Process each date
     for idx, date_str in enumerate(dates, start=1):
         print(f"\n[{idx}/{len(dates)}] Processing {date_str}")
@@ -439,10 +442,29 @@ def main():
 
         except Exception as e:
             print(f"  ✗ Failed to process {date_str}: {e}")
+            failed_dates.append((date_str, str(e)))
             continue
 
-    print(f"\n✓ Completed processing {len(dates)} dates")
+    # Print summary
+    print(f"\n{'='*60}")
+    print(f"✓ Completed processing {len(dates)} dates")
+    print(f"  - Successful: {len(dates) - len(failed_dates)}")
+    print(f"  - Failed: {len(failed_dates)}")
     print(f"Output directory: {args.output_dir}")
+    
+    if failed_dates:
+        print(f"\n⚠ Failed dates:")
+        for date_str, error in failed_dates:
+            print(f"  - {date_str}: {error[:80]}..." if len(error) > 80 else f"  - {date_str}: {error}")
+        
+        # Write failed dates to file
+        failed_log = args.output_dir / "failed_dates.txt"
+        with open(failed_log, "w") as f:
+            f.write("# Dates that failed processing\n")
+            f.write("# Format: YYYY-MM-DD | Error message\n\n")
+            for date_str, error in failed_dates:
+                f.write(f"{date_str} | {error}\n")
+        print(f"\nFailed dates logged to: {failed_log}")
 
 
 if __name__ == "__main__":
