@@ -43,8 +43,8 @@ def create_grid(
     grid_gdf = gpd.GeoDataFrame({"x": xx, "y": yy}, geometry=pts, crs=target_crs)
 
     # Clip to boundary union
-    city_union = city_proj.union_all
-    mask = [pt.within(city_union) for pt in grid_gdf.geometry]
+    city_union = city_proj.union_all()
+    mask = grid_gdf.geometry.within(city_union)
     grid_gdf = grid_gdf[mask].reset_index(drop=True)
     grid_gdf["grid_id"] = grid_gdf.index.astype(int)
 
