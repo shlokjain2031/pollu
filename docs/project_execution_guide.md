@@ -67,8 +67,6 @@ The following packages are required (from `pyproject.toml`):
 
 ```powershell
 # Navigate to project directory
-cd "c:\Users\user\Documents\New folder\pollu"
-
 # Create virtual environment (if not exists)
 python -m venv .venv
 
@@ -182,8 +180,91 @@ This generates a list of all cloud-free Landsat-8 images available for Mumbai. T
 
 ---
 
+### Step 3: Download and Process Landsat-8 Imagery
+
+**File:** `patliputra/landsat8_signals.py`
+
+**Prerequisites:**
+- Grid parquet created (`data/mumbai/grid_30m.parquet`)
+- Landsat image dates file (`patliputra/landsat8_image_dates.txt`)
+- Earth Engine authenticated
+- Sufficient disk space (~50-100GB for cache)
+
+**Command:**
+```powershell
+.\.venv\Scripts\python.exe patliputra/landsat8_signals.py --grid-parquet data/mumbai/grid_30m.parquet --project fast-archive-465917-m0
+```
+
+**What it does:**
+1. Reads all cloud-free dates from `patliputra/landsat8_image_dates.txt` (~105 dates)
+2. For each date:
+   - Queries Landsat-8 TOA imagery from Earth Engine
+   - Splits Mumbai bounding box into ~40 tiles (to avoid 50MB download limit)
+   - Downloads tiles in parallel (8 workers)
+   - Merges tiles into single GeoTIFF
+   - Reprojects to EPSG:32643 at 30m resolution
+   - Samples all 11 TOA bands (B1-B11) at grid centroids
+   - Computes spectral indices (NDVI, NDBI, MNDWI, IBI)
+   - Saves to `cache/landsat_processed/landsat8_YYYY-MM-DD_signals.parquet`
+3. Caches downloaded GeoTIFFs in `cache/landsat_downloads/`
+
+**Key Parameters:**
+- `--grid-parquet`: Path to grid file (required)
+- `--project`: Google Earth Engine project ID (required)
+- `--dates-file`: Dates file (default: `patliputra/landsat8_image_dates.txt`)
+- `--output-dir`: Processed output directory (default: `cache/landsat_processed`)
+- `--cache-dir`: Download cache directory (default: `cache/landsat_downloads`)
+- `--bbox`: Bounding box (default: Mumbai coordinates)
+- `--target-crs`: Target CRS (default: `EPSG:32643`)
+- `--target-res`: Target resolution in meters (default: `30.0`)
+
+**Expected output:**
+```
+Earth Engine initialized with project: fast-archive-465917-m0
+Found 105 dates to process
+
+[1/105] Processing 2018-01-01
+  Downloading 40 tiles for 2018-01-01...
+    ✓ Tile 1/40 downloaded (1/40 complete)
+    ...
+  Merging 40 tiles...
+  → Merged to cache/landsat_downloads/landsat8_2018-01-01.tif
+  → Processing raster...
+  → Computing spectral indices...
+  → Writing to cache/landsat_processed/landsat8_2018-01-01_signals.parquet...
+  ✓ Saved 509209 rows to cache/landsat_processed/landsat8_2018-01-01_signals.parquet
+
+[2/105] Processing 2018-01-17
+  ...
+```
+
+**Processing Time:**
+- ~5-10 minutes per date (40 tiles × download + merge + sample)
+- Total: **8-17 hours** for all 105 dates
+- Resumes automatically if interrupted (checks for existing outputs)
+
+**Output Schema:**
+Each parquet file contains:
+- `grid_id`: Grid cell identifier
+- `x`, `y`: Coordinates in EPSG:32643
+- `geometry`: Point geometry
+- `toa_b1` through `toa_b11`: Landsat-8 TOA band reflectances
+- `ndvi`: Normalized Difference Vegetation Index (B5-B4)/(B5+B4)
+- `ndbi`: Normalized Difference Built-up Index (B6-B5)/(B6+B5)
+- `mndwi`: Modified Normalized Difference Water Index (B3-B6)/(B3+B6)
+- `ibi`: Index-based Built-up Index (Xu 2008 formula)
+- `is_nodata`: Boolean flag for missing/invalid data
+- `solar_azimuth`, `solar_zenith`: Sun angles
+- `sensor_azimuth`, `sensor_zenith`: Sensor viewing angles
+- `raster_meta`: JSON metadata
+
+**Why we need this:**
+Landsat-8 provides the core predictors for PM2.5 modeling: land surface characteristics (NDVI for vegetation, NDBI/IBI for built-up areas), which correlate with pollution sources and sinks. The 30m resolution enables hyperlocal predictions.
+
+---
+
 ## Pipeline Execution
 
-_[To be filled as we execute each step]_
+_[To be filled as we execute remaining steps]_
 
 ---
