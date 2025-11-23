@@ -8,7 +8,7 @@ import datetime as dt
 from pathlib import Path
 from typing import List, Tuple
 
-from patliputra.backends.earthengine import EarthEngineClient
+from patliputra.utils.earthengine import EarthEngineClient
 
 COLLECTION_ID = "COPERNICUS/S2_SR_HARMONIZED"
 DEFAULT_BBOX = (72.7763, 18.8939, 72.9797, 19.2701)

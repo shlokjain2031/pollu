@@ -24,7 +24,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import requests
 
-from patliputra.backends.earthengine import EarthEngineClient
+from patliputra.utils.earthengine import EarthEngineClient
 from patliputra.utils.raster_sampling import raster_to_grid_df
 
 

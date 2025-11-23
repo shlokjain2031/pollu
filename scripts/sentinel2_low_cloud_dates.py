@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from patliputra.backends.earthengine import EarthEngineClient
+from patliputra.utils.earthengine import EarthEngineClient
 
 COLLECTION_ID = "COPERNICUS/S2_SR_HARMONIZED"
 DEFAULT_DATES_PATH = Path("patliputra/landsat8_image_dates.txt")

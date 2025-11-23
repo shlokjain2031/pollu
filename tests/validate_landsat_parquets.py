@@ -311,6 +311,16 @@ def validate_directory(
 
     print(f"Validating {len(files)} files in {cache_root}\n")
 
+    # Check for failed_dates.txt log
+    failed_log = cache_root / "failed_dates.txt"
+    if failed_log.exists():
+        print("⚠ Found failed_dates.txt log - dates that failed processing:\n")
+        with open(failed_log, 'r') as f:
+            for line in f:
+                if line.strip() and not line.startswith('#'):
+                    print(f"  {line.strip()}")
+        print()
+
     all_issues = {}
     for path in files:
         issues = validate_file(
