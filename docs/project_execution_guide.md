@@ -81,6 +81,9 @@ pip install pyarrow
 
 # Install Earth Engine API for satellite data
 pip install earthengine-api
+
+# Install pyrosm for OSM PBF file processing
+pip install pyrosm
 ```
 
 **What this does:**
@@ -260,6 +263,119 @@ Each parquet file contains:
 
 **Why we need this:**
 Landsat-8 provides the core predictors for PM2.5 modeling: land surface characteristics (NDVI for vegetation, NDBI/IBI for built-up areas), which correlate with pollution sources and sinks. The 30m resolution enables hyperlocal predictions.
+
+---
+
+### Step 4: Find Sentinel-2 Low-Cloud Dates
+
+**File:** `scripts/sentinel2_low_cloud_dates.py`
+
+**Prerequisites:**
+- Earth Engine authenticated
+- Google Earth Engine project ID
+
+**Command:**
+```powershell
+python scripts/sentinel2_low_cloud_dates.py --project fast-archive-465917-m0
+```
+
+**What it does:**
+1. Connects to Google Earth Engine with your project ID
+2. Queries Sentinel-2 SR Harmonized collection (`COPERNICUS/S2_SR_HARMONIZED`)
+3. Filters by Mumbai bounding box
+4. Applies QA60 cloud mask to filter cloudy pixels
+5. For each month in the date range, selects the date with lowest cloud coverage
+6. Saves monthly representative dates to `patliputra/sentinel2_low_cloud_dates.txt`
+
+**Key Parameters:**
+- `--project`: Google Earth Engine project ID (required)
+- `--output`: Output file path (default: `patliputra/sentinel2_low_cloud_dates.txt`)
+- `--bbox`: Bounding box (default: Mumbai coordinates)
+- `--start-date`: Start date (default: matches Landsat range)
+- `--end-date`: End date (default: matches Landsat range)
+
+**Expected output:**
+```
+Initializing Earth Engine with project: fast-archive-465917-m0
+Saved XX monthly Sentinel-2 dates to patliputra/sentinel2_low_cloud_dates.txt
+```
+
+**Why we need this:**
+Sentinel-2 provides higher resolution (10m) vegetation data through EVI (Enhanced Vegetation Index). Since Sentinel-2 has more frequent revisits than Landsat, we select the best monthly image to map to Landsat dates.
+
+---
+
+### Step 5: Process Sentinel-2 EVI Signals
+
+**File:** `patliputra/evi_signals.py`
+
+**Prerequisites:**
+- Grid parquet created (`data/mumbai/grid_30m.parquet`)
+- Landsat image dates file (`patliputra/landsat8_image_dates.txt`)
+- Sentinel-2 low-cloud dates file (`patliputra/sentinel2_low_cloud_dates.txt`)
+- Landsat parquet files processed (`cache/landsat_processed/landsat8_*_signals.parquet`)
+- Earth Engine authenticated
+
+**Command:**
+```powershell
+.\.venv\Scripts\python.exe patliputra/evi_signals.py --ee-project fast-archive-465917-m0
+```
+
+**What it does:**
+1. Reads all Landsat processing dates from `patliputra/landsat8_image_dates.txt`
+2. Reads monthly Sentinel-2 low-cloud dates from `patliputra/sentinel2_low_cloud_dates.txt`
+3. For each Landsat date:
+   - Maps to closest Sentinel-2 monthly date (within 7-day window by default)
+   - Downloads Sentinel-2 SR Harmonized imagery from Earth Engine
+   - Applies QA60 cloud mask to remove cloudy pixels
+   - Computes Enhanced Vegetation Index (EVI): `2.5 * (NIR - Red) / (NIR + 6*Red - 7.5*Blue + 1)`
+   - Reprojects to EPSG:32643 at 30m resolution to match grid
+   - Samples EVI values at all grid centroids
+   - Updates existing Landsat parquet files with new EVI columns
+4. For missing dates (no Sentinel-2 within window), estimates EVI from temporal neighbors
+
+**Key Parameters:**
+- `--ee-project`: Google Earth Engine project ID (required)
+- `--dates-path`: Landsat dates file (default: `patliputra/landsat8_image_dates.txt`)
+- `--grid-parquet`: Grid file (default: `data/mumbai/grid_30m.parquet`)
+- `--sentinel-dates-path`: Sentinel-2 dates file (default: `patliputra/sentinel2_low_cloud_dates.txt`)
+- `--cache-root`: Cache directory containing Landsat parquets (default: `cache`)
+- `--bbox`: Bounding box (default: Mumbai coordinates)
+- `--estimate-window`: Days to look for neighbors when estimating (default: 7)
+- `--force`: Recompute even if EVI columns already exist
+
+**Expected output:**
+```
+Running evi_signals with dates=patliputra/landsat8_image_dates.txt grid=data/mumbai/grid_30m.parquet cache=cache force=False
+
+[1/105] Processing 2018-01-01
+  → Mapped to Sentinel-2 date: 2018-01-05
+  → Downloading Sentinel-2 imagery...
+  → Computing EVI...
+  → Sampling at grid points...
+  → Updating cache/landsat_processed/landsat8_2018-01-01_signals.parquet...
+  ✓ Added EVI column (509209 rows)
+
+[2/105] Processing 2018-01-17
+  ...
+```
+
+**Processing Time:**
+- ~2-5 minutes per date (single image download, no tiling needed due to smaller size)
+- Total: **3-9 hours** for all 105 dates
+- Resumes automatically if interrupted
+
+**Output Schema:**
+Updates existing Landsat parquet files with additional columns:
+- `evi`: Enhanced Vegetation Index from Sentinel-2 (10m resolution, resampled to 30m)
+- `evi_estimated`: Boolean flag indicating if EVI was estimated from neighbors (no direct Sentinel-2 match)
+
+**Why we need this:**
+EVI from Sentinel-2 provides a superior vegetation metric compared to Landsat NDVI due to:
+1. Higher native resolution (10m vs 30m)
+2. Better sensitivity in high-biomass areas
+3. Reduced atmospheric and soil background effects
+By mapping monthly Sentinel-2 dates to Landsat dates, we enrich each observation with the best available vegetation data.
 
 ---
 
