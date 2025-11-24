@@ -16,6 +16,7 @@ References:
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
@@ -250,9 +251,11 @@ def download_svf_tile(
     tile_path: Path,
     resolution_m: float = 3.0,
     target_crs: str = "EPSG:32643",
+    max_retries: int = 3,
+    retry_delay: int = 5,
 ) -> Path:
     """
-    Download a single SVF tile.
+    Download a single SVF tile with retry logic.
 
     Parameters
     ----------
@@ -266,6 +269,10 @@ def download_svf_tile(
         Pixel resolution in meters
     target_crs : str
         Target CRS for export
+    max_retries : int
+        Maximum number of retry attempts (default: 3)
+    retry_delay : int
+        Delay in seconds between retries (default: 5)
 
     Returns
     -------
@@ -281,46 +288,59 @@ def download_svf_tile(
     # Transform to target CRS for export (ensures consistent orientation)
     geometry_utm = geometry.transform(target_crs, maxError=1)
 
-    url = svf_image.getDownloadURL(
-        {
-            "scale": resolution_m,
-            "region": geometry_utm,
-            "filePerBand": False,
-            "format": "GeoTIFF",
-            "crs": target_crs,
-        }
-    )
+    for attempt in range(max_retries):
+        try:
+            url = svf_image.getDownloadURL(
+                {
+                    "scale": resolution_m,
+                    "region": geometry_utm,
+                    "filePerBand": False,
+                    "format": "GeoTIFF",
+                    "crs": target_crs,
+                }
+            )
 
-    response = requests.get(url, stream=True, timeout=600)
-    response.raise_for_status()
+            response = requests.get(url, stream=True, timeout=900)  # Increased timeout to 15 minutes
+            response.raise_for_status()
 
-    tile_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(tile_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+            tile_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tile_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            return tile_path
+
+        except (requests.exceptions.Timeout, requests.exceptions.RequestException, Exception) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                print(f"      ⚠ Attempt {attempt + 1}/{max_retries} failed: {e}")
+                print(f"      ⏳ Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                raise RuntimeError(f"Failed after {max_retries} attempts: {e}") from e
 
     return tile_path
 
 
 def download_svf_for_mumbai(
-    year: int = 2023,
-    output_path: Path | None = None,
+    years: List[int] | None = None,
+    output_dir: Path | None = None,
     bbox: Tuple[float, float, float, float] = (72.7763, 18.8939, 72.9797, 19.2701),
     n_directions: int = 16,
     search_radius_m: float = 100.0,
     resolution_m: float = 3.0,
     tile_cache_dir: Path | None = None,
     target_crs: str = "EPSG:32643",
-) -> Path:
+) -> List[Path]:
     """
-    Download SVF raster for Mumbai using tiled approach.
+    Download SVF raster for Mumbai using tiled approach for multiple years.
 
     Parameters
     ----------
-    year : int
-        Year for building data
-    output_path : Path | None
-        Where to save final merged GeoTIFF (default: cache/mumbai_svf_{year}_{resolution}m.tif)
+    years : List[int] | None
+        Years for building data (default: [2018, 2019, 2020, 2021, 2022])
+    output_dir : Path | None
+        Directory to save final merged GeoTIFFs (default: cache/)
     bbox : tuple
         (west, south, east, north) in EPSG:4326
     n_directions : int
@@ -336,175 +356,202 @@ def download_svf_for_mumbai(
 
     Returns
     -------
-    Path
-        Path to merged GeoTIFF
+    List[Path]
+        Paths to merged GeoTIFFs for each year
     """
     import rasterio
     from rasterio.merge import merge as rio_merge
 
-    if output_path is None:
-        output_path = Path(f"cache/mumbai_svf_{year}_{int(resolution_m)}m.tif")
+    if years is None:
+        years = [2018, 2019, 2020, 2021, 2022]
+
+    if output_dir is None:
+        output_dir = Path("cache")
 
     if tile_cache_dir is None:
         tile_cache_dir = Path("cache/svf_tiles")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = []
 
     # Create geometry
     west, south, east, north = bbox
     geometry = ee.Geometry.Rectangle([west, south, east, north])
 
-    # Compute SVF (compute once, download in tiles)
-    print(
-        f"Computing SVF for {year} with {n_directions} directions at {resolution_m}m resolution..."
-    )
-    svf = compute_svf(
-        year,
-        geometry,
-        n_directions,
-        search_radius_m,
-        resolution_m,
-        target_crs=target_crs,
-    )
+    # Process each year
+    for year_idx, year in enumerate(years):
+        print(f"\n{'='*60}")
+        print(f"Processing year {year} ({year_idx + 1}/{len(years)})")
+        print(f"{'='*60}")
 
-    # Split into tiles
-    tiles = split_bbox_into_tiles(bbox, tile_size_deg=0.02)
-    print(f"Downloading {len(tiles)} tiles...")
+        output_path = output_dir / f"mumbai_svf_{year}_{int(resolution_m)}m.tif"
 
-    # Prepare tile directory
-    tile_dir = tile_cache_dir / f"svf_{year}_{int(resolution_m)}m"
-    tile_dir.mkdir(parents=True, exist_ok=True)
+        # Skip if already exists
+        if output_path.exists():
+            print(f"✓ SVF for {year} already exists at {output_path}, skipping...")
+            output_paths.append(output_path)
+            continue
 
-    def download_tile_task(
-        idx: int, tile_bbox: Tuple[float, float, float, float]
-    ) -> Tuple[int, Path | None]:
-        """Download a single tile and return (index, path or None)."""
-        tile_path = tile_dir / f"tile_{idx:03d}.tif"
-
-        if tile_path.exists():
-            return (idx, tile_path)
-
-        try:
-            download_svf_tile(
-                svf, tile_bbox, tile_path, resolution_m, target_crs=target_crs
-            )
-            return (idx, tile_path)
-        except Exception as e:
-            print(f"    ✗ Tile {idx+1}/{len(tiles)} failed: {e}")
-            import traceback
-
-            print(f"       Traceback: {traceback.format_exc()}")
-            return (idx, None)
-
-    # Download tiles in parallel
-    tile_paths = []
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(download_tile_task, idx, tile_bbox): idx
-            for idx, tile_bbox in enumerate(tiles)
-        }
-
-        completed_count = 0
-        for future in as_completed(futures):
-            completed_count += 1
-            idx, tile_path = future.result()
-            if tile_path:
-                tile_paths.append(tile_path)
-                status = "cached" if tile_path.exists() else "downloaded"
-                print(
-                    f"    ✓ Tile {idx+1}/{len(tiles)} {status} ({completed_count}/{len(tiles)} complete)"
-                )
-
-    if not tile_paths:
-        raise RuntimeError(f"Failed to download any tiles for SVF {year}")
-
-    # Merge tiles
-    print(f"Merging {len(tile_paths)} tiles...")
-
-    # Open all tiles for merging
-    src_files = []
-
-    for tile_path in tile_paths:
-        src = rasterio.open(tile_path)
-        src_files.append(src)
-
-    try:
-        # Merge tiles
-        mosaic, out_transform = rio_merge(src_files)
-
-        # Get metadata from first tile
-        out_meta = src_files[0].meta.copy()
-        out_meta.update(
-            {
-                "driver": "GTiff",
-                "height": mosaic.shape[1],
-                "width": mosaic.shape[2],
-                "transform": out_transform,
-                "compress": "deflate",
-                "tiled": True,
-            }
+        # Compute SVF (compute once, download in tiles)
+        print(
+            f"Computing SVF for {year} with {n_directions} directions at {resolution_m}m resolution..."
+        )
+        svf = compute_svf(
+            year,
+            geometry,
+            n_directions,
+            search_radius_m,
+            resolution_m,
+            target_crs=target_crs,
         )
 
-        # Write merged file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(output_path, "w", **out_meta) as dest:
-            dest.write(mosaic)
+        # Split into tiles
+        tiles = split_bbox_into_tiles(bbox, tile_size_deg=0.02)
+        print(f"Downloading {len(tiles)} tiles...")
 
-        print(f"✓ SVF saved to {output_path}")
+        # Prepare tile directory
+        tile_dir = tile_cache_dir / f"svf_{year}_{int(resolution_m)}m"
+        tile_dir.mkdir(parents=True, exist_ok=True)
 
-    except Exception as e:
-        print(f"Merge failed: {e}")
-        # Try GDAL fallback for large mosaics
-        import subprocess
-        import shutil
+        def download_tile_task(
+            idx: int, tile_bbox: Tuple[float, float, float, float]
+        ) -> Tuple[int, Path | None]:
+            """Download a single tile and return (index, path or None)."""
+            tile_path = tile_dir / f"tile_{idx:03d}.tif"
 
-        gdalbuildvrt = shutil.which("gdalbuildvrt")
-        gdal_translate = shutil.which("gdal_translate")
+            if tile_path.exists():
+                return (idx, tile_path)
 
-        if gdalbuildvrt and gdal_translate:
-            print("Attempting GDAL VRT merge as fallback...")
-            import tempfile
-
-            with tempfile.TemporaryDirectory(prefix="svf_vrt_") as tmpdir:
-                list_path = Path(tmpdir) / "tiles.txt"
-                vrt_path = Path(tmpdir) / "mosaic.vrt"
-
-                with open(list_path, "w") as f:
-                    for p in tile_paths:
-                        f.write(str(p.resolve()) + "\n")
-
-                # Build VRT
-                subprocess.check_call(
-                    [gdalbuildvrt, "-input_file_list", str(list_path), str(vrt_path)]
+            try:
+                # Add small delay to avoid rate limiting (stagger requests)
+                time.sleep(0.5 * idx % 8)  # Stagger by worker
+                download_svf_tile(
+                    svf, tile_bbox, tile_path, resolution_m, target_crs=target_crs
                 )
+                return (idx, tile_path)
+            except Exception as e:
+                print(f"    ✗ Tile {idx+1}/{len(tiles)} failed: {e}")
+                import traceback
 
-                # Translate to GeoTIFF
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.check_call(
-                    [
-                        gdal_translate,
-                        "-of",
-                        "GTiff",
-                        "-co",
-                        "COMPRESS=DEFLATE",
-                        "-co",
-                        "TILED=YES",
-                        "-co",
-                        "BIGTIFF=YES",
-                        str(vrt_path),
-                        str(output_path),
-                    ]
-                )
+                print(f"       Traceback: {traceback.format_exc()}")
+                return (idx, None)
 
-                print(f"✓ SVF saved to {output_path} via GDAL")
-        else:
-            raise RuntimeError(
-                "Merge failed and GDAL utilities not found. Install GDAL or reduce resolution."
-            ) from e
-    finally:
-        # Clean up opened files
-        for src in src_files:
-            src.close()
+        # Download tiles in parallel (reduced workers to avoid rate limits)
+        tile_paths = []
+        with ThreadPoolExecutor(max_workers=4) as executor:  # Reduced from 8 to 4
+            futures = {
+                executor.submit(download_tile_task, idx, tile_bbox): idx
+                for idx, tile_bbox in enumerate(tiles)
+            }
 
-    return output_path
+            completed_count = 0
+            for future in as_completed(futures):
+                completed_count += 1
+                idx, tile_path = future.result()
+                if tile_path:
+                    tile_paths.append(tile_path)
+                    status = "cached" if tile_path.exists() else "downloaded"
+                    print(
+                        f"    ✓ Tile {idx+1}/{len(tiles)} {status} ({completed_count}/{len(tiles)} complete)"
+                    )
+
+        if not tile_paths:
+            raise RuntimeError(f"Failed to download any tiles for SVF {year}")
+
+        # Merge tiles
+        print(f"Merging {len(tile_paths)} tiles...")
+
+        # Open all tiles for merging
+        src_files = []
+
+        for tile_path in tile_paths:
+            src = rasterio.open(tile_path)
+            src_files.append(src)
+
+        try:
+            # Merge tiles
+            mosaic, out_transform = rio_merge(src_files)
+
+            # Get metadata from first tile
+            out_meta = src_files[0].meta.copy()
+            out_meta.update(
+                {
+                    "driver": "GTiff",
+                    "height": mosaic.shape[1],
+                    "width": mosaic.shape[2],
+                    "transform": out_transform,
+                    "compress": "deflate",
+                    "tiled": True,
+                }
+            )
+
+            # Write merged file
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(output_path, "w", **out_meta) as dest:
+                dest.write(mosaic)
+
+            print(f"✓ SVF saved to {output_path}")
+            output_paths.append(output_path)
+
+        except Exception as e:
+            print(f"Merge failed: {e}")
+            # Try GDAL fallback for large mosaics
+            import subprocess
+            import shutil
+
+            gdalbuildvrt = shutil.which("gdalbuildvrt")
+            gdal_translate = shutil.which("gdal_translate")
+
+            if gdalbuildvrt and gdal_translate:
+                print("Attempting GDAL VRT merge as fallback...")
+                import tempfile
+
+                with tempfile.TemporaryDirectory(prefix="svf_vrt_") as tmpdir:
+                    list_path = Path(tmpdir) / "tiles.txt"
+                    vrt_path = Path(tmpdir) / "mosaic.vrt"
+
+                    with open(list_path, "w") as f:
+                        for p in tile_paths:
+                            f.write(str(p.resolve()) + "\n")
+
+                    # Build VRT
+                    subprocess.check_call(
+                        [gdalbuildvrt, "-input_file_list", str(list_path), str(vrt_path)]
+                    )
+
+                    # Translate to GeoTIFF
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    subprocess.check_call(
+                        [
+                            gdal_translate,
+                            "-of",
+                            "GTiff",
+                            "-co",
+                            "COMPRESS=DEFLATE",
+                            "-co",
+                            "TILED=YES",
+                            "-co",
+                            "BIGTIFF=YES",
+                            str(vrt_path),
+                            str(output_path),
+                        ]
+                    )
+
+                    print(f"✓ SVF saved to {output_path} via GDAL")
+                    output_paths.append(output_path)
+            else:
+                raise RuntimeError(
+                    "Merge failed and GDAL utilities not found. Install GDAL or reduce resolution."
+                ) from e
+        finally:
+            # Clean up opened files
+            for src in src_files:
+                src.close()
+
+    print(f"\n{'='*60}")
+    print(f"All {len(output_paths)} years processed successfully!")
+    print(f"{'='*60}")
+    return output_paths
 
 
 def main():
@@ -512,12 +559,23 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Compute Sky View Factor using Earth Engine"
+        description="Compute Sky View Factor using Earth Engine for years 2018-2022"
     )
     parser.add_argument(
-        "--year", type=int, default=2023, help="Year for building data (2016-2023)"
+        "--project",
+        type=str,
+        required=True,
+        help="Google Earth Engine project ID (required)",
     )
-    parser.add_argument("--output", type=Path, help="Output GeoTIFF path")
+    parser.add_argument(
+        "--years",
+        type=str,
+        default="2018,2019,2020,2021,2022",
+        help="Comma-separated years for building data (default: 2018,2019,2020,2021,2022)",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("cache"), help="Output directory for GeoTIFFs"
+    )
     parser.add_argument(
         "--bbox",
         type=str,
@@ -552,28 +610,30 @@ def main():
 
     # Initialize Earth Engine
     try:
-        ee.Initialize(project="fast-archive-465917-m0")
-        print("Earth Engine initialized")
+        ee.Initialize(project=args.project)
+        print(f"Earth Engine initialized with project: {args.project}")
     except Exception as e:
         print(f"Failed to initialize Earth Engine: {e}")
         return
 
-    # Parse bbox
+    # Parse years and bbox
+    years = [int(y.strip()) for y in args.years.split(",")]
     bbox = tuple(float(x.strip()) for x in args.bbox.split(","))
 
     # Clean cache if requested
     if args.clean_cache:
-        tile_cache = args.tile_cache_dir / f"svf_{args.year}_{int(args.resolution)}m"
-        if tile_cache.exists():
-            import shutil
+        for year in years:
+            tile_cache = args.tile_cache_dir / f"svf_{year}_{int(args.resolution)}m"
+            if tile_cache.exists():
+                import shutil
 
-            print(f"Removing existing tile cache: {tile_cache}")
-            shutil.rmtree(tile_cache)
+                print(f"Removing existing tile cache: {tile_cache}")
+                shutil.rmtree(tile_cache)
 
-    # Download SVF
-    output_path = download_svf_for_mumbai(
-        year=args.year,
-        output_path=args.output,
+    # Download SVF for all years
+    output_paths = download_svf_for_mumbai(
+        years=years,
+        output_dir=args.output_dir,
         bbox=bbox,
         n_directions=args.directions,
         search_radius_m=args.radius,
