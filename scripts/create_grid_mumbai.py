@@ -66,9 +66,13 @@ def create_grid(
     print(f"City bounds (EPSG:32643): x=[{minx:.1f}, {maxx:.1f}], y=[{miny:.1f}, {maxy:.1f}]")
 
     # Generate full grid coordinates (before clipping)
-    # Origin is lower-left corner (snapped for reproducibility)
-    origin_x = minx + res / 2.0
-    origin_y = miny + res / 2.0
+    # IMPORTANT: Use FIXED origin to match legacy grid (pre-boundary-clipping)
+    # This ensures coordinates align with existing Landsat/signal cache files
+    # Legacy origin detected from old grid: X=266229.294901, Y=2090522.466401
+    origin_x = 266229.294901
+    origin_y = 2090522.466401
+    
+    print(f"Using FIXED origin for backward compatibility: x={origin_x:.6f}, y={origin_y:.6f}")
     
     xs = np.arange(origin_x, maxx, res)
     ys = np.arange(origin_y, maxy, res)
@@ -99,8 +103,8 @@ def create_grid(
 
     grid_gdf = gpd.GeoDataFrame(
         {
-            "x_m": xx_flat,      # Will be cast to float32
-            "y_m": yy_flat,      # Will be cast to float32
+            "x_m": xx_flat,      # Keep as float64 for backward compatibility
+            "y_m": yy_flat,      # Keep as float64 for backward compatibility
             "col_idx": col_idx_flat,
             "row_idx_grid": row_idx_grid_flat
         },
@@ -126,10 +130,9 @@ def create_grid(
     # Purpose: Human-readable identifier for API responses, debugging, joins
     grid_gdf['grid_id'] = grid_gdf['row_idx'].apply(lambda i: f"g{i:08d}")
     
-    # Cast coordinates to float32 (sufficient precision, saves space)
-    # Purpose: Reduce memory/disk footprint for 500k+ point grids
-    grid_gdf['x_m'] = grid_gdf['x_m'].astype('float32')
-    grid_gdf['y_m'] = grid_gdf['y_m'].astype('float32')
+    # Keep coordinates as float64 for backward compatibility with legacy grid
+    # (float32 precision loss prevents exact coordinate matching with old parquet files)
+    # Cast indices to int32 to save space
     grid_gdf['col_idx'] = grid_gdf['col_idx'].astype('int32')
     grid_gdf['row_idx_grid'] = grid_gdf['row_idx_grid'].astype('int32')
     

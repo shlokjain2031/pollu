@@ -1,0 +1,11 @@
+{
+  "generated_ts": "2025-11-24T17:38:36.938593+00:00",
+  "script": "scripts\\create_grid_mumbai.py",
+  "git_sha": "561b25d464035a8c9dd84b128e8e811206d52545",
+  "n_points": 509209,
+  "n_points_full_grid": 985446,
+  "clipping_ratio": 0.516729480864502,
+  "boundary_file": "resources\\mumbai_wards.geojson",
+  "schema_version": "1.0.0",
+  "note": "Downstream signal processors (landsat, evi, s5p, svf) expect this exact schema: row_idx, grid_id, x_m, y_m, centroid_lon, centroid_lat, col_idx, row_idx_grid, h3_cell. Changing grid requires recomputing all features."
+}
