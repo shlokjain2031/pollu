@@ -12,9 +12,10 @@ __pycache__/
 .pytest_cache/
 
 # data and large artifacts
-data/
+# data/
 cache/
 pollu.egg-info/
+tmp/
 
 # Landsat/cache artifacts produced by processing - keep out of VCS
 # (cached mosaics, tiles, and per-date parquet outputs)

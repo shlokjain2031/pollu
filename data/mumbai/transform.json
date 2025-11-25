@@ -1,0 +1,21 @@
+{
+  "crs_epsg": 32643,
+  "origin_x": 266244.29490057484,
+  "origin_y": 2090537.4664013423,
+  "res_m": 30.0,
+  "nx": 711,
+  "ny": 1386,
+  "grid_bbox_proj": [
+    266244.28125,
+    2090537.5,
+    287544.28125,
+    2132087.5
+  ],
+  "grid_bbox_wgs84": [
+    72.77646985647411,
+    18.89409074434121,
+    72.97969936981202,
+    19.26992313064397
+  ],
+  "note": "Full grid dimensions (nx, ny) before clipping. Actual grid has fewer points due to city boundary clipping."
+}
