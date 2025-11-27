@@ -236,7 +236,7 @@ def main():
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("cache/refined_new_openaq_daily_pm25.parquet"),
+        default=Path("cache/openaq_daily_pm25.parquet"),
         help="Input parquet with PM2.5 data (will be modified in-place)",
     )
     parser.add_argument(

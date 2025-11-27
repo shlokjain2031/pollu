@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Fetch OpenAQ PM2.5 readings for seeded sensors across Landsat image dates."""
 
@@ -5,7 +6,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,12 +17,26 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 import requests
 
+# Provenance and deterministic output helpers
+PARQUET_ENGINE: str = "pyarrow"
+MANIFEST_SUFFIX: str = ".manifest.json"
+
+def get_git_sha() -> str:
+    """Return current git commit SHA or 'unknown' if unavailable."""
+    try:
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, encoding="utf-8").strip()
+        if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha.lower()):
+            return sha
+        return "unknown"
+    except Exception:
+        return "unknown"
+
 DEFAULT_DATES_PATH = Path("patliputra/landsat8_image_dates.txt")
 DEFAULT_CACHE_ROOT = Path("cache")
-DEFAULT_SENSOR_SEED = DEFAULT_CACHE_ROOT / "openaq_daily_pm25_final.parquet"
+DEFAULT_SENSOR_SEED = DEFAULT_CACHE_ROOT / "openaq_sensor_ids.parquet"
 DEFAULT_OUTPUT = DEFAULT_CACHE_ROOT / "openaq_daily_pm25.parquet"
 OPENAQ_BASE = "https://api.openaq.org/v3"
-DEFAULT_TOKEN_ENV = "OPENAQ_TOKEN"
+DEFAULT_TOKEN_ENV = "5881288ec6eee8a04c8029d8aa1ff991cf7a91c7d10537f8c3288ab5918700cc"
 PM25_PARAMETER_ID = 2
 DEFAULT_SLEEP_SECONDS = 1.0  # Increased to avoid rate limits
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 522, 524}
@@ -174,27 +191,30 @@ def fetch_daily_pm25_with_fallback(
     max_search_days: int = DEFAULT_MAX_SEARCH_DAYS,
     min_sample_count: int = DEFAULT_MIN_SAMPLE_COUNT,
     enable_seasonal: bool = DEFAULT_SEASONAL_FALLBACK,
-) -> FallbackResult:
-    """Fetch PM2.5 with bidirectional window search and seasonal fallback.
-
-    Strategy:
-    1. Try exact date match
-    2. If no data or too few samples, search ±1, ±2, ... ±max_search_days
-    3. Return closest date with sufficient samples (prefer earlier if tied)
-    4. If still no data, try same date from previous/next year (seasonal fallback)
+) -> Tuple[FallbackResult, Optional[str], Optional[str]]:
+    """
+    Fetch PM2.5 with bidirectional window search and seasonal fallback.
 
     Returns:
-        FallbackResult with value, sample_count, actual_date, fallback_type, days_offset
+        (FallbackResult, min_ts_iso_or_None, max_ts_iso_or_None)
+        - FallbackResult: fallback metadata/result
+        - min_ts_iso_or_None: earliest UTC ISO timestamp for chosen date, or None
+        - max_ts_iso_or_None: latest UTC ISO timestamp for chosen date, or None
     """
     # Try exact date first
-    value, sample_count = fetch_daily_pm25_average(token, sensor_id, target_date)
+    value, sample_count, min_ts, max_ts = fetch_daily_pm25_average(token, sensor_id, target_date)
+    # Map (value, sample_count, min_ts, max_ts) → FallbackResult and propagate timestamps
     if value is not None and sample_count >= min_sample_count:
-        return FallbackResult(
-            value=value,
-            sample_count=sample_count,
-            actual_date=target_date,
-            fallback_type="exact",
-            days_offset=0,
+        return (
+            FallbackResult(
+                value=value,
+                sample_count=sample_count,
+                actual_date=target_date,
+                fallback_type="exact",
+                days_offset=0,
+            ),
+            min_ts,
+            max_ts,
         )
 
     # Bidirectional window search: ±1, ±2, ..., ±max_search_days
@@ -202,16 +222,21 @@ def fetch_daily_pm25_with_fallback(
         # Try earlier date first (prefer past data)
         for sign in [-1, 1]:
             candidate_date = target_date + dt.timedelta(days=sign * offset)
-            value, sample_count = fetch_daily_pm25_average(
+            value, sample_count, min_ts, max_ts = fetch_daily_pm25_average(
                 token, sensor_id, candidate_date
             )
+            # Map (value, sample_count, min_ts, max_ts) → FallbackResult and propagate timestamps
             if value is not None and sample_count >= min_sample_count:
-                return FallbackResult(
-                    value=value,
-                    sample_count=sample_count,
-                    actual_date=candidate_date,
-                    fallback_type="window",
-                    days_offset=sign * offset,
+                return (
+                    FallbackResult(
+                        value=value,
+                        sample_count=sample_count,
+                        actual_date=candidate_date,
+                        fallback_type="window",
+                        days_offset=sign * offset,
+                    ),
+                    min_ts,
+                    max_ts,
                 )
 
     # Seasonal fallback: try same date from previous/next year
@@ -219,41 +244,59 @@ def fetch_daily_pm25_with_fallback(
         for year_offset in [-1, 1]:
             try:
                 seasonal_date = target_date.replace(year=target_date.year + year_offset)
-                value, sample_count = fetch_daily_pm25_average(
+                value, sample_count, min_ts, max_ts = fetch_daily_pm25_average(
                     token, sensor_id, seasonal_date
                 )
+                # Map (value, sample_count, min_ts, max_ts) → FallbackResult and propagate timestamps
                 if value is not None and sample_count >= min_sample_count:
                     days_diff = (seasonal_date - target_date).days
-                    return FallbackResult(
-                        value=value,
-                        sample_count=sample_count,
-                        actual_date=seasonal_date,
-                        fallback_type="seasonal",
-                        days_offset=days_diff,
+                    return (
+                        FallbackResult(
+                            value=value,
+                            sample_count=sample_count,
+                            actual_date=seasonal_date,
+                            fallback_type="seasonal",
+                            days_offset=days_diff,
+                        ),
+                        min_ts,
+                        max_ts,
                     )
             except ValueError:
                 # Handle Feb 29 edge case
                 continue
 
     # No valid data found
-    return FallbackResult(
-        value=None,
-        sample_count=0,
-        actual_date=None,
-        fallback_type="none",
-        days_offset=0,
+    return (
+        FallbackResult(
+            value=None,
+            sample_count=0,
+            actual_date=None,
+            fallback_type="none",
+            days_offset=0,
+        ),
+        None,
+        None,
     )
 
 
 def fetch_daily_pm25_average(
     token: Optional[str], sensor_id: int, date_obj: dt.date
-) -> Tuple[Optional[float], int]:
+) -> Tuple[Optional[float], int, Optional[str], Optional[str]]:
+    """
+    Fetch daily PM2.5 average for a sensor and date.
+    Returns (average_value_or_None, sample_count, min_timestamp_iso_or_None, max_timestamp_iso_or_None)
+    - average_value_or_None: float or None if no valid values
+    - sample_count: int, number of valid PM2.5 samples
+    - min_timestamp_iso_or_None: earliest UTC ISO timestamp (str) or None
+    - max_timestamp_iso_or_None: latest UTC ISO timestamp (str) or None
+    """
     dt_from = f"{date_obj.isoformat()}T00:00:00Z"
     next_day = date_obj + dt.timedelta(days=1)
     dt_to = f"{next_day.isoformat()}T00:00:00Z"
     limit = 200
     page = 1
     values: List[float] = []
+    ts_list: List[str] = []
     while True:
         params = {
             "datetime_from": dt_from,
@@ -278,6 +321,17 @@ def fetch_daily_pm25_average(
             value = entry.get("value")
             if value is None:
                 continue
+            # Robust timestamp extraction
+            ts: Optional[str] = None
+            date_field = entry.get("date")
+            if isinstance(date_field, dict):
+                ts = date_field.get("utc") or date_field.get("local")
+            elif isinstance(date_field, str):
+                ts = date_field
+            if ts:
+                dt_obj = _parse_iso_datetime(ts)
+                if dt_obj:
+                    ts_list.append(dt_obj.isoformat())
             try:
                 float_value = float(value)
                 # Reject negative PM2.5 values (physically impossible)
@@ -290,9 +344,11 @@ def fetch_daily_pm25_average(
             break
         page += 1
     if not values:
-        return None, 0
+        return None, 0, None, None
     avg = sum(values) / len(values)
-    return avg, len(values)
+    min_ts = min(ts_list) if ts_list else None
+    max_ts = max(ts_list) if ts_list else None
+    return avg, len(values), min_ts, max_ts
 
 
 def process(
@@ -333,6 +389,10 @@ def process(
         "none": 0,
     }
 
+    # Provenance and reproducibility fields
+    GIT_SHA = get_git_sha()
+    fetched_at_utc = dt.datetime.utcnow().isoformat() + "Z"
+
     for sensor in sensor_metas:
         valid_dates = eligible_dates_for_sensor(
             date_objs, sensor.first_date, sensor.last_date
@@ -343,7 +403,7 @@ def process(
             f"Sensor {sensor.sensor_id} has {len(valid_dates)} matching Landsat dates"
         )
         for date_obj in valid_dates:
-            result = fetch_daily_pm25_with_fallback(
+            result, min_ts, max_ts = fetch_daily_pm25_with_fallback(
                 token,
                 sensor.sensor_id,
                 date_obj,
@@ -369,19 +429,26 @@ def process(
             rows.append(
                 {
                     "date": date_obj.isoformat(),
-                    "sensor_id": sensor.sensor_id,
-                    "sensor_name": sensor.sensor_name,
-                    "latitude": sensor.latitude,
-                    "longitude": sensor.longitude,
+                    "sensor_id": int(sensor.sensor_id),
+                    "sensor_name": str(sensor.sensor_name),
+                    "sensor_provider": "openaq",
+                    "latitude": float(sensor.latitude) if sensor.latitude is not None else None,
+                    "longitude": float(sensor.longitude) if sensor.longitude is not None else None,
                     "first_date": sensor.first_date.isoformat(),
                     "last_date": sensor.last_date.isoformat(),
-                    "pm25": result.value,
-                    "sample_count": result.sample_count,
-                    "actual_date": (
-                        result.actual_date.isoformat() if result.actual_date else None
-                    ),
+                    "pm25": float(result.value) if result.value is not None else None,
+                    "aggregation_method": "mean",
+                    "sample_count": int(result.sample_count),
+                    "measurement_ts_min_utc": min_ts,
+                    "measurement_ts_max_utc": max_ts,
+                    "actual_date": result.actual_date.isoformat() if result.actual_date else None,
                     "fallback_type": result.fallback_type,
-                    "days_offset": result.days_offset,
+                    "days_offset": int(result.days_offset),
+                    "fetched_at_utc": fetched_at_utc,
+                    "_provenance": json.dumps({"script": "scripts/fetch_openaq.py", "git_sha": GIT_SHA, "openaq_base": OPENAQ_BASE}),
+                    "label_distance_m": None,
+                    "sensor_quality_flag": "ok" if result.sample_count >= min_sample_count and result.value is not None else "low_coverage",
+                    "notes": None,
                 }
             )
             print(
@@ -395,9 +462,36 @@ def process(
     if not rows:
         raise RuntimeError("No sensor/date combinations produced any rows")
 
+
     df = pd.DataFrame(rows)
+    # Enforce correct dtypes
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    if "actual_date" in df.columns:
+        df["actual_date"] = pd.to_datetime(df["actual_date"]).dt.date
+    df["pm25"] = df["pm25"].astype("float32")
+    df["sample_count"] = df["sample_count"].astype("int16")
+    df["days_offset"] = df["days_offset"].astype("int16")
+    df["sensor_id"] = df["sensor_id"].astype("int32")
     df.sort_values(["sensor_id", "date"], inplace=True)
-    df.to_parquet(output_path, engine="pyarrow", index=False)
+    df.to_parquet(output_path, engine=PARQUET_ENGINE, index=False)
+
+    # Write manifest JSON
+    manifest = {
+        "created_at_utc": fetched_at_utc,
+        "script": "scripts/fetch_openaq.py",
+        "git_sha": GIT_SHA,
+        "num_rows": len(df),
+        "source_api": OPENAQ_BASE,
+        "notes": None,
+    }
+    manifest_path = output_path.with_suffix(MANIFEST_SUFFIX)
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    # (Optional) Partitioning: To partition by 'date', use pyarrow or pandas to write partitioned parquet files.
+    # This is useful for large datasets and enables efficient reads by date, but is not enabled by default here.
+    # Example: df.to_parquet(output_path, partition_cols=["date"], engine=PARQUET_ENGINE)
+    # Only enable if the caller passes a flag for partitioning.
 
     # Print fallback statistics
     total_attempts = sum(stats.values())
