@@ -1,38 +1,20 @@
 """Create a 30 m centroid grid for Mumbai wards and save as GeoParquet.
-
 Usage:
     python scripts/create_grid_mumbai.py
-
 This script defaults to reading `resources/mumbai_wards.geojson` and writing
 `data/mumbai/grid_30m.parquet` in the project root. Adjust paths with the
 command-line options if needed.
-
-Output includes:
-- grid_30m.parquet: Full GeoParquet with geometry (for GIS workflows)
-- grid_30m_nd.parquet: Lightweight non-geometry parquet (for ML/numeric ops)
-- transform.json: Grid spatial parameters (origin, resolution, dimensions)
-- grid_manifest.json: Provenance metadata (timestamp, git SHA, row count)
 """
-
 from pathlib import Path
 import argparse
+import numpy as np
+import geopandas as gpd
+from shapely.geometry import Point
+import h3
 import json
 import os
 import subprocess
 from datetime import datetime, timezone
-
-import numpy as np
-import geopandas as gpd
-from shapely.geometry import Point
-from pyproj import Transformer
-
-# Optional H3 import with graceful fallback
-try:
-    import h3
-    HAS_H3 = True
-except ImportError:
-    HAS_H3 = False
-    print("WARNING: h3-py not installed. h3_cell column will be None. Install with: pip install h3")
 
 
 def create_grid(
@@ -42,131 +24,105 @@ def create_grid(
     res: float = 30.0,
     max_cells: int = 3_000_000,
 ):
-    """Create 30m grid with enhanced schema and metadata sidecars.
-    
-    Generates a regular 30m centroid grid clipped to city boundary with:
-    - row_idx: Contiguous 0..N-1 index for clipped grid
-    - grid_id: Zero-padded string identifier "g00000000"
-    - x_m, y_m: Projected coordinates (float32, EPSG:32643)
-    - centroid_lon, centroid_lat: WGS84 coordinates (float64)
-    - col_idx, row_idx_grid: Grid indices in full pre-clipped lattice
-    - h3_cell: H3 hexagon index at resolution 11 (if h3 available)
-    - geometry: Shapely Point (projected, for GeoParquet)
-    
-    Also writes sidecar files:
-    - transform.json: Grid spatial parameters
-    - grid_manifest.json: Provenance metadata
-    - grid_30m_nd.parquet: Lightweight non-geometry version
-    """
-    print(f"Reading boundary from {boundary_path}...")
+    print(f"[1/10] Reading boundary from {boundary_path}...")
     gdf = gpd.read_file(boundary_path)
+    print(f"       Loaded {len(gdf)} features")
+    
+    print(f"[2/10] Projecting to {target_crs}...")
     city_proj = gdf.to_crs(target_crs)
     minx, miny, maxx, maxy = city_proj.total_bounds
+    print(f"       Bounds: X=[{minx:.2f}, {maxx:.2f}], Y=[{miny:.2f}, {maxy:.2f}]")
     
-    print(f"City bounds (EPSG:32643): x=[{minx:.1f}, {maxx:.1f}], y=[{miny:.1f}, {maxy:.1f}]")
-
-    # Generate full grid coordinates (before clipping)
-    # IMPORTANT: Use FIXED origin to match legacy grid (pre-boundary-clipping)
-    # This ensures coordinates align with existing Landsat/signal cache files
-    # Legacy origin detected from old grid: X=266229.294901, Y=2090522.466401
-    origin_x = 266229.294901
-    origin_y = 2090522.466401
-    
-    print(f"Using FIXED origin for backward compatibility: x={origin_x:.6f}, y={origin_y:.6f}")
-    
-    xs = np.arange(origin_x, maxx, res)
-    ys = np.arange(origin_y, maxy, res)
-    nx = len(xs)
-    ny = len(ys)
-    
-    estimated = nx * ny
-    print(f"Full grid dimensions: {nx} cols × {ny} rows = {estimated:,} cells")
-    
+    print(f"[3/10] Generating grid coordinates (resolution={res}m)...")
+    xs = np.arange(minx + res / 2.0, maxx, res)
+    ys = np.arange(miny + res / 2.0, maxy, res)
+    print(f"       Grid dimensions: {len(xs)} cols × {len(ys)} rows")
+    estimated = len(xs) * len(ys)
+    print(f"       Estimated cells: {estimated:,}")
     if estimated > max_cells:
         raise RuntimeError(
-            f"Estimated grid cells ({estimated:,}) > max_cells ({max_cells:,}). Abort to avoid OOM"
+            f"Estimated grid cells ({estimated}) > max_cells ({max_cells}). Abort to avoid OOM"
         )
-
-    # Create meshgrid and track original grid indices
-    # xx[i, j] corresponds to col j, row i
+    print(f"[4/10] Creating meshgrid...")
     xx, yy = np.meshgrid(xs, ys)
-    col_indices_2d, row_indices_2d = np.meshgrid(np.arange(nx), np.arange(ny))
     
-    # Flatten to 1D (row-major order: bottom-to-top, left-to-right)
-    xx_flat = xx.ravel()
-    yy_flat = yy.ravel()
-    col_idx_flat = col_indices_2d.ravel()
-    row_idx_grid_flat = row_indices_2d.ravel()
+    # Store col_idx and row_idx_grid before raveling
+    col_indices = np.arange(len(xs))
+    row_indices = np.arange(len(ys))
+    col_idx_grid, row_idx_grid = np.meshgrid(col_indices, row_indices)
+    print(f"       Meshgrid created: {xx.shape}")
     
-    print(f"Creating {len(xx_flat):,} points before clipping...")
-    pts = [Point(x, y) for x, y in zip(xx_flat, yy_flat)]
-
+    print(f"[5/10] Flattening arrays...")
+    xx = xx.ravel()
+    yy = yy.ravel()
+    col_idx_flat = col_idx_grid.ravel()
+    row_idx_grid_flat = row_idx_grid.ravel()
+    print(f"       Total points: {len(xx):,}")
+    
+    print(f"[6/10] Creating Point geometries...")
+    pts = [Point(x, y) for x, y in zip(xx, yy)]
+    print(f"       Created {len(pts):,} points")
     grid_gdf = gpd.GeoDataFrame(
         {
-            "x_m": xx_flat,      # Keep as float64 for backward compatibility
-            "y_m": yy_flat,      # Keep as float64 for backward compatibility
-            "col_idx": col_idx_flat,
-            "row_idx_grid": row_idx_grid_flat
+            "x_m": xx.astype(np.float64),  # Explicit float64
+            "y_m": yy.astype(np.float64),  # Explicit float64
+            "col_idx": col_idx_flat.astype(np.int32),
+            "row_idx_grid": row_idx_grid_flat.astype(np.int32),
         },
         geometry=pts,
-        crs=target_crs
+        crs=target_crs,
     )
-
+    
     # Clip to boundary union
-    print("Clipping to city boundary...")
+    print(f"[7/10] Clipping to boundary union...")
     city_union = city_proj.union_all()
     mask = grid_gdf.geometry.within(city_union)
+    before_clip = len(grid_gdf)
     grid_gdf = grid_gdf[mask].reset_index(drop=True)
+    print(f"       Retained {len(grid_gdf):,} of {before_clip:,} points ({100*len(grid_gdf)/before_clip:.1f}%)")
     
-    n_points = len(grid_gdf)
-    print(f"After clipping: {n_points:,} points retained ({100*n_points/estimated:.1f}% of full grid)")
+    # Add row_idx (contiguous 0-based index after clipping)
+    print(f"[8/10] Adding row_idx and grid_id...")
+    grid_gdf["row_idx"] = np.arange(len(grid_gdf), dtype=np.int32)
     
-    # Assign contiguous row_idx (0..N-1) for clipped grid
-    # TODO: neighbor precompute will use row_idx to build spatial index and
-    # x_m, y_m for KDTree queries. Ensure these columns are present and correct.
-    grid_gdf['row_idx'] = np.arange(n_points, dtype=np.int32)
+    # Add grid_id with zero-padding
+    grid_gdf["grid_id"] = grid_gdf["row_idx"].apply(lambda x: f"g{x:08d}")
+    print(f"       row_idx range: [0, {len(grid_gdf)-1}]")
     
-    # Create zero-padded grid_id string: "g00000000"
-    # Purpose: Human-readable identifier for API responses, debugging, joins
-    grid_gdf['grid_id'] = grid_gdf['row_idx'].apply(lambda i: f"g{i:08d}")
+    # Convert to WGS84 for lat/lon
+    print(f"[9/10] Converting to WGS84 and computing H3 cells...")
+    grid_wgs84 = grid_gdf.to_crs("EPSG:4326")
+    grid_gdf["centroid_lon"] = grid_wgs84.geometry.x.astype(np.float64)
+    grid_gdf["centroid_lat"] = grid_wgs84.geometry.y.astype(np.float64)
+    print(f"       Lon range: [{grid_gdf['centroid_lon'].min():.6f}, {grid_gdf['centroid_lon'].max():.6f}]")
+    print(f"       Lat range: [{grid_gdf['centroid_lat'].min():.6f}, {grid_gdf['centroid_lat'].max():.6f}]")
     
-    # Keep coordinates as float64 for backward compatibility with legacy grid
-    # (float32 precision loss prevents exact coordinate matching with old parquet files)
-    # Cast indices to int32 to save space
-    grid_gdf['col_idx'] = grid_gdf['col_idx'].astype('int32')
-    grid_gdf['row_idx_grid'] = grid_gdf['row_idx_grid'].astype('int32')
+    # Add H3 cells at resolution 11
+    grid_gdf["h3_cell"] = grid_wgs84.geometry.apply(
+        lambda geom: h3.latlng_to_cell(geom.y, geom.x, 11)
+    )
+    print(f"       H3 cells computed at resolution 11")
     
-    # Transform to WGS84 for centroid_lon, centroid_lat
-    # Purpose: Geographic coordinates needed for H3 indexing, distance calculations,
-    # and API responses (users query by lat/lon, not UTM)
-    print("Transforming to WGS84 for centroid_lon/centroid_lat...")
-    transformer = Transformer.from_crs(target_crs, "EPSG:4326", always_xy=True)
-    lon_flat, lat_flat = transformer.transform(grid_gdf['x_m'].values, grid_gdf['y_m'].values)
-    grid_gdf['centroid_lon'] = lon_flat.astype('float64')
-    grid_gdf['centroid_lat'] = lat_flat.astype('float64')
-    
-    # Compute H3 cell index at resolution 11 (~20m edge, matches 30m grid)
-    # Purpose: Fast spatial queries, regional indexing, future vector joins
-    if HAS_H3:
-        print("Computing H3 cells (resolution 11)...")
-        # Use h3.latlng_to_cell (new API) instead of deprecated geo_to_h3
-        grid_gdf['h3_cell'] = grid_gdf.apply(
-            lambda row: h3.latlng_to_cell(row['centroid_lat'], row['centroid_lon'], 11),
-            axis=1
-        )
-    else:
-        print("Skipping H3 (library not available)")
-        grid_gdf['h3_cell'] = None
-    
-    # Reorder columns for clarity
-    column_order = [
-        'row_idx', 'grid_id', 'x_m', 'y_m', 'centroid_lon', 'centroid_lat',
-        'col_idx', 'row_idx_grid', 'h3_cell', 'geometry'
+    # Reorder columns to match required schema
+    grid_gdf = grid_gdf[
+        [
+            "row_idx",
+            "grid_id",
+            "x_m",
+            "y_m",
+            "centroid_lon",
+            "centroid_lat",
+            "col_idx",
+            "row_idx_grid",
+            "h3_cell",
+            "geometry",
+        ]
     ]
-    grid_gdf = grid_gdf[column_order]
     
+    print(f"[10/10] Writing to parquet...")
     # Write main GeoParquet with geometry
     print(f"Writing GeoParquet to {out_path}...")
+    n_points = len(grid_gdf)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     grid_gdf.to_parquet(out_path, index=False)
     file_size_mb = out_path.stat().st_size / (1024 * 1024)
@@ -180,7 +136,7 @@ def create_grid(
     grid_nd = grid_gdf.drop(columns=['geometry'])
     grid_nd.to_parquet(nd_path, index=False)
     nd_size_mb = nd_path.stat().st_size / (1024 * 1024)
-    print(f"  ✓ Saved {n_points:,} points ({nd_size_mb:.2f} MB, no geometry)")
+    print(f"  ✓ Saved {len(grid_gdf):,} points ({nd_size_mb:.2f} MB, no geometry)")
     
     # Compute grid bounding boxes for transform.json
     grid_bbox_proj = (
@@ -199,14 +155,16 @@ def create_grid(
     # Write transform.json
     # Purpose: Documents grid spatial parameters for downstream raster alignment,
     # tiling, and coordinate transformations. Enables reproducible grid operations.
+    origin_x = minx + res / 2.0
+    origin_y = miny + res / 2.0
     transform_path = out_path.parent / "transform.json"
     transform_data = {
         "crs_epsg": int(target_crs.split(':')[1]),
         "origin_x": float(origin_x),
         "origin_y": float(origin_y),
         "res_m": float(res),
-        "nx": int(nx),
-        "ny": int(ny),
+        "nx": int(len(xs)),
+        "ny": int(len(ys)),
         "grid_bbox_proj": grid_bbox_proj,
         "grid_bbox_wgs84": grid_bbox_wgs84,
         "note": "Full grid dimensions (nx, ny) before clipping. Actual grid has fewer points due to city boundary clipping."
@@ -258,7 +216,7 @@ def create_grid(
     print(f"row_idx range:    [{grid_gdf['row_idx'].min()}, {grid_gdf['row_idx'].max()}]")
     print(f"col_idx range:    [{grid_gdf['col_idx'].min()}, {grid_gdf['col_idx'].max()}]")
     print(f"row_idx_grid range: [{grid_gdf['row_idx_grid'].min()}, {grid_gdf['row_idx_grid'].max()}]")
-    print(f"Full grid size:   {nx} × {ny} = {estimated:,} (before clipping)")
+    print(f"Full grid size:   {len(xs)} × {len(ys)} = {estimated:,} (before clipping)")
     print(f"Clipping ratio:   {100*n_points/estimated:.2f}%")
     print(f"Lon range:        [{grid_gdf['centroid_lon'].min():.6f}, {grid_gdf['centroid_lon'].max():.6f}]")
     print(f"Lat range:        [{grid_gdf['centroid_lat'].min():.6f}, {grid_gdf['centroid_lat'].max():.6f}]")
@@ -273,8 +231,6 @@ def create_grid(
     print(f"  - {nd_path}")
     print(f"  - {transform_path}")
     print(f"  - {manifest_path}")
-    
-    return grid_gdf
 
 
 def main():
@@ -284,7 +240,6 @@ def main():
     p.add_argument("--crs", default="EPSG:32643")
     p.add_argument("--res", type=float, default=30.0)
     args = p.parse_args()
-
     create_grid(Path(args.boundary), Path(args.out), target_crs=args.crs, res=args.res)
 
 

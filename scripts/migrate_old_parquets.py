@@ -293,17 +293,27 @@ def main(argv=None):
         if not args.input.exists():
             print(f"ERROR: Input file not found: {args.input}")
             return 1
-        
+
+        # If input is landsat8_YYYY-MM-DD_signals.backup.parquet, force output path
+        input_name = args.input.name
+        if input_name.startswith("landsat8_") and input_name.endswith("_signals.backup.parquet"):
+            date_part = input_name[len("landsat8_"):].replace("_signals.backup.parquet", "")
+            output_name = f"landsat8_{date_part}_signals.parquet"
+            output_path = Path("cache/landsat_processed") / output_name
+            print(f"Forcing output path: {output_path}")
+        else:
+            output_path = args.output
+
         migrated = migrate_parquet(
             args.input,
             canonical_grid,
-            args.output,
+            output_path,
             args.dry_run
         )
-        
+
         if migrated is None:
             return 1
-        
+
         print("\nMigration complete")
         return 0
     
