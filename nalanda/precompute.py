@@ -22,7 +22,7 @@ import argparse
 import json
 import logging
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -341,7 +341,8 @@ def precompute_neighbors_chunked(
     chunk_size: int = 50000,
     n_workers: int = 4,
     validate: bool = True,
-    leafsize: int = 16
+    leafsize: int = 16,
+    use_threads: bool = False
 ) -> Dict[float, Path]:
     """Precompute fixed-radius neighbors using chunked parallel processing.
     
@@ -387,28 +388,47 @@ def precompute_neighbors_chunked(
         all_neighbors = [None] * n_points  # Pre-allocate
         
         if n_workers > 1 and n_chunks > 1:
-            logger.info(f"Querying neighbors with {n_workers} workers (process pool, per-process KDTree)...")
-            # Each process builds its own KDTree from coords (not pickled!)
-            # This avoids the inefficiency and errors of pickling cKDTree objects.
-            with ProcessPoolExecutor(
-                max_workers=n_workers,
-                initializer=_init_worker_build_tree,
-                initargs=(coords, leafsize)
-            ) as executor:
-                futures = {}
-                for chunk_id, (start_idx, end_idx, coords_chunk) in enumerate(chunks):
-                    future = executor.submit(_worker_query_chunk, coords_chunk, radius)
-                    futures[future] = (chunk_id, start_idx, end_idx)
+            if use_threads:
+                logger.info(f"Querying neighbors with {n_workers} threads (ThreadPoolExecutor, main-process KDTree)...")
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    futures = {}
+                    for chunk_id, (start_idx, end_idx, coords_chunk) in enumerate(chunks):
+                        # Use the main-process KDTree directly; cKDTree.query_ball_point releases the GIL
+                        future = executor.submit(tree.query_ball_point, coords_chunk, radius)
+                        futures[future] = (chunk_id, start_idx, end_idx)
 
-                iterator = as_completed(futures)
-                if HAS_TQDM:
-                    iterator = tqdm(iterator, total=len(futures), desc=f"Querying {radius}m")
+                    iterator = as_completed(futures)
+                    if HAS_TQDM:
+                        iterator = tqdm(iterator, total=len(futures), desc=f"Querying {radius}m")
 
-                for future in iterator:
-                    chunk_id, start_idx, end_idx = futures[future]
-                    chunk_neighbors = future.result()
-                    for i, neighbors in enumerate(chunk_neighbors):
-                        all_neighbors[start_idx + i] = neighbors
+                    for future in iterator:
+                        chunk_id, start_idx, end_idx = futures[future]
+                        chunk_neighbors = future.result()
+                        for i, neighbors in enumerate(chunk_neighbors):
+                            all_neighbors[start_idx + i] = neighbors
+            else:
+                logger.info(f"Querying neighbors with {n_workers} workers (process pool, per-process KDTree)...")
+                # Each process builds its own KDTree from coords (not pickled!)
+                # This avoids the inefficiency and errors of pickling cKDTree objects.
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    initializer=_init_worker_build_tree,
+                    initargs=(coords, leafsize)
+                ) as executor:
+                    futures = {}
+                    for chunk_id, (start_idx, end_idx, coords_chunk) in enumerate(chunks):
+                        future = executor.submit(_worker_query_chunk, coords_chunk, radius)
+                        futures[future] = (chunk_id, start_idx, end_idx)
+
+                    iterator = as_completed(futures)
+                    if HAS_TQDM:
+                        iterator = tqdm(iterator, total=len(futures), desc=f"Querying {radius}m")
+
+                    for future in iterator:
+                        chunk_id, start_idx, end_idx = futures[future]
+                        chunk_neighbors = future.result()
+                        for i, neighbors in enumerate(chunk_neighbors):
+                            all_neighbors[start_idx + i] = neighbors
         else:
             # Single-threaded fallback (or n_workers == 1)
             logger.info("Querying neighbors (single-threaded)...")
@@ -588,6 +608,11 @@ def main(argv=None):
         action="store_true",
         help="Overwrite existing files"
     )
+    parser.add_argument(
+        "--use-threads",
+        action="store_true",
+        help="Use ThreadPoolExecutor instead of ProcessPoolExecutor (may be faster for cKDTree)"
+    )
     
     args = parser.parse_args(argv)
     
@@ -640,7 +665,8 @@ def main(argv=None):
             chunk_size=args.chunk_size,
             n_workers=args.workers,
             validate=not args.no_validate,
-            leafsize=args.leafsize
+            leafsize=args.leafsize,
+            use_threads=args.use_threads
         )
         
         # Write manifest
@@ -652,6 +678,7 @@ def main(argv=None):
             "radii_computed": radii,
             "chunk_size": args.chunk_size,
             "n_workers": args.workers,
+            "use_threads": bool(args.use_threads),
             "validation_enabled": not args.no_validate,
             "results": results,
             "total_runtime_seconds": time.time() - start_time
