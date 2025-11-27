@@ -162,7 +162,7 @@ def validate_openaq_pm25(
                 print(f"  {fb_type}: {count:,} ({pct:.1f}%)")
 
         # Check that fallback types are valid
-        valid_types = {"exact", "window", "seasonal", "spatial_idw", "none"}
+        valid_types = {"exact", "window", "seasonal", "spatial_idw", "knn_fallback", "temporal_fallback", "none"}
         invalid_types = set(fallback_counts.index) - valid_types
         if invalid_types:
             print(f"❌ Invalid fallback types found: {invalid_types}")

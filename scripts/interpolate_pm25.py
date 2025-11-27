@@ -14,6 +14,65 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from sklearn.impute import KNNImputer
+def knn_fallback_pm25(df: pd.DataFrame, n_neighbors: int = 5) -> pd.DataFrame:
+    """
+    Fill missing PM2.5 values using KNN imputation on latitude, longitude, and date ordinal.
+    Updates fallback_type to 'knn_fallback' for filled values.
+    """
+    df = df.copy()
+    # Prepare features for KNN: lat, lon, date ordinal
+    df["date"] = pd.to_datetime(df["date"])
+    features = df[["latitude", "longitude"]].copy()
+    features["date_ordinal"] = df["date"].map(lambda d: d.toordinal())
+    features["pm25"] = df["pm25"]
+    imputer = KNNImputer(n_neighbors=n_neighbors, weights="distance")
+    imputed = imputer.fit_transform(features)
+    # Only update values that were missing
+    filled = 0
+    for idx in df.index:
+        if pd.isna(df.at[idx, "pm25"]) and not pd.isna(imputed[idx, 3]):
+            df.at[idx, "pm25"] = imputed[idx, 3]
+            df.at[idx, "fallback_type"] = "knn_fallback"
+            filled += 1
+    print(f"KNN fallback filled {filled} missing PM2.5 values.")
+    return df
+
+def temporal_fallback_pm25(df: pd.DataFrame, max_years: int = 3) -> pd.DataFrame:
+    """
+    Fill missing PM2.5 values using the same sensor's value from previous/next years (same month/day).
+    Adds/updates fallback_type to 'temporal_fallback' for filled values.
+    max_years: how many years back/forward to search.
+    """
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    missing_mask = df["pm25"].isna()
+    filled = 0
+    for idx in df[missing_mask].index:
+        row = df.loc[idx]
+        sid = row["sensor_id"]
+        dt0 = row["date"]
+        # Try previous and next years, up to max_years
+        found = False
+        for offset in range(1, max_years+1):
+            for sign in [-1, 1]:
+                try:
+                    candidate_date = dt0.replace(year=dt0.year + sign*offset)
+                except ValueError:
+                    continue  # skip Feb 29, etc.
+                match = df[(df["sensor_id"]==sid) & (df["date"]==candidate_date) & (df["pm25"].notna())]
+                if not match.empty:
+                    df.at[idx, "pm25"] = match.iloc[0]["pm25"]
+                    df.at[idx, "fallback_type"] = "temporal_fallback"
+                    df.at[idx, "days_offset"] = (candidate_date - dt0).days
+                    filled += 1
+                    found = True
+                    break
+            if found:
+                break
+    print(f"Temporal fallback filled {filled} missing PM2.5 values.")
+    return df
+
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
@@ -204,18 +263,21 @@ def interpolate_missing_pm25(
     df_final = pd.concat(df_list, ignore_index=True)
     df_final = df_final.sort_values(["sensor_id", "date"])
 
+
+    # Apply temporal fallback for remaining missing values
+    df_final = temporal_fallback_pm25(df_final, max_years=3)
+
+    # Apply KNN fallback for any still-missing values
+    df_final = knn_fallback_pm25(df_final, n_neighbors=5)
+
     # Final statistics
     final_missing = df_final["pm25"].isna().sum()
     filled_count = initial_missing - final_missing
 
     print(f"\nInterpolation Results:")
-    print(f"  Values interpolated: {interpolated_count}")
-    print(
-        f"  Total filled: {filled_count}/{initial_missing} ({100*filled_count/initial_missing:.1f}% of missing)"
-    )
-    print(
-        f"  Remaining missing: {final_missing}/{total_rows} ({100*final_missing/total_rows:.1f}% of total)"
-    )
+    print(f"  Values interpolated (spatial): {interpolated_count}")
+    print(f"  Total filled: {filled_count}/{initial_missing} ({100*filled_count/initial_missing:.1f}% of missing)")
+    print(f"  Remaining missing: {final_missing}/{total_rows} ({100*final_missing/total_rows:.1f}% of total)")
 
     # Show breakdown by fallback type
     print(f"\nFallback Type Distribution:")
