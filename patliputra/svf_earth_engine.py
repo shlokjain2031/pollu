@@ -23,6 +23,113 @@ from typing import List, Tuple
 
 import ee
 
+def compute_building_features(
+    year: int,
+    geometry: ee.Geometry,
+    radii: List[int],
+    resolution_m: float = 5.0,
+    target_crs: str = "EPSG:32643",
+    floor_height_m: float = 3.0,
+) -> dict:
+    """
+    Compute building-related static features using only the selected bands:
+      - building_presence
+      - building_fractional_count
+      - building_height
+
+    Returns a dict mapping feature_name -> ee.Image. Feature names include:
+      bld_count_{r}m, bld_area_{r}m, bld_density_{r}m,
+      bld_height_mean_{r}m, bld_floorcount_mean_{r}m (derived),
+      dist_to_building_edge
+
+    Notes:
+      - bld_area is computed as building_fractional_count * pixelArea()
+      - bld_count is an approximation: sum of fractional counts within radius
+      - bld_floorcount_mean = bld_height_mean / floor_height_m
+    """
+
+    # --- Load building product; select only allowed bands ---
+    buildings = (
+        ee.ImageCollection("GOOGLE/Research/open-buildings-temporal/v1")
+        .filterBounds(geometry)
+        .filterDate(f"{year}-01-01", f"{year}-12-31")
+        .select(["building_presence", "building_fractional_count", "building_height"])
+        .max()
+    )
+
+    # Binary mask where building is present (presence > 0.5)
+    bld_presence = buildings.select("building_presence").gt(0.5)
+
+    # Fractional count band (may be fractional rooftop count per pixel)
+    bld_frac = buildings.select("building_fractional_count")
+
+    # Per-pixel building area estimate = fractional_count * pixel area (m^2)
+    pixel_area = ee.Image.pixelArea()  # m^2 per pixel in native projection
+    bld_area_px = bld_frac.multiply(pixel_area)
+
+    features = {}
+
+    for r in radii:
+        # Kernel for neighborhood sums (meters)
+        kernel = ee.Kernel.circle(radius=r, units="meters", normalize=False)
+
+        # ---- bld_count_{r}m: approximate building count within radius ----
+        # We sum fractional counts to get an approximate count (or roof coverage proxy)
+        bld_count = bld_frac.convolve(kernel).rename(f"bld_count_{r}m")
+
+        # ---- bld_area_{r}m: total building area (m^2) within radius ----
+        bld_area = bld_area_px.convolve(kernel).rename(f"bld_area_{r}m")
+
+        # ---- bld_density_{r}m: fraction of circle area occupied by buildings ----
+        circle_area = r*r*3.14159265359  # m^2
+        bld_density = bld_area.divide(circle_area).rename(f"bld_density_{r}m")
+
+        # ---- bld_height_mean_{r}m: mean building height within radius ----
+        # Sum of heights in neighborhood and divide by count (avoid divide-by-zero)
+        height_band = buildings.select("building_height")
+        # Mask height by presence so only real building pixels contribute
+        height_masked = height_band.updateMask(bld_presence)
+        # Sum(height) over kernel
+        sum_height = height_masked.convolve(kernel)
+        # Use bld_count as proxy for the number of building pixels (fractional)
+        # To avoid division by zero, create a safe divisor where count>0
+        safe_count = bld_count.where(bld_count.gt(0), bld_count)  # keeps zeros
+        # compute mean: sum_height / (bld_count_in_pixels * pixel_area_per_pixel / pixel_area_per_pixel)
+        # Here bld_count is fractional-count-sum; so dividing sum_height by bld_count gives approximate mean height
+        # Use ee.Image.expression for safety:
+        bld_height_mean = sum_height.divide(bld_count.add(ee.Image.constant(1e-9))).rename(f"bld_height_mean_{r}m")
+
+        # ---- bld_floorcount_mean_{r}m: estimate floors via height / floor_height_m ----
+        bld_floorcount_mean = bld_height_mean.divide(ee.Number(floor_height_m)).rename(f"bld_floorcount_mean_{r}m")
+
+        # Reproject each feature to target CRS and resolution
+        features[f"bld_count_{r}m"] = bld_count.reproject(crs=target_crs, scale=resolution_m)
+        features[f"bld_area_{r}m"] = bld_area.reproject(crs=target_crs, scale=resolution_m)
+        features[f"bld_density_{r}m"] = bld_density.reproject(crs=target_crs, scale=resolution_m)
+        features[f"bld_height_mean_{r}m"] = bld_height_mean.reproject(crs=target_crs, scale=resolution_m)
+        features[f"bld_floorcount_mean_{r}m"] = bld_floorcount_mean.reproject(crs=target_crs, scale=resolution_m)
+
+    # ---- dist_to_building_edge (meters) ----
+    # Convert desired maximum search distance (meters) into pixels for the transform
+    max_distance_m = 10000  # max search distance in meters (adjust as needed)
+    max_dist_pixels = int(max_distance_m / resolution_m)
+
+    # Ensure the input is a binary image (0/1) and cast to uint8 for the distance transform
+    bld_mask_uint = bld_presence.updateMask(bld_presence).unmask(0).uint8()
+
+    # Invert mask (distance from non-building pixel to building)
+    inverted = bld_mask_uint.Not()
+
+    # fastDistanceTransform expects positional args: (maxDistance, units)
+    dist_pixels = inverted.fastDistanceTransform(max_dist_pixels, "pixels")
+
+    # Convert pixels -> meters
+    dist_m = dist_pixels.multiply(resolution_m).rename("dist_to_building_edge")
+
+    features["dist_to_building_edge"] = dist_m.reproject(crs=target_crs, scale=resolution_m)
+
+
+    return features
 
 def create_dsm(
     year: int,
@@ -331,6 +438,7 @@ def download_svf_for_mumbai(
     resolution_m: float = 3.0,
     tile_cache_dir: Path | None = None,
     target_crs: str = "EPSG:32643",
+    radii: list = [30, 90],
 ) -> List[Path]:
     """
     Download SVF raster for Mumbai using tiled approach for multiple years.
@@ -396,14 +504,22 @@ def download_svf_for_mumbai(
         print(
             f"Computing SVF for {year} with {n_directions} directions at {resolution_m}m resolution..."
         )
-        svf = compute_svf(
-            year,
-            geometry,
-            n_directions,
-            search_radius_m,
-            resolution_m,
-            target_crs=target_crs,
-        )
+        # Building features
+        features = compute_building_features(year, geometry, radii=radii, resolution_m=resolution_m, target_crs=target_crs)
+        # Elevation (DEM only, not DSM)
+        dem = ee.Image("NASA/NASADEM_HGT/001").select("elevation").reproject(crs=target_crs, scale=resolution_m).rename("elevation")
+        # SVF
+        svf = compute_svf(year, geometry, n_directions=n_directions, search_radius_m=search_radius_m, resolution_m=resolution_m, target_crs=target_crs)
+        # Stack all bands
+        img = dem.addBands(svf)
+        for band in features.values():
+            img = img.addBands(band)
+        # Log the band names after stacking
+        try:
+            band_names = img.bandNames().getInfo()
+            print(f"[DEBUG] Bands in final image for year {year}: {band_names}")
+        except Exception as e:
+            print(f"[DEBUG] Could not retrieve band names: {e}")
 
         # Split into tiles
         tiles = split_bbox_into_tiles(bbox, tile_size_deg=0.02)
@@ -589,6 +705,9 @@ def main():
         "--radius", type=float, default=100.0, help="Search radius in meters"
     )
     parser.add_argument(
+        "--radii", type=List[int], default=[30, 90], help="Comma-separated search radii in meters"
+    )
+    parser.add_argument(
         "--resolution",
         type=float,
         default=3.0,
@@ -616,7 +735,7 @@ def main():
         print(f"Failed to initialize Earth Engine: {e}")
         return
 
-    # Parse years and bbox
+    # Parse years, bbox, and radii
     years = [int(y.strip()) for y in args.years.split(",")]
     bbox = tuple(float(x.strip()) for x in args.bbox.split(","))
 
@@ -639,6 +758,7 @@ def main():
         search_radius_m=args.radius,
         resolution_m=args.resolution,
         tile_cache_dir=args.tile_cache_dir,
+        radii=args.radii,
     )
 
 
