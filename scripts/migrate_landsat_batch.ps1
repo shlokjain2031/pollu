@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Continue"
 
 # Find all Landsat signal parquet files
-$files = Get-ChildItem -Path "cache\landsat_processed\landsat8_*_signals.parquet" | Select-Object -ExpandProperty FullName
+$files = Get-ChildItem -Path "tmp\landsat8_*_signals.backup.parquet" | Select-Object -ExpandProperty FullName
 
 Write-Host "Found $($files.Count) Landsat parquet files to migrate`n" -ForegroundColor Cyan
 
