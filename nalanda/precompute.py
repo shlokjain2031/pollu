@@ -53,15 +53,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
-def _build_kdtree(coords: np.ndarray) -> cKDTree:
+# Global variable for per-process KDTree (for process pool parallelism)
+_WORKER_TREE = None
+
+def _init_worker_build_tree(coords_np: np.ndarray, leafsize: int = 16):
+    """Build KDTree once inside each worker process.
+    This avoids pickling the cKDTree object, which is not supported and would be inefficient for large trees.
+    Instead, each process builds its own KDTree from the shared coordinates array.
+    """
+    global _WORKER_TREE
+    _WORKER_TREE = cKDTree(coords_np, leafsize=leafsize)
+
+def _worker_query_chunk(coords_chunk: np.ndarray, radius: float):
+    """Query neighbors using global worker KDTree.
+    This function is called in each worker process after the KDTree is initialized.
+    """
+    global _WORKER_TREE
+    return _WORKER_TREE.query_ball_point(coords_chunk, r=radius)
+
+def _build_kdtree(coords: np.ndarray, leafsize: int = 16) -> cKDTree:
     """Build KDTree from 2D coordinates with validation.
     
     Args:
         coords: Nx2 array of (x, y) coordinates in meters
+        leafsize: KDTree leafsize parameter (default: 16)
     
     Returns:
         scipy.spatial.cKDTree object
@@ -78,7 +98,7 @@ def _build_kdtree(coords: np.ndarray) -> cKDTree:
     n_points = len(coords)
     logger.info(f"Building KDTree for {n_points:,} points...")
     start = time.time()
-    tree = cKDTree(coords)
+    tree = cKDTree(coords, leafsize=leafsize)
     elapsed = time.time() - start
     logger.info(f"  ✓ KDTree built in {elapsed:.2f}s")
     
@@ -320,7 +340,8 @@ def precompute_neighbors_chunked(
     output_dir: Path,
     chunk_size: int = 50000,
     n_workers: int = 4,
-    validate: bool = True
+    validate: bool = True,
+    leafsize: int = 16
 ) -> Dict[float, Path]:
     """Precompute fixed-radius neighbors using chunked parallel processing.
     
@@ -340,8 +361,8 @@ def precompute_neighbors_chunked(
     n_points = len(coords)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Build KDTree once
-    tree = _build_kdtree(coords)
+    # Build KDTree once in main process (for single-threaded or thread-based fallback)
+    tree = _build_kdtree(coords, leafsize=leafsize)
     
     results = {}
     
@@ -366,42 +387,38 @@ def precompute_neighbors_chunked(
         all_neighbors = [None] * n_points  # Pre-allocate
         
         if n_workers > 1 and n_chunks > 1:
-            logger.info(f"Querying neighbors with {n_workers} workers...")
-            
-            with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                # Submit all chunks
+            logger.info(f"Querying neighbors with {n_workers} workers (process pool, per-process KDTree)...")
+            # Each process builds its own KDTree from coords (not pickled!)
+            # This avoids the inefficiency and errors of pickling cKDTree objects.
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_init_worker_build_tree,
+                initargs=(coords, leafsize)
+            ) as executor:
                 futures = {}
                 for chunk_id, (start_idx, end_idx, coords_chunk) in enumerate(chunks):
-                    future = executor.submit(
-                        _query_neighbors_chunk,
-                        tree, coords_chunk, radius, chunk_id
-                    )
+                    future = executor.submit(_worker_query_chunk, coords_chunk, radius)
                     futures[future] = (chunk_id, start_idx, end_idx)
-                
-                # Collect results with progress bar
+
                 iterator = as_completed(futures)
                 if HAS_TQDM:
                     iterator = tqdm(iterator, total=len(futures), desc=f"Querying {radius}m")
-                
+
                 for future in iterator:
                     chunk_id, start_idx, end_idx = futures[future]
                     chunk_neighbors = future.result()
-                    
-                    # Store results
                     for i, neighbors in enumerate(chunk_neighbors):
                         all_neighbors[start_idx + i] = neighbors
-        
         else:
-            # Single-threaded fallback
+            # Single-threaded fallback (or n_workers == 1)
             logger.info("Querying neighbors (single-threaded)...")
             iterator = range(n_chunks)
             if HAS_TQDM:
                 iterator = tqdm(iterator, desc=f"Querying {radius}m")
-            
+
             for chunk_id in iterator:
                 start_idx, end_idx, coords_chunk = chunks[chunk_id]
                 chunk_neighbors = tree.query_ball_point(coords_chunk, r=radius)
-                
                 for i, neighbors in enumerate(chunk_neighbors):
                     all_neighbors[start_idx + i] = neighbors
         
@@ -556,6 +573,12 @@ def main(argv=None):
         help="Number of parallel workers (default: 4)"
     )
     parser.add_argument(
+        "--leafsize",
+        type=int,
+        default=16,
+        help="Leafsize parameter for KDTree (default: 16)"
+    )
+    parser.add_argument(
         "--no-validate",
         action="store_true",
         help="Skip extensive validation (faster, less safe)"
@@ -608,7 +631,7 @@ def main(argv=None):
     
     # Run precomputation
     start_time = time.time()
-    
+
     if args.mode in ["neighbors", "all"]:
         results = precompute_neighbors_chunked(
             coords=coords,
@@ -616,7 +639,8 @@ def main(argv=None):
             output_dir=args.output_dir,
             chunk_size=args.chunk_size,
             n_workers=args.workers,
-            validate=not args.no_validate
+            validate=not args.no_validate,
+            leafsize=args.leafsize
         )
         
         # Write manifest
