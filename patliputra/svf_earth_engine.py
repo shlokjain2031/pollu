@@ -518,8 +518,12 @@ def download_svf_for_mumbai(
         try:
             band_names = img.bandNames().getInfo()
             print(f"[DEBUG] Bands in final image for year {year}: {band_names}")
+            # Log the values for a single pixel (center of geometry)
+            centroid = geometry.centroid().coordinates().getInfo()
+            pixel_values = img.sample(ee.Geometry.Point(centroid), scale=resolution_m, numPixels=1).first().toDictionary().getInfo()
+            print(f"[DEBUG] Band values at center pixel for year {year}: {pixel_values}")
         except Exception as e:
-            print(f"[DEBUG] Could not retrieve band names: {e}")
+            print(f"[DEBUG] Could not retrieve band names or pixel values: {e}")
 
         # Split into tiles
         tiles = split_bbox_into_tiles(bbox, tile_size_deg=0.02)
