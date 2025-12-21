@@ -1,0 +1,187 @@
+---
+artifact_type: grid_30m
+description: |
+  Canonical 30m centroid grid for a city. Static artifact used as the
+  spatial backbone for all signal sampling and aggregation.
+identity_fields:
+  - artifact_type    # constant: 'grid_30m'
+  - spatial_id       # city code (string), e.g. 'mumbai'
+  - timestamp        # ISO date (use date of generation or 'static')
+  - version          # processing/version tag (git-sha or semantic)
+path_template: artifacts/{artifact_type}/{spatial_id}/{version}/{spatial_id}.parquet
+format: parquet (GeoParquet recommended)
+schema_notes:
+  required_columns:
+    - grid_id (int)
+    - geometry (Point, EPSG:32643)
+    - x, y (float)
+producer_metadata:
+  - producer_name
+  - git_sha
+  - created_at
+atomic_write:
+  - write to a temporary path in same directory
+  - rename atomically then call manifest.mark_ok
+manifest_rules:
+  - lifecycle: missing -> producing -> ok | error
+frequency: static (run once per release)
+example:
+  identity:
+    artifact_type: grid_30m
+    spatial_id: mumbai
+    timestamp: static
+    version: v1
+  path: artifacts/grid_30m/mumbai/v1/mumbai.parquet
+
+---
+artifact_type: landsat_signals
+description: |
+  Per-date Landsat-derived signals sampled to the canonical 30m grid for a city.
+identity_fields:
+  - artifact_type: landsat_signals
+  - spatial_id       # city code (string)
+  - timestamp        # ISO date (YYYY-MM-DD)
+  - version          # processing version (git-sha or semantic)
+path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
+format: parquet (one file per artifact; writers may write a tmp then rename)
+schema_notes:
+  required_columns:
+    - grid_id (int)
+    - geometry (Point, EPSG:32643)
+    - x, y (float)
+    - toa_b2..toa_b11 (float)
+    - ndvi, mndwi, ndbi, ibi (float)
+    - is_nodata (bool)
+producer_metadata:
+  - producer_name
+  - git_sha
+  - parameters
+  - created_at
+atomic_write:
+  - write to temporary file in same directory (e.g. <name>.tmp)
+  - use atomic rename (os.replace) to final path
+  - call manifest.mark_ok only after successful rename
+manifest_rules:
+  - primary_key: (artifact_type, spatial_id, timestamp, version)
+  - lifecycle: missing -> producing -> ok | error
+frequency: daily or per overpass date
+provenance_and_qc:
+  - include source collection/date and sample counts in artifact_meta
+example:
+  identity:
+    artifact_type: landsat_signals
+    spatial_id: mumbai
+    timestamp: 2025-12-18
+    version: v1
+  path: artifacts/landsat_signals/2025-12-18/v1/mumbai.parquet
+
+---
+artifact_type: sentinel_evi_signals
+description: |
+  Sentinel-2 EVI values sampled/mapped onto the canonical 30m grid for a city/date.
+identity_fields:
+  - artifact_type
+  - spatial_id
+  - timestamp
+  - version
+path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
+format: parquet
+schema_notes:
+  required_columns:
+    - grid_id
+    - sentinel2_evi (float)
+    - sentinel2_evi_is_nodata (bool)
+producer_metadata:
+  - ee_collection
+  - git_sha
+atomic_write:
+  - tmp -> rename -> mark_ok
+frequency: monthly mapping to Landsat dates (on-demand)
+
+---
+artifact_type: s5p_no2_signals
+description: |
+  Sentinel-5P tropospheric NO2 sampled to the canonical grid and stored per date.
+identity_fields:
+  - artifact_type
+  - spatial_id
+  - timestamp
+  - version
+path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
+format: parquet
+schema_notes:
+  required_columns:
+    - grid_id
+    - s5p_no2 (float)
+    - s5p_no2_is_nodata (bool)
+producer_metadata:
+  - ee_collection
+  - git_sha
+atomic_write: tmp -> rename -> mark_ok
+frequency: daily (depending on availability)
+
+---
+artifact_type: openmeteo_meteo
+description: |
+  Meteorological variables matched to Landsat dates. Small tabular artifacts keyed by date.
+identity_fields:
+  - artifact_type
+  - spatial_id
+  - timestamp
+  - version
+path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
+format: parquet
+schema_notes:
+  required_columns:
+    - date
+    - temperature_2m
+    - wind_speed_10m
+    - surface_pressure
+producer_metadata:
+  - model (ecmwf_ifs|era5...)
+  - git_sha
+atomic_write: tmp -> rename -> mark_ok
+frequency: daily/overpass
+
+---
+artifact_type: openaq_daily
+description: |
+  Ground-truth PM2.5 values per sensor for a given date (sensor-date snapshot).
+identity_fields:
+  - artifact_type
+  - spatial_id
+  - timestamp
+  - version
+path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
+format: parquet
+schema_notes:
+  required_columns:
+    - sensor_id
+    - date
+    - pm25
+producer_metadata:
+  - data_source: openaq
+  - git_sha
+atomic_write: tmp -> rename -> mark_ok
+frequency: daily
+
+---
+artifact_type: svf_static
+description: |
+  Sky View Factor raster sampled to the grid (static per city/year). Stored as parquet sampled to grid.
+identity_fields:
+  - artifact_type
+  - spatial_id
+  - timestamp
+  - version
+path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
+format: parquet or GeoTIFF (but sampled parquet is recommended for grid consumers)
+schema_notes:
+  required_columns:
+    - grid_id
+    - svf (float)
+producer_metadata:
+  - source_dem
+  - git_sha
+atomic_write: tmp -> rename -> mark_ok
+frequency: static or per-year
