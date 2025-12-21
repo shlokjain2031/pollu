@@ -52,34 +52,65 @@ def create_app(manifest_store: Optional[InMemoryManifestStore] = None, intent_st
         mr = manifest.get(identity)
         decision = decide_request(identity, mr, trigger, intents)
 
-        # attach request id to decision headers (observability spine)
-        decision.headers = dict(decision.headers) if decision.headers is not None else {}
-        decision.headers.setdefault("X-Request-ID", request_id)
+        # normalize headers in one place (do not overwrite existing Decision headers)
+        hdrs = dict(decision.headers) if decision.headers is not None else {}
+        # X-Request-ID: from request entry (do not overwrite if present)
+        hdrs.setdefault("X-Request-ID", request_id)
+        # X-Manifest-ID: include when a manifest row was involved
+        if mr is not None:
+            hdrs.setdefault("X-Manifest-ID", mr.manifest_id)
+        # X-Intent-ID: include when decision body returned an intent
+        intent_obj = None
+        if isinstance(decision.body, dict):
+            intent_obj = decision.body.get("intent")
+        if intent_obj and isinstance(intent_obj, dict):
+            iid = intent_obj.get("intent_id")
+            if iid:
+                hdrs.setdefault("X-Intent-ID", iid)
 
         resp = make_response(jsonify(decision.body), decision.http_status)
-        for k, v in decision.headers.items():
+        for k, v in hdrs.items():
             resp.headers[k] = v
         return resp
 
 
     @app.route("/artifact/status", methods=["GET"])
     def status():
+        # single request_id per incoming HTTP request
+        client_req = request.args.get("client_request_id") or request.headers.get("X-Client-Request-ID")
+        if client_req:
+            request_id = str(client_req)
+        else:
+            request_id = uuid.uuid4().hex
+
         # status by identity or by intent_id
         intent_id = request.args.get("intent_id")
         if intent_id:
             intent = intents.get(intent_id)
             if not intent:
-                return make_response(jsonify({"error": "intent not found"}), 404)
-            return jsonify({"intent": intent.__dict__})
+                resp = make_response(jsonify({"error": "intent not found"}), 404)
+                resp.headers["X-Request-ID"] = request_id
+                return resp
+            resp = make_response(jsonify({"intent": intent.__dict__}), 200)
+            resp.headers["X-Request-ID"] = request_id
+            resp.headers.setdefault("X-Intent-ID", intent.intent_id)
+            return resp
 
         try:
             identity = parse_identity(request.args)
         except BadRequest as e:
-            return make_response(jsonify({"error": str(e)}), 400)
+            resp = make_response(jsonify({"error": str(e)}), 400)
+            resp.headers["X-Request-ID"] = request_id
+            return resp
         mr = manifest.get(identity)
         if mr is None:
-            return make_response(jsonify({"status": "missing", "identity": identity.__dict__}), 404)
-        return jsonify({"manifest": mr.__dict__})
+            resp = make_response(jsonify({"status": "missing", "identity": identity.__dict__}), 404)
+            resp.headers["X-Request-ID"] = request_id
+            return resp
+        resp = make_response(jsonify({"manifest": mr.__dict__}), 200)
+        resp.headers["X-Request-ID"] = request_id
+        resp.headers.setdefault("X-Manifest-ID", mr.manifest_id)
+        return resp
 
     return app
 
