@@ -8,6 +8,7 @@ from .stores import InMemoryManifestStore, InMemoryIntentStore
 from .decision import decide_request
 from .types import ManifestRow
 from datetime import datetime, timezone
+import uuid
 
 
 def create_app(manifest_store: Optional[InMemoryManifestStore] = None, intent_store: Optional[InMemoryIntentStore] = None) -> Flask:
@@ -33,14 +34,27 @@ def create_app(manifest_store: Optional[InMemoryManifestStore] = None, intent_st
 
     @app.route("/artifact", methods=["GET"])
     def get_artifact():
+        # single request_id per incoming HTTP request
+        client_req = request.args.get("client_request_id") or request.headers.get("X-Client-Request-ID")
+        if client_req:
+            request_id = str(client_req)
+        else:
+            request_id = uuid.uuid4().hex
+
         trigger = request.args.get("trigger_production", "false").lower() in ("1", "true", "yes")
         try:
             identity = parse_identity(request.args)
         except BadRequest as e:
-            return make_response(jsonify({"error": str(e)}), 400)
+            resp = make_response(jsonify({"error": str(e)}), 400)
+            resp.headers["X-Request-ID"] = request_id
+            return resp
 
         mr = manifest.get(identity)
         decision = decide_request(identity, mr, trigger, intents)
+
+        # attach request id to decision headers (observability spine)
+        decision.headers = dict(decision.headers) if decision.headers is not None else {}
+        decision.headers.setdefault("X-Request-ID", request_id)
 
         resp = make_response(jsonify(decision.body), decision.http_status)
         for k, v in decision.headers.items():
