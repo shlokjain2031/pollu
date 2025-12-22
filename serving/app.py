@@ -7,15 +7,23 @@ from .types import CanonicalIdentity, BadRequest
 from .stores import InMemoryManifestStore, InMemoryIntentStore
 from .decision import decide_request
 from .types import ManifestRow
+from .data_loader import ArtifactLoader, LocalPlaceholderLoader, LocalFileLoader
 from datetime import datetime, timezone
 import uuid
 
 
-def create_app(manifest_store: Optional[InMemoryManifestStore] = None, intent_store: Optional[InMemoryIntentStore] = None) -> Flask:
+def create_app(
+    manifest_store: Optional[InMemoryManifestStore] = None,
+    intent_store: Optional[InMemoryIntentStore] = None,
+    loader: Optional[ArtifactLoader] = None,
+) -> Flask:
     app = Flask(__name__)
 
     manifest = manifest_store or InMemoryManifestStore()
     intents = intent_store or InMemoryIntentStore()
+    # Default loader for Stage 3: read bytes from the local filesystem.
+    # Tests may still inject a different loader instance.
+    artifact_loader = loader or LocalFileLoader()
 
 
     def parse_identity(args) -> CanonicalIdentity:
@@ -67,6 +75,23 @@ def create_app(manifest_store: Optional[InMemoryManifestStore] = None, intent_st
             iid = intent_obj.get("intent_id")
             if iid:
                 hdrs.setdefault("X-Intent-ID", iid)
+
+        # If decision is a successful serve, invoke the loader to obtain raw bytes.
+        if decision.http_status == 200 and mr is not None and mr.state == "ok":
+            # loader enforces the precondition that manifest_row.state == 'ok'
+            try:
+                data_bytes = artifact_loader.load(mr)
+            except Exception as e:
+                # Loader failures are internal server errors for now.
+                resp = make_response(jsonify({"error": "loader_error", "detail": str(e)}), 500)
+                resp.headers.update(hdrs)
+                return resp
+
+            resp = make_response(data_bytes, 200)
+            resp.headers["Content-Type"] = "application/octet-stream"
+            for k, v in hdrs.items():
+                resp.headers[k] = v
+            return resp
 
         resp = make_response(jsonify(decision.body), decision.http_status)
         for k, v in hdrs.items():
