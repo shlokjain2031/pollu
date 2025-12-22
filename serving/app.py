@@ -8,6 +8,7 @@ from .stores import InMemoryManifestStore, InMemoryIntentStore
 from .decision import decide_request
 from .types import ManifestRow
 from .data_loader import ArtifactLoader, LocalPlaceholderLoader, LocalFileLoader
+from .query_descriptors import get_descriptor
 from datetime import datetime, timezone
 import uuid
 
@@ -135,6 +136,103 @@ def create_app(
         resp = make_response(jsonify({"manifest": mr.__dict__}), 200)
         resp.headers["X-Request-ID"] = request_id
         resp.headers.setdefault("X-Manifest-ID", mr.manifest_id)
+        return resp
+
+    @app.route("/query", methods=["GET"])
+    def query_endpoint():
+        # single request_id per incoming HTTP request
+        client_req = request.args.get("client_request_id") or request.headers.get("X-Client-Request-ID")
+        if client_req:
+            request_id = str(client_req)
+        else:
+            request_id = uuid.uuid4().hex
+
+        # parse descriptor kind
+        qkind = request.args.get("query_kind")
+        if not qkind:
+            resp = make_response(jsonify({"error": "missing query_kind"}), 400)
+            resp.headers["X-Request-ID"] = request_id
+            return resp
+
+        descriptor = get_descriptor(qkind)
+        if descriptor is None:
+            resp = make_response(jsonify({"error": "unsupported query_kind"}), 400)
+            resp.headers["X-Request-ID"] = request_id
+            return resp
+
+        # parse identity
+        try:
+            identity = parse_identity(request.args)
+        except BadRequest as e:
+            resp = make_response(jsonify({"error": str(e)}), 400)
+            resp.headers["X-Request-ID"] = request_id
+            return resp
+
+        # validate descriptor parameters
+        params = {}
+        for p in descriptor.params:
+            val = request.args.get(p.name)
+            if val is None:
+                if p.required:
+                    resp = make_response(jsonify({"error": f"missing parameter: {p.name}"}), 400)
+                    resp.headers["X-Request-ID"] = request_id
+                    return resp
+                else:
+                    params[p.name] = None
+                    continue
+            try:
+                # only basic casting (str, int, float)
+                if p.type is int:
+                    params[p.name] = int(val)
+                elif p.type is float:
+                    params[p.name] = float(val)
+                else:
+                    params[p.name] = val
+            except Exception:
+                resp = make_response(jsonify({"error": f"invalid type for parameter: {p.name}"}), 400)
+                resp.headers["X-Request-ID"] = request_id
+                return resp
+
+        # Now consult manifest and decision as usual
+        mr = manifest.get(identity)
+        decision = decide_request(identity, mr, False, intents)
+
+        # normalize headers
+        hdrs = dict(decision.headers) if decision.headers is not None else {}
+        hdrs.setdefault("X-Request-ID", request_id)
+        if mr is not None:
+            hdrs.setdefault("X-Manifest-ID", mr.manifest_id)
+
+        intent_obj = None
+        if isinstance(decision.body, dict):
+            intent_obj = decision.body.get("intent")
+        if intent_obj and isinstance(intent_obj, dict):
+            iid = intent_obj.get("intent_id")
+            if iid:
+                hdrs.setdefault("X-Intent-ID", iid)
+
+        if decision.http_status != 200 or mr is None or mr.state != "ok":
+            resp = make_response(jsonify(decision.body), decision.http_status)
+            for k, v in hdrs.items():
+                resp.headers[k] = v
+            return resp
+
+        # Ensure loader supports query()
+        try:
+            data_bytes = artifact_loader.query(mr, descriptor, params)
+        except NotImplementedError:
+            resp = make_response(jsonify({"error": "loader does not support queries"}), 501)
+            resp.headers.update(hdrs)
+            return resp
+        except Exception as e:
+            resp = make_response(jsonify({"error": "loader_error", "detail": str(e)}), 500)
+            resp.headers.update(hdrs)
+            return resp
+
+        resp = make_response(data_bytes, 200)
+        resp.headers["Content-Type"] = "application/octet-stream"
+        for k, v in hdrs.items():
+            resp.headers[k] = v
         return resp
 
     return app
