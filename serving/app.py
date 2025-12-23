@@ -9,6 +9,53 @@ from .decision import decide_request
 from .types import ManifestRow
 from .data_loader import ArtifactLoader, LocalPlaceholderLoader, LocalFileLoader
 from .query_descriptors import get_descriptor
+from datetime import timedelta
+from typing import Tuple, Optional
+
+# Hard limits for Stage 4 serving bounds enforcement
+MAX_TIME_WINDOW_DAYS = 90
+MAX_POLYGON_SPATIAL_INDICES = 10_000
+MAX_RAW_ROWS = 1_000_000
+
+
+def _parse_iso(ts: str):
+    # naive ISO parser; rely on datetime.fromisoformat for strictness
+    from datetime import datetime
+
+    try:
+        # fromisoformat accepts 'YYYY-MM-DDTHH:MM:SS' and with timezone
+        return datetime.fromisoformat(ts)
+    except Exception:
+        # Let calling code treat parsing failures as validation errors
+        return None
+
+
+def _estimate_spatial_index_count_from_wkt(wkt: str) -> int:
+    """Estimate the number of spatial indices a polygon would cover.
+
+    Strategy:
+    - If Shapely is present, compute geometry complexity via number of coords.
+    - Otherwise, fall back to a cheap heuristic using WKT length.
+    This is conservative but performant and allows serving to reject
+    obviously huge polygons.
+    """
+    if not wkt:
+        return 0
+    try:
+        from shapely import wkt as shapely_wkt  # type: ignore
+
+        geom = shapely_wkt.loads(wkt)
+        # Count coordinates in exterior + interiors
+        count = 0
+        if hasattr(geom, "exterior") and geom.exterior is not None:
+            count += len(list(geom.exterior.coords))
+        if hasattr(geom, "interiors") and geom.interiors is not None:
+            for ring in geom.interiors:
+                count += len(list(ring.coords))
+        return max(1, count)
+    except Exception:
+        # Fallback heuristic: WKT length / 10
+        return max(1, len(wkt) // 10)
 from datetime import datetime, timezone
 import uuid
 
@@ -216,6 +263,47 @@ def create_app(
             for k, v in hdrs.items():
                 resp.headers[k] = v
             return resp
+        # Enforce bounds before invoking the loader (time windows, polygon size, raw rows)
+        # 1) Time window enforcement
+        if any(p.name in ("start", "end") for p in descriptor.params):
+            start = params.get("start")
+            end = params.get("end")
+            if start and end:
+                s_dt = _parse_iso(start)
+                e_dt = _parse_iso(end)
+                if s_dt is None or e_dt is None:
+                    resp = make_response(jsonify({"error": "invalid date format for start/end"}), 400)
+                    resp.headers.update(hdrs)
+                    return resp
+                window_days = (e_dt - s_dt).total_seconds() / 86400.0
+                if window_days < 0:
+                    resp = make_response(jsonify({"error": "start must be before end"}), 400)
+                    resp.headers.update(hdrs)
+                    return resp
+                if window_days > MAX_TIME_WINDOW_DAYS:
+                    resp = make_response(jsonify({"error": "time_window_exceeded", "max_days": MAX_TIME_WINDOW_DAYS}), 422)
+                    resp.headers.update(hdrs)
+                    return resp
+
+        # 2) Polygon spatial coverage enforcement
+        if any(p.name == "wkt" for p in descriptor.params):
+            wkt = params.get("wkt")
+            if wkt:
+                idx_count = _estimate_spatial_index_count_from_wkt(wkt)
+                if idx_count > MAX_POLYGON_SPATIAL_INDICES:
+                    resp = make_response(jsonify({"error": "polygon_too_large", "indices": idx_count, "max": MAX_POLYGON_SPATIAL_INDICES}), 422)
+                    resp.headers.update(hdrs)
+                    return resp
+
+        # 3) Raw rows enforcement (descriptor-level)
+        if descriptor.query_kind.name == "POLYGON_TIME_RANGE_RAW":
+            declared = None
+            if descriptor.safety_limits:
+                declared = descriptor.safety_limits.get("max_rows")
+            if declared is not None and declared > MAX_RAW_ROWS:
+                resp = make_response(jsonify({"error": "raw_rows_exceed_limit", "declared": declared, "max": MAX_RAW_ROWS}), 422)
+                resp.headers.update(hdrs)
+                return resp
 
         # Ensure loader supports query()
         try:

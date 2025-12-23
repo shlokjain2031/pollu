@@ -99,6 +99,12 @@ class DuckDBQueryLoader(ArtifactLoader):
 
         conn = self._duckdb.connect(database=db_path, read_only=True)
         try:
+            # Ensure spatial extension is loaded when available so spatial SQL works.
+            try:
+                conn.execute("LOAD spatial")
+            except Exception:
+                # Non-fatal: loader will surface error if spatial functions are required.
+                pass
             # Map descriptor -> hardcoded query template. Templates assume an
             # internal table `observations` exists with columns: spatial_id, timestamp, value, geom
             kind = descriptor.query_kind

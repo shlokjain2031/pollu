@@ -33,3 +33,5 @@ cache/**
 
 # VSCode
 .vscode/
+tmp_test.db
+tests/fixtures/observations.parquet
