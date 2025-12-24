@@ -17,6 +17,7 @@ cache/
 pollu.egg-info/
 tmp/
 artifacts/
+manifest/grid/
 
 # Testing
 fake/
