@@ -1,0 +1,519 @@
+---
+# Pipeline Design Invariants
+# Last updated: 2025-12-24
+# Status: canonical reference for all patliputra + nalanda refactoring
+#
+# This document defines hard constraints that all data streams must respect.
+# Violating these invariants is a bug, not a feature request.
+
+grid:
+  version: "v1"
+  description: "Canonical grid definition for all raster data sources"
+  
+  invariants:
+    crs: "EPSG:32643"
+    crs_name: "WGS 84 / UTM zone 43N"
+    resolution_m: 30.0
+    
+    origin:
+      description: "Top-left corner of the full grid, computed per city from boundary bounds"
+      computation: "minx + res/2.0, miny + res/2.0 (centroid-based grid)"
+      note: "Each city has its own origin derived from boundary; origin is NOT global"
+    
+    extent:
+      description: "Grid dimensions (nx, ny) computed from city boundary bounding box"
+      computation: "nx = ceil((maxx - minx) / res), ny = ceil((maxy - miny) / res)"
+      clipping_rule: "After full grid creation, clip to city boundary union (within)"
+      
+    grid_hash:
+      description: "Deterministic hash identifying exact grid geometry"
+      algorithm: "sha256"
+      inputs:
+        - "crs (EPSG code)"
+        - "resolution_m"
+        - "origin_x, origin_y"
+        - "nx, ny (full grid dimensions before clipping)"
+        - "boundary_file path or boundary geometry WKT"
+      excludes:
+        - "filesystem timestamps"
+        - "generator script version"
+        - "non-deterministic metadata"
+      purpose: "Downstream pipelines verify grid_hash to ensure alignment; changing grid invalidates all cached signals"
+      
+  validation:
+    - "All canonical TIFFs for a given grid_version MUST match CRS exactly (no tolerance)"
+    - "Resolution must match within 1e-9 meters (float precision)"
+    - "Origin coordinates must match within 1e-6 meters"
+    - "Grid dimensions (nx, ny) must match exactly"
+    - "Grid hash must match if recomputing from same boundary"
+
+semantic_distinctions:
+  nodata_vs_missing:
+    critical: true
+    description: "NoData and Missing are fundamentally different and must never be conflated"
+    
+    nodata:
+      definition: "The sensor produced a value, but it is invalid or masked"
+      examples:
+        - "Cloud-covered pixel"
+        - "Sensor saturation"
+        - "Algorithmic mask (e.g., water mask, quality flags)"
+      interpretation: "Observation was attempted, but result is unusable"
+      representation: "Raster cell value = nodata_value (e.g., -9999.0 for float32)"
+      property_of: "Raster cell content"
+      
+    missing:
+      definition: "The sensor did not produce an observation for that (source, date, grid cell)"
+      examples:
+        - "Satellite did not pass over region"
+        - "Product not published yet"
+        - "Data dropped or unavailable upstream"
+      interpretation: "Observation does not exist"
+      representation: "Source TIFF file does not exist for (source, date)"
+      property_of: "Pipeline state / data availability"
+      
+    hard_rule: "If you mix these, downstream logic becomes unfixable"
+
+etl_fabrication_policy:
+  status: "PROHIBITED"
+  description: "ETL must not fabricate values under any circumstances at this stage"
+  
+  banned_operations:
+    - "Interpolation (temporal or spatial)"
+    - "Averaging (neighborhood, temporal window)"
+    - "Seasonal proxies"
+    - "Forward-fill"
+    - "Backfill"
+    - "Imputation of any kind"
+  
+  rationale:
+    - "These are modeling assumptions, not data facts"
+    - "Once fabricated, you cannot distinguish inferred from observed"
+    - "Permanently destroys information about data quality"
+    - "Prevents later experimentation with different imputation strategies"
+    - "Makes auditing and error diagnosis impossible"
+  
+  future_exception_criteria:
+    description: "If fabrication is ever needed, it must be:"
+    requirements:
+      - "Explicit (logged and flagged in output)"
+      - "Versioned (fabrication_version metadata)"
+      - "Reversible (original observations preserved separately)"
+    note: "But at this stage: ETL fabricates nothing"
+
+assembly_propagation_rules:
+  description: "How missing signals propagate into Nalanda assembly output"
+  
+  per_grid_cell_and_date:
+    if_source_tiff_exists:
+      action: "Value is taken from TIFF (may be NoData)"
+      note: "NoData is a valid observation result"
+    
+    if_source_tiff_does_not_exist:
+      action: "Value is marked as missing (e.g., NULL in Parquet column, or explicit missing flag)"
+      not_allowed:
+        - "Converting to NoData"
+        - "Dropping the row"
+        - "Fabricating a value"
+  
+  nalanda_output_contains:
+    - "Observed values (valid measurements)"
+    - "NoData values (invalid/masked measurements)"
+    - "Missing flags (no measurement attempted)"
+  
+  decision_authority:
+    description: "Nalanda does not decide what to do with missingness; it preserves it"
+    ensures:
+      - "Assembly is deterministic"
+      - "No silent filling"
+      - "Downstream logic has full information for modeling decisions"
+
+failure_classification:
+  description: "What constitutes a hard failure vs a soft missing field"
+  
+  hard_failure:
+    description: "Pipeline MUST abort with non-zero exit code"
+    triggers:
+      - "Grid mismatch (CRS, resolution, extent, grid_hash)"
+      - "Corrupt or unreadable TIFF"
+      - "Schema mismatch"
+      - "Inconsistent dimensions (width/height != expected)"
+      - "Violated invariants (e.g., wrong dtype, missing required metadata)"
+    interpretation: "These indicate bugs or contract violations"
+    
+  soft_missing:
+    description: "Pipeline continues; missingness is recorded explicitly"
+    triggers:
+      - "Missing source TIFF for a date"
+      - "Partial spatial coverage (some cells have NoData)"
+      - "NoData within raster (masked pixels)"
+    interpretation: "These indicate real-world incompleteness, not bugs"
+  
+  rule_of_thumb:
+    - "If the pipeline did something wrong → hard fail"
+    - "If the world failed to provide data → soft missing"
+  
+  consequences_of_violation:
+    treat_soft_as_hard: "System becomes brittle; fails on normal data gaps"
+    treat_hard_as_soft: "System becomes wrong; propagates corrupted data silently"
+
+canonical_tiff_contract:
+  description: "Requirements for all Patliputra-produced canonical TIFFs"
+  
+  file_identity:
+    pattern: "patliputra/canonical/{grid_version}/{source}/{YYYYMMDD}.tif"
+    determinism: "Same (source, date, grid_version) → bit-for-bit identical TIFF"
+    
+  raster_properties:
+    dtype_recommended: "float32"
+    nodata_value_recommended: -9999.0
+    compression: "DEFLATE or LZW"
+    tiled: true
+    predictor: 2
+    
+  metadata_required:
+    embedded_or_sidecar: "Prefer JSON sidecar for portability"
+    fields:
+      - "source (e.g., 'landsat8_ndvi')"
+      - "source_uri (original data location)"
+      - "acquisition_id (scene/granule ID)"
+      - "processing_version (code version or git SHA)"
+      - "grid_version (e.g., 'v1')"
+      - "date (ISO 8601: YYYY-MM-DD)"
+      - "grid_hash (sha256 of grid spec)"
+  
+  validation_on_write:
+    - "Assert CRS == grid.crs"
+    - "Assert resolution == grid.resolution_m (within 1e-9)"
+    - "Assert origin matches grid origin (within 1e-6)"
+    - "Assert dimensions (width, height) match expected grid (nx, ny)"
+    - "Assert dtype is consistent per source"
+    - "Assert nodata value is set and consistent"
+
+nalanda_assembly_contract:
+  description: "Nalanda responsibilities and prohibited actions"
+  
+  allowed:
+    - "Read canonical TIFFs from Patliputra"
+    - "Verify grid dimensions and grid_hash"
+    - "Assemble static signals once (grid-level attributes)"
+    - "Assemble dynamic signals per date (time-varying observations)"
+    - "Handle missing sources explicitly (record NULL or missing flag)"
+    - "Produce one in-memory table (DataFrame or Arrow Table)"
+  
+  prohibited:
+    - "Reproject rasters"
+    - "Resample rasters"
+    - "Fix grid misalignment"
+    - "Invent missing data silently"
+    - "Write files (except via Materializer)"
+    - "Update manifest (except via Materializer)"
+  
+  missing_source_behavior:
+    description: "Signal-specific fallback logic for missing TIFFs"
+    requirement: "Must be explicit and visible in code"
+    example: "If source X is missing for date D, set column X_D to NULL and set X_D_missing=True"
+    not_allowed: "Silent averaging, interpolation, or seasonal proxy"
+
+materialization_boundary:
+  description: "Exactly one place in codebase writes Parquet and updates manifest"
+  
+  location: "TBD (ujjayini/materializer.py or nalanda/materializer.py)"
+  
+  responsibilities:
+    - "Accept Nalanda in-memory output (DataFrame/Arrow Table)"
+    - "Validate schema and row counts"
+    - "Write Parquet artifact atomically (tmp → rename)"
+    - "Compute artifact hash (sha256)"
+    - "Mark manifest: producing → ok / error"
+    - "Record provenance metadata (git SHA, timestamp, input grid_hash)"
+  
+  enforcement:
+    - "No other module may write Parquet"
+    - "No other module may call manifest.mark_ok() or mark_error()"
+    - "Linter comment or structural check to prevent violations"
+
+versioning_and_provenance:
+  grid_version:
+    current: "v1"
+    triggers_new_version:
+      - "Changing CRS"
+      - "Changing resolution"
+      - "Changing origin computation rule"
+      - "Changing clipping rule"
+    note: "Changing grid_version invalidates all cached canonical TIFFs"
+  
+  processing_version:
+    description: "Code version used to produce artifact"
+    recommended: "git SHA at processing time"
+    purpose: "Reproducibility and debugging"
+  
+  artifact_versioning:
+    description: "Artifacts are immutable; new version = new artifact"
+    overwrite_policy: "Never overwrite unless explicit --force flag and logged"
+
+artifact_vs_temp:
+  description: "What is considered an artifact vs a temporary file"
+  
+  artifact:
+    definition: "A persisted output that is contractual"
+    properties:
+      - "Referenced by the manifest"
+      - "Eligible to be served"
+      - "Immutable once marked ok"
+      - "Represents a completed unit of work"
+    interpretation: "Once artifacts exist, the rest of the system is allowed to depend on them"
+  
+  temp_file:
+    definition: "Anything that exists only to help a run complete"
+    properties:
+      - "NOT referenced by the manifest"
+      - "Can be deleted at any time"
+      - "May be partially written"
+      - "May be rerun or regenerated"
+    examples:
+      - "Downloaded raw TIFFs (unless explicitly promoted)"
+      - "Intermediate serialized dataframes"
+      - "Scratch DuckDB files"
+  
+  hard_rule: "If it is not in the manifest, it is not real"
+
+atomic_write_guarantees:
+  description: "Artifact writes must be atomic from the reader's point of view"
+  
+  required_behavior:
+    - "Write to a temporary path"
+    - "fsync / close"
+    - "Rename to final path"
+  
+  serving_must_never_see:
+    - "Half-written files"
+    - "Partially populated directories"
+  
+  note: "If filesystem cannot guarantee atomic rename, you must simulate it. This is non-negotiable."
+
+validation_before_mark_ok:
+  description: "Validation checks that must pass before marking manifest row as ok"
+  
+  required_checks:
+    - "File exists at expected path"
+    - "Schema matches expected columns and types"
+    - "No duplicate (spatial_id, timestamp)"
+    - "Row count > 0"
+    - "grid_hash matches expected"
+    - "File is readable end-to-end"
+  
+  on_validation_failure:
+    - "Artifact is deleted or quarantined"
+    - "Manifest is NOT marked ok"
+  
+  hard_rule: "If you skip validation, the manifest becomes a lie"
+
+conditions_for_mark_error:
+  description: "When to mark manifest row as error (terminal state)"
+  
+  triggers:
+    - "ETL logic fails"
+    - "Validation fails"
+    - "Invariants are violated"
+    - "Unrecoverable exceptions occur"
+  
+  mark_error_must_include:
+    - "error_type (string classification)"
+    - "error_message (human-readable details)"
+    - "timestamp (ISO 8601)"
+  
+  hard_rules:
+    - "mark_error is terminal for that run"
+    - "Retries create new runs (new version or run_id)"
+    - "mark_error artifacts must NOT be served"
+  
+  important: "Soft failures (missing data) must NOT cause mark_error unless they violate a declared invariant"
+
+idempotency_guarantees:
+  description: "Reruns must be explicit, not implicit"
+  
+  rules:
+    - "Re-running ETL with the same identity must NOT overwrite an ok artifact"
+    - "Re-running ETL after error creates a new run (new version or run_id)"
+    - "Idempotency is achieved by identity, not by best effort"
+  
+  acceptable_behavior:
+    - "Detect existing ok → skip"
+    - "Detect producing → abort or wait (explicit choice)"
+    - "Detect error → allow retry with new version"
+  
+  unacceptable_behavior:
+    - "Silently overwriting"
+    - "Fixing old artifacts in place"
+    - "Guessing intent"
+
+crash_recovery:
+  description: "Behavior when ETL crashes mid-run"
+  
+  crash_scenarios:
+    no_manifest_row_written:
+      interpretation: "Nothing happened"
+      action: "No cleanup needed"
+    
+    manifest_row_producing:
+      interpretation: "Run was interrupted"
+      action_on_restart:
+        - "producing older than threshold is treated as stale"
+        - "Stale producing is NOT auto-repaired"
+        - "Manual or scheduled cleanup is required"
+  
+  hard_rule: "Do not auto-promote or auto-error on crash. You must choose explicitly."
+  
+  rationale:
+    - "Automatic recovery hides real bugs"
+    - "Correctness beats liveness here"
+
+retry_handling:
+  description: "Retries are new attempts, not continuations"
+  
+  rules:
+    - "Retry never reuses the same producing row"
+    - "Retry creates a new producing entry (new version or run_id)"
+    - "Old error entries remain as history"
+  
+  preserves:
+    - "Auditability"
+    - "Causality"
+    - "Debuggability"
+  
+  consequence: "If retries mutate existing rows, you lose history and blame"
+
+partial_failure_recording:
+  description: "How to handle partial failures (missing sources, NoData cells)"
+  
+  partial_failure_means:
+    - "Some sources missing"
+    - "Some cells NoData"
+    - "But invariants still hold"
+  
+  interpretation: "These are NOT manifest failures"
+  
+  recorded_in:
+    - "Inside the artifact (missing flags, NULL columns)"
+    - "Or in artifact metadata (sidecar JSON)"
+  
+  manifest_error_reserved_for:
+    - "Violated invariants"
+    - "Corrupt outputs"
+    - "Failed validation"
+    - "Crashed logic"
+  
+  hard_rule: "Manifest records pipeline correctness, not data completeness. If you mark error because data was missing, your system will never stabilize."
+
+assertion_placement:
+  description: "Assertions must live as close as possible to the boundary they protect"
+  
+  patliputra_assertions:
+    description: "Assert canonicalization invariants; fail fast"
+    checks:
+      - "CRS matches expected"
+      - "Resolution matches expected"
+      - "Extent matches expected"
+      - "grid_hash matches expected"
+      - "nodata encoding is correct"
+    behavior: "Hard assertions; raise exceptions immediately on mismatch"
+  
+  nalanda_assertions:
+    description: "Assert assembly invariants; never attempt to fix violations"
+    checks:
+      - "Identical grid_hash across all inputs"
+      - "Identical dimensions (nx, ny) across all inputs"
+      - "No duplicate spatial_id within a date"
+      - "Expected source presence (if declared as required)"
+    behavior: "Raise exceptions; do not reproject, resample, or silently skip"
+
+logging_requirements:
+  description: "Logs are for reconstruction, not narration"
+  
+  every_etl_run_must_log:
+    - "run_id / version (unique identifier)"
+    - "artifact_type (e.g., 'observations_parquet')"
+    - "grid_version (e.g., 'v1')"
+    - "date or date_range"
+    - "list of sources expected"
+    - "list of sources present (may differ from expected)"
+    - "start_timestamp (ISO 8601)"
+    - "end_timestamp (ISO 8601)"
+    - "high_level_counts:"
+    - "  - total_rows"
+    - "  - missing_per_signal (dict or summary)"
+    - "  - nodata_per_signal (dict or summary)"
+    - "failure_reason (if any; include error_type and error_message)"
+  
+  do_not_log:
+    - "Entire dataframes"
+    - "Per-row values"
+    - "Stack traces without context"
+  
+  goal: "Logs should answer 'What happened in this run?' in under 30 seconds of reading"
+
+intermediate_state_inspection:
+  description: "How to inspect intermediate states without promoting them to artifacts"
+  
+  allowed_mechanisms:
+    debug_flags:
+      description: "CLI flags that dump intermediate states for debugging"
+      examples:
+        - "--dump-grid-arrays (write grid-aligned arrays to tmp)"
+        - "--sample-dataframes (write small sampled dataframes)"
+        - "--debug-output-dir (optional temp serialization path)"
+    
+    optional_temp_serialization:
+      requirements:
+        - "run_id-scoped paths (e.g., tmp/{run_id}/debug_*.parquet)"
+        - "Auto-deletion policy (max age or explicit cleanup)"
+  
+  hard_rules:
+    - "Intermediates must NEVER be reused across runs"
+    - "Intermediates must NEVER be read by serving"
+  
+  critical: "If inspecting an intermediate changes system behavior, your boundary is wrong"
+
+value_traceability:
+  description: "How to trace a bad value back to source (most important debugging capability)"
+  
+  required_questions:
+    - "Which artifact produced it?"
+    - "Which run produced that artifact?"
+    - "Which grid cell it belongs to?"
+    - "Which source contributed that signal?"
+    - "Which raw file (TIFF) it came from?"
+  
+  implementation_requirements:
+    artifact_metadata:
+      - "run_id (unique identifier for the ETL run)"
+      - "git_sha (code version at run time)"
+      - "timestamp (when artifact was created)"
+      - "grid_version (e.g., 'v1')"
+      - "grid_hash (sha256 of grid spec)"
+      - "source_files (list of raw TIFF paths or URIs)"
+    
+    grid_cell_identity:
+      description: "Grid cell identity must be stable across runs"
+      requirements:
+        - "row_idx or grid_id must be deterministic given grid_version"
+        - "Spatial coordinates (x_m, y_m) must be reproducible"
+    
+    per_signal_provenance:
+      description: "Nalanda must retain per-signal provenance (at least conceptually)"
+      examples:
+        - "Column metadata: signal_X_source_file = 'landsat8/20231215.tif'"
+        - "Sidecar JSON: {\"landsat_ndvi\": {\"source_tiff\": \"...\", \"acquisition_id\": \"...\"}}"
+    
+    raw_file_naming:
+      description: "Raw files must be named deterministically"
+      pattern: "{source}/{YYYYMMDD}.tif or {source}/{grid_version}/{YYYYMMDD}.tif"
+  
+  hard_rule: "If you cannot trace a value without re-running the pipeline, you will debug by superstition"
+
+notes:
+  - "This document is authoritative for refactor decisions"
+  - "Violating these rules without explicit discussion and update to this doc is a bug"
+  - "When in doubt, fail loudly rather than guess"
+  - "Preserve information; never destroy it silently"
