@@ -252,9 +252,12 @@ def create_grid(
         shutil.move(str(tmp_metadata_path), str(final_metadata_path))
         print(f"  ✓ Moved all files to {artifact_dir}")
     
-    # Register in grid manifest
+    # Register in grid manifest (stored alongside grid artifacts)
     print(f"\nRegistering grid in manifest...")
-    manifest = GridManifest()
+    grid_manifest_dir = artifact_dir / "grid_manifest"
+    grid_manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = grid_manifest_dir / "grid_manifest.db"
+    manifest = GridManifest(db_path=manifest_path)
     returned_hash = manifest.register(
         grid_id=grid_id,
         grid_version=grid_version,
@@ -267,6 +270,7 @@ def create_grid(
     )
     manifest.close()
     print(f"  ✓ Registered grid '{grid_id}' (hash: {returned_hash[:16]}...)")
+    print(f"  ✓ Manifest stored at: {manifest_path}")
     
     # Validation and summary
     print("\n" + "="*60)
@@ -294,8 +298,10 @@ def create_grid(
     print(f"  - {artifact_dir / 'grid_nd.parquet'}")
     print(f"  - {artifact_dir / 'transform.json'}")
     print(f"  - {artifact_dir / 'metadata.json'}")
-    print(f"\nManifest:")
-    print(f"  - manifest/grid_manifest.db (grid_id='{grid_id}')")
+    print(f"\nGrid Manifest:")
+    print(f"  - {artifact_dir / 'grid_manifest' / 'grid_manifest.db'} (grid_id='{grid_id}')")
+    print(f"  - {artifact_dir / 'grid_manifest' / 'grid_manifest.db-shm'} (WAL shared memory)")
+    print(f"  - {artifact_dir / 'grid_manifest' / 'grid_manifest.db-wal'} (WAL write-ahead log)")
 
 
 def main():
