@@ -145,10 +145,17 @@ def fetch_band_values_batched(
         features = []
         for idx, row in batch_gdf.iterrows():
             pt = row.geometry
-            feat = ee.Feature(
-                ee.Geometry.Point([pt.x, pt.y]),
-                {"grid_id": row["grid_id"]}
-            )
+            # Attach image-level angle properties to each feature so they
+            # are included in reduceRegions results. Compute solar_zenith as
+            # (90 - SUN_ELEVATION). Sensor properties may be missing.
+            feat = ee.Feature(ee.Geometry.Point([pt.x, pt.y]))
+            feat = feat.set({
+                "grid_id": row["grid_id"],
+                "solar_azimuth": image.get("SUN_AZIMUTH"),
+                "solar_zenith": ee.Number(90).subtract(ee.Number(image.get("SUN_ELEVATION"))),
+                "sensor_azimuth": image.get("SENSOR_AZIMUTH"),
+                "sensor_zenith": image.get("SENSOR_ZENITH"),
+            })
             features.append(feat)
 
         fc = ee.FeatureCollection(features)
