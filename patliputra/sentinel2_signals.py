@@ -248,6 +248,18 @@ def fetch_band_values_batched(
     # Convert to DataFrame
     df = pd.DataFrame(all_results)
 
+    # Some Sentinel-2 properties (AOT) may be stored in scaled integer units
+    # (e.g. AOT ~ 0.6 stored as 600). Detect and rescale to human units.
+    if "AOT" in df.columns:
+        try:
+            aot_max = float(df["AOT"].dropna().max())
+            if aot_max > 10.0:
+                # assume AOT stored as per-thousand (x1000)
+                df["AOT"] = df["AOT"] / 1000.0
+                print("  ⚑ Rescaled AOT by /1000 to convert to unit range (~0-2)")
+        except Exception:
+            pass
+
     # Band columns: B2, B4, B8, AOT, QA10
     # Sort numerically to preserve expected order
     band_cols = [c for c in df.columns if c in ["B2", "B4", "B8", "AOT", "QA10"]]
