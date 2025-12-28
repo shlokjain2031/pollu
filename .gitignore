@@ -18,6 +18,7 @@ pollu.egg-info/
 tmp/
 artifacts/
 manifest/grid/
+test_output/
 
 # Testing
 fake/

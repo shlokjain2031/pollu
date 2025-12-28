@@ -23,8 +23,20 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("patliputra/landsat8_image_dates.txt"),
+        default=None,
         help="Output file path for image dates",
+    )
+    parser.add_argument(
+        "--artifacts-root",
+        type=Path,
+        default=Path("artifacts"),
+        help="Artifacts root directory (used if --output not specified)",
+    )
+    parser.add_argument(
+        "--city",
+        type=str,
+        default="mumbai",
+        help="City name for artifact path (default: mumbai)",
     )
     parser.add_argument(
         "--bbox",
@@ -41,14 +53,8 @@ def main():
     parser.add_argument(
         "--end-date",
         type=str,
-        default="2025-11-01",
+        default="2025-12-24",
         help="End date (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--max-cloud-cover",
-        type=float,
-        default=15.0,
-        help="Maximum cloud cover percentage",
     )
     args = parser.parse_args()
 
@@ -66,7 +72,6 @@ def main():
         ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA")
         .filterBounds(bbox)
         .filterDate(args.start_date, args.end_date)
-        .filter(ee.Filter.lt("CLOUD_COVER", args.max_cloud_cover))
         .sort("system:time_start")
     )
 
@@ -80,14 +85,21 @@ def main():
         all_dates.append(date)
     unique_dates = sorted(set(all_dates))
 
-    # Ensure output directory exists
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    # Determine output path: use --output if provided, otherwise write to
+    # artifacts/v1/landsat8/{city}/landast8_{city}_dates.txt
+    if args.output is None:
+        output_path = Path(args.artifacts_root) / "v1" / "landsat8" / args.city / f"landast8_{args.city}_dates.txt"
+    else:
+        output_path = Path(args.output)
 
-    with open(args.output, "w") as f:
+    # Ensure output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w") as f:
         for d in unique_dates:
             f.write(d + "\n")
 
-    print(f"Saved {len(unique_dates)} image dates to {args.output}")
+    print(f"Saved {len(unique_dates)} image dates to {output_path}")
 
 
 if __name__ == "__main__":
