@@ -11,7 +11,7 @@ Output:
     artifacts/v1/aqi/{date}.parquet
     
     Schema:
-        - sensor_id: str (e.g., "site_5811")
+        - site_id: str (e.g., "site_5811")
         - timestamp: datetime
         - pm25: float
 
@@ -64,14 +64,14 @@ def parse_filename(filename: str) -> tuple[str, str, str] | None:
     match = FILENAME_PATTERN.match(filename)
     if match:
         year, site_num, station_name = match.groups()
-        site_id = f"site_{site_num}"
+        site_id = f"{site_num}"
         return year, site_id, station_name
     return None
 
 
 def read_cpcb_csv(filepath: Path, site_id: str) -> Iterator[dict]:
     """
-    Read CPCB CSV file and yield records with sensor_id, timestamp, pm25.
+    Read CPCB CSV file and yield records with site_id, timestamp, pm25.
     
     Skips rows where PM2.5 is NA or invalid.
     
@@ -80,12 +80,12 @@ def read_cpcb_csv(filepath: Path, site_id: str) -> Iterator[dict]:
     filepath : Path
         Path to CSV file
     site_id : str
-        Sensor ID (e.g., "site_5811")
+        Site ID (e.g., "5811")
     
     Yields
     ------
     dict
-        Record with keys: sensor_id, timestamp, pm25
+        Record with keys: site_id, timestamp, pm25
     """
     try:
         # Read CSV with NA handling
@@ -108,7 +108,7 @@ def read_cpcb_csv(filepath: Path, site_id: str) -> Iterator[dict]:
     
     for _, row in df.iterrows():
         yield {
-            "sensor_id": site_id,
+            "site_id": site_id,
             "timestamp": row[TIMESTAMP_COLUMN],
             "pm25": row[PM25_COLUMN],
         }
@@ -189,7 +189,7 @@ def process_cpcb_files(
         try:
             # Create DataFrame
             df = pd.DataFrame(records)
-            df = df.sort_values(["timestamp", "sensor_id"]).reset_index(drop=True)
+            df = df.sort_values(["timestamp", "site_id"]).reset_index(drop=True)
             
             # Write parquet
             artifact_path = output_dir / f"{date_str}.parquet"
@@ -197,7 +197,7 @@ def process_cpcb_files(
             
             # Mark as ok
             num_records = len(df)
-            num_sensors = df["sensor_id"].nunique()
+            num_sensors = df["site_id"].nunique()
             manifest.mark_ok(date_str, artifact_path, num_records, num_sensors)
             
             stats["dates_processed"] += 1
