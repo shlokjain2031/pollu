@@ -41,6 +41,7 @@ from typing import List, Optional, Set
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import generic_filter
 
 
 # Default paths
@@ -62,7 +63,7 @@ def get_available_dates(artifact_dir: Path, city: str = 'mumbai') -> List[str]:
         city: City name
         
     Returns:
-        Sorted list of date strings in YYYY-MM-DD format.
+        Sorted list of valid date strings in YYYY-MM-DD format.
     """
     city_dir = artifact_dir / city
     if not city_dir.exists():
@@ -70,7 +71,14 @@ def get_available_dates(artifact_dir: Path, city: str = 'mumbai') -> List[str]:
     
     dates = []
     for f in city_dir.glob("????-??-??.parquet"):
-        dates.append(f.stem)
+        date_str = f.stem
+        # Validate date format to avoid ValueError later
+        try:
+            dt.strptime(date_str, "%Y-%m-%d")
+            dates.append(date_str)
+        except ValueError:
+            # Skip invalid date strings (e.g., malformed filenames)
+            continue
     
     return sorted(dates)
 
@@ -355,11 +363,16 @@ def compute_sentinel_indices(df: pd.DataFrame) -> pd.DataFrame:
     red_norm = np.clip(red / 10000, 0, 1)
     result['si'] = np.sqrt(np.maximum((1 - blue_norm) * (1 - red_norm), 0))
     
-    # Cloud mask from QA10
-    # QA10 encodes cloud/cirrus info - exact bit meanings depend on processor
-    # Simplified: treat non-null QA10 as potential cloud flag
-    # For now, create binary cloud_mask (1 = likely cloudy, 0 = clear)
-    result['cloud_mask'] = (~df['QA10'].isna()).astype(np.int8)
+    # Cloud mask from QA10 using bit-level interpretation
+    # Sentinel-2 L2A QA bands use bit flags:
+    #   - Bit 10: Opaque clouds (1 = cloud)
+    #   - Bit 11: Cirrus clouds (1 = cirrus)
+    # We flag a pixel as cloudy if either bit 10 or bit 11 is set.
+    # Reference: Sentinel-2 L2A Product Format Specification
+    qa10 = df['QA10'].fillna(0).to_numpy().astype(np.uint16)
+    cloud_bit = (qa10 >> 10) & 1       # Bit 10: opaque clouds
+    cirrus_bit = (qa10 >> 11) & 1      # Bit 11: cirrus clouds
+    result['cloud_mask'] = ((cloud_bit | cirrus_bit) > 0).astype(np.int8)
     
     return result
 
@@ -384,7 +397,7 @@ def compute_local_ndvi_std(
     result = df.copy()
     
     # Load grid to get spatial structure
-    grid_df = pd.read_parquet(grid_path, columns=['grid_id', 'row_idx', 'col_idx', 'row_idx_grid'])
+    grid_df = pd.read_parquet(grid_path, columns=['grid_id', 'col_idx', 'row_idx_grid'])
     
     # Merge to get spatial indices
     merged = result.merge(grid_df, on='grid_id', how='left')
@@ -415,23 +428,15 @@ def compute_local_ndvi_std(
     ndvi_vals = merged.loc[valid, 'ndvi_s2'].values
     ndvi_grid[rows, cols] = ndvi_vals
     
-    # Compute local std using a simple approach
-    # For each cell, get 3×3 window and compute std
-    half = window_size // 2
-    local_std = np.full_like(ndvi_grid, np.nan)
-    
-    for i in range(n_rows):
-        for j in range(n_cols):
-            r_start = max(0, i - half)
-            r_end = min(n_rows, i + half + 1)
-            c_start = max(0, j - half)
-            c_end = min(n_cols, j + half + 1)
-            
-            window = ndvi_grid[r_start:r_end, c_start:c_end]
-            valid_vals = window[~np.isnan(window)]
-            
-            if len(valid_vals) >= 2:
-                local_std[i, j] = np.std(valid_vals)
+    # Compute local std using scipy.ndimage.generic_filter
+    # This is O(n) vs O(n²) for nested loops - much faster for large grids
+    local_std = generic_filter(
+        ndvi_grid,
+        np.nanstd,
+        size=window_size,
+        mode='constant',
+        cval=np.nan,
+    )
     
     # Map back to DataFrame
     std_values = np.full(len(merged), np.nan)
@@ -604,13 +609,16 @@ if __name__ == '__main__':
         start = time.time()
         landsat_df = compute_landsat_features(target_date, include_bands=False)
         elapsed = time.time() - start
-        print(f"Source date: {landsat_df['landsat_date'].iloc[0]}")
-        print(f"Shape: {landsat_df.shape}, Time: {elapsed:.2f}s")
-        print(f"Columns: {landsat_df.columns.tolist()}")
-        print(f"\nSample stats:")
-        for col in ['ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi']:
-            if col in landsat_df.columns:
-                print(f"  {col}: min={landsat_df[col].min():.3f}, max={landsat_df[col].max():.3f}, mean={landsat_df[col].mean():.3f}")
+        if landsat_df.empty:
+            print("No Landsat data available.")
+        else:
+            print(f"Source date: {landsat_df['landsat_date'].iloc[0]}")
+            print(f"Shape: {landsat_df.shape}, Time: {elapsed:.2f}s")
+            print(f"Columns: {landsat_df.columns.tolist()}")
+            print(f"\nSample stats:")
+            for col in ['ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi']:
+                if col in landsat_df.columns:
+                    print(f"  {col}: min={landsat_df[col].min():.3f}, max={landsat_df[col].max():.3f}, mean={landsat_df[col].mean():.3f}")
     except Exception as e:
         print(f"Error: {e}")
     
