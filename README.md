@@ -24,21 +24,47 @@ Module	Codename	Function	Nature	Language
 Responsible for fetching, cleaning, and aligning upstream datasets into a unified geospatial table.
 Sources include:
 
-Landsat-8 Top-of-Atmosphere (TOA) reflectance via Google Earth Engine
+- Landsat-8 raw bands via Google Earth Engine (derived indices: NDVI, NDBI, MNDWI, BSI, IBI)
+- Sentinel-2 raw bands via Google Earth Engine (EVI, AOT, cloud mask)
+- Sky View Factor (SVF) from Google Open Buildings + NASA DEM via Earth Engine
+- Meteorological variables (temperature, humidity, wind, pressure, precipitation) from Open-Meteo
+- OSM features: road type, construction sites, traffic routes
+- Ground-truth PM2.5 from CPCB AQI monitoring stations
 
-Derived indices: NDVI, IBI
+Output: Per-date parquet artifacts organized by data source (30m resolution).
 
-Green View Index (GVI) from Google Street View
+**Pipeline Orchestration:**
 
-Sky View Factor (SVF) from Copernicus DEM
+Use the pipeline runner for automated data fetching:
 
-Meteorological variables (temperature, wind, boundary layer height, pressure) from ERA5
+```bash
+# Full pipeline for a date range
+python -m patliputra.pipeline run \
+  --city mumbai \
+  --start-date 2018-01-01 \
+  --end-date 2018-12-31 \
+  --ee-project your-earth-engine-project-id \
+  --hourly
 
-OSM features: road type, construction sites, traffic routes
+# Specific stages only
+python -m patliputra.pipeline run \
+  --stages meteo,sentinel2 \
+  --city mumbai \
+  --start-date 2021-06-01 \
+  --end-date 2021-06-30
 
-Ground-truth PM2.5 from AQI monitoring (AQI_cn)
+# Check artifact status
+python -m patliputra.pipeline status --city mumbai
+```
 
-Output: a city-level geospatial table of aligned features, typically at 30 m resolution.
+**Note**: All data fetching stages should run **sequentially** due to API rate limits and Earth Engine quotas. See [docs/patliputra_pipeline_guide.md](docs/patliputra_pipeline_guide.md) for details.
+
+**Time Estimates** (7 years of data):
+- Grid creation: 5 min (one-time)
+- Meteorological data: 16-20 hours (API rate limited)
+- Satellite data (Landsat-8 + Sentinel-2): 10-16 hours (Earth Engine quota limited)
+- Sky View Factor: 4-8 hours (Earth Engine intensive)
+- Total: **31-45 hours**
 
 2.2 Dwarka (Modeling Layer)
 
