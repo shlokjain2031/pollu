@@ -198,7 +198,11 @@ def assemble_training_data(
             grid_ids=grid_ids,
             include_bands=include_landsat_bands,
         )
-        print(f"    Landsat: {len(landsat_df):,} rows (source: {landsat_df['landsat_date'].iloc[0]})")
+        if not landsat_df.empty:
+            print(f"    Landsat: {len(landsat_df):,} rows (source: {landsat_df['landsat_date'].iloc[0]})")
+        else:
+            print("    Landsat: 0 rows (no data)")
+            landsat_df = None
     except (FileNotFoundError, ValueError) as e:
         if skip_missing_satellite:
             print(f"    Warning: Landsat data not found - {e}")
@@ -214,7 +218,11 @@ def assemble_training_data(
             grid_ids=grid_ids,
             include_spatial=include_sentinel_spatial,
         )
-        print(f"    Sentinel: {len(sentinel_df):,} rows (source: {sentinel_df['sentinel_date'].iloc[0]})")
+        if not sentinel_df.empty:
+            print(f"    Sentinel: {len(sentinel_df):,} rows (source: {sentinel_df['sentinel_date'].iloc[0]})")
+        else:
+            print("    Sentinel: 0 rows (no data)")
+            sentinel_df = None
     except (FileNotFoundError, ValueError) as e:
         if skip_missing_satellite:
             print(f"    Warning: Sentinel data not found - {e}")
