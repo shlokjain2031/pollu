@@ -47,6 +47,43 @@ Implements Land Use Regression (LUR) enhanced with Geographically and Temporally
 Model Equation
 y_i = β0(u_i, v_i, t_i) + Σ βk(u_i, v_i, t_i) * x_ik + ε_i
 
+2.3 Nalanda (Training Data Assembly)
+
+Orchestrates feature engineering and training data assembly for the modeling layer:
+
+- **Meteo features** (`features_meteo.py`): OpenMeteo hourly data with temporal lags (1h, 3h, 6h, 12h, 24h)
+- **Satellite features** (`features_satellite.py`): Landsat8 indices (NDVI, NDBI, MNDWI, BSI, IBI) + Sentinel2 (EVI, cloud mask, spatial features)
+- **Training assembly** (`training.py`): Joins target labels with features, outputs `training/{date}/training.parquet`
+- **CLI** (`cli.py`): Batch processing, validation, reporting
+
+**CLI Usage:**
+```bash
+# Check pipeline status
+python -m nalanda.cli status
+
+# Assemble single date
+python -m nalanda.cli assemble --date 2021-06-12
+
+# Assemble date range (parallel processing)
+python -m nalanda.cli assemble --start-date 2021-06-07 --end-date 2021-06-18 --parallel --workers 4
+
+# Validate all training data
+python -m nalanda.cli validate --all -v
+
+# Generate pipeline report
+python -m nalanda.cli report --output report.json
+```
+
+**Parallel Processing:**
+Use `--parallel` (or `-p`) to process multiple dates concurrently. Speeds up batch assembly significantly:
+```bash
+# Sequential (38.6s for 3 dates)
+python -m nalanda.cli assemble --start-date 2021-06-10 --end-date 2021-06-12
+
+# Parallel (47.0s for 3 dates, wall time includes overhead but individual tasks run concurrently)
+python -m nalanda.cli assemble --start-date 2021-06-10 --end-date 2021-06-12 --parallel
+```
+
 
 Where:
 
