@@ -441,7 +441,7 @@ def compute_local_ndvi_std(
     # Map back to DataFrame
     std_values = np.full(len(merged), np.nan)
     std_values[valid.values] = local_std[rows, cols]
-    result['local_ndvi_std'] = std_values[:len(result)]
+    result['local_ndvi_std'] = merged[:len(result)]
     
     return result
 
@@ -628,12 +628,15 @@ if __name__ == '__main__':
         start = time.time()
         sentinel_df = compute_sentinel_features(target_date, include_spatial=False)
         elapsed = time.time() - start
-        print(f"Source date: {sentinel_df['sentinel_date'].iloc[0]}")
-        print(f"Shape: {sentinel_df.shape}, Time: {elapsed:.2f}s")
-        print(f"Columns: {sentinel_df.columns.tolist()}")
-        print(f"\nSample stats:")
-        for col in ['evi', 'ui_light', 'si', 'ndvi_s2']:
-            if col in sentinel_df.columns:
-                print(f"  {col}: min={sentinel_df[col].min():.3f}, max={sentinel_df[col].max():.3f}, mean={sentinel_df[col].mean():.3f}")
+        if sentinel_df.empty:
+            print("No Sentinel2 data available.")
+        else:
+            print(f"Source date: {sentinel_df['sentinel_date'].iloc[0]}")
+            print(f"Shape: {sentinel_df.shape}, Time: {elapsed:.2f}s")
+            print(f"Columns: {sentinel_df.columns.tolist()}")
+            print(f"\nSample stats:")
+            for col in ['evi', 'ui_light', 'si', 'ndvi_s2']:
+                if col in sentinel_df.columns:
+                    print(f"  {col}: min={sentinel_df[col].min():.3f}, max={sentinel_df[col].max():.3f}, mean={sentinel_df[col].mean():.3f}")
     except Exception as e:
         print(f"Error: {e}")
