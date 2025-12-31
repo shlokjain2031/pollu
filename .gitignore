@@ -15,6 +15,14 @@ __pycache__/
 data/
 cache/
 pollu.egg-info/
+tmp/
+artifacts/
+manifest/grid/
+test_output/
+cpcb_aqi_data/
+
+# Testing
+fake/
 
 # Landsat/cache artifacts produced by processing - keep out of VCS
 # (cached mosaics, tiles, and per-date parquet outputs)
@@ -28,3 +36,5 @@ cache/**
 
 # VSCode
 .vscode/
+tmp_test.db
+tests/fixtures/observations.parquet
