@@ -72,12 +72,11 @@ def get_landsat8_image(date_str: str, bbox: tuple) -> ee.Image:
     west, south, east, north = bbox
     geometry = ee.Geometry.Rectangle([west, south, east, north])
 
-    # Query Landsat-8 Collection 2 Level-1 TOA
+    # Query Landsat-8 Collection 2 Level-1 TOA (no cloud filter - include all scenes)
     collection = (
         ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA")
         .filterBounds(geometry)
         .filterDate(date_str, ee.Date(date_str).advance(1, "day"))
-        .filter(ee.Filter.lt("CLOUD_COVER", 15))
         .sort("system:time_start")
     )
 
@@ -87,9 +86,16 @@ def get_landsat8_image(date_str: str, bbox: tuple) -> ee.Image:
 
     if count == 1:
         image = collection.first()
+        # Capture single scene cloud cover
+        scene_cloud_cover = image.get('CLOUD_COVER')
     else:
-        # Multiple scenes: mosaic
+        # Multiple scenes: mosaic and compute mean cloud cover
         image = collection.mosaic()
+        scene_cloud_cover = collection.aggregate_mean('CLOUD_COVER')
+    
+    # Attach scene-level cloud cover to image for metadata tracking
+    image = image.set('scene_cloud_cover', scene_cloud_cover)
+    image = image.set('scene_count', count)
 
     # Select all TOA bands
     bands = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11"]
@@ -155,6 +161,7 @@ def fetch_band_values_batched(
                 "solar_zenith": ee.Number(90).subtract(ee.Number(image.get("SUN_ELEVATION"))),
                 "sensor_azimuth": image.get("SENSOR_AZIMUTH"),
                 "sensor_zenith": image.get("SENSOR_ZENITH"),
+                "scene_cloud_cover": image.get("scene_cloud_cover"),
             })
             features.append(feat)
 
@@ -223,8 +230,21 @@ def fetch_band_values_batched(
     if "grid_id" not in df.columns:
         raise RuntimeError("grid_id missing from EE results")
 
-    # Keep only grid_id + band columns in numeric order
-    keep_cols = ["grid_id"] + band_cols
+    # Keep grid_id + scene_cloud_cover + angle properties + band columns
+    keep_cols = ["grid_id"]
+    
+    # Add scene cloud cover
+    if "scene_cloud_cover" in df.columns:
+        keep_cols.append("scene_cloud_cover")
+    
+    # Add angle properties (solar/sensor geometry)
+    angle_cols = ["solar_azimuth", "solar_zenith", "sensor_azimuth", "sensor_zenith"]
+    for col in angle_cols:
+        if col in df.columns:
+            keep_cols.append(col)
+    
+    # Add bands in numeric order
+    keep_cols.extend(band_cols)
     df = df[keep_cols]
     
     # Reindex to match canonical grid order (deterministic row ordering)
@@ -437,11 +457,13 @@ def main():
             )
 
             # Prepare metadata
+            scene_cloud_cover_val = df['scene_cloud_cover'].iloc[0] if 'scene_cloud_cover' in df.columns else None
             metadata = {
                 "date": date_str,
                 "city": args.city,
                 "source": "LANDSAT/LC08/C02/T1_TOA",
                 "bands": ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11"],
+                "scene_cloud_cover": scene_cloud_cover_val,
                 "grid_cells": len(df),
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "bbox": bbox,
