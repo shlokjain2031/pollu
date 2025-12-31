@@ -24,21 +24,47 @@ Module	Codename	Function	Nature	Language
 Responsible for fetching, cleaning, and aligning upstream datasets into a unified geospatial table.
 Sources include:
 
-Landsat-8 Top-of-Atmosphere (TOA) reflectance via Google Earth Engine
+- Landsat-8 raw bands via Google Earth Engine (derived indices: NDVI, NDBI, MNDWI, BSI, IBI)
+- Sentinel-2 raw bands via Google Earth Engine (EVI, AOT, cloud mask)
+- Sky View Factor (SVF) from Google Open Buildings + NASA DEM via Earth Engine
+- Meteorological variables (temperature, humidity, wind, pressure, precipitation) from Open-Meteo
+- OSM features: road type, construction sites, traffic routes
+- Ground-truth PM2.5 from CPCB AQI monitoring stations
 
-Derived indices: NDVI, IBI
+Output: Per-date parquet artifacts organized by data source (30m resolution).
 
-Green View Index (GVI) from Google Street View
+**Pipeline Orchestration:**
 
-Sky View Factor (SVF) from Copernicus DEM
+Use the pipeline runner for automated data fetching:
 
-Meteorological variables (temperature, wind, boundary layer height, pressure) from ERA5
+```bash
+# Full pipeline for a date range
+python -m patliputra.pipeline run \
+  --city mumbai \
+  --start-date 2018-01-01 \
+  --end-date 2018-12-31 \
+  --ee-project your-earth-engine-project-id \
+  --hourly
 
-OSM features: road type, construction sites, traffic routes
+# Specific stages only
+python -m patliputra.pipeline run \
+  --stages meteo,sentinel2 \
+  --city mumbai \
+  --start-date 2021-06-01 \
+  --end-date 2021-06-30
 
-Ground-truth PM2.5 from AQI monitoring (AQI_cn)
+# Check artifact status
+python -m patliputra.pipeline status --city mumbai
+```
 
-Output: a city-level geospatial table of aligned features, typically at 30 m resolution.
+**Note**: All data fetching stages should run **sequentially** due to API rate limits and Earth Engine quotas. See [docs/patliputra_pipeline_guide.md](docs/patliputra_pipeline_guide.md) for details.
+
+**Time Estimates** (7 years of data):
+- Grid creation: 5 min (one-time)
+- Meteorological data: 16-20 hours (API rate limited)
+- Satellite data (Landsat-8 + Sentinel-2): 10-16 hours (Earth Engine quota limited)
+- Sky View Factor: 4-8 hours (Earth Engine intensive)
+- Total: **31-45 hours**
 
 2.2 Dwarka (Modeling Layer)
 
@@ -46,6 +72,43 @@ Implements Land Use Regression (LUR) enhanced with Geographically and Temporally
 
 Model Equation
 y_i = β0(u_i, v_i, t_i) + Σ βk(u_i, v_i, t_i) * x_ik + ε_i
+
+2.3 Nalanda (Training Data Assembly)
+
+Orchestrates feature engineering and training data assembly for the modeling layer:
+
+- **Meteo features** (`features_meteo.py`): OpenMeteo hourly data with temporal lags (1h, 3h, 6h, 12h, 24h)
+- **Satellite features** (`features_satellite.py`): Landsat8 indices (NDVI, NDBI, MNDWI, BSI, IBI) + Sentinel2 (EVI, cloud mask, spatial features)
+- **Training assembly** (`training.py`): Joins target labels with features, outputs `training/{date}/training.parquet`
+- **CLI** (`cli.py`): Batch processing, validation, reporting
+
+**CLI Usage:**
+```bash
+# Check pipeline status
+python -m nalanda.cli status
+
+# Assemble single date
+python -m nalanda.cli assemble --date 2021-06-12
+
+# Assemble date range (parallel processing)
+python -m nalanda.cli assemble --start-date 2021-06-07 --end-date 2021-06-18 --parallel --workers 4
+
+# Validate all training data
+python -m nalanda.cli validate --all -v
+
+# Generate pipeline report
+python -m nalanda.cli report --output report.json
+```
+
+**Parallel Processing:**
+Use `--parallel` (or `-p`) to process multiple dates concurrently. Speeds up batch assembly significantly:
+```bash
+# Sequential (38.6s for 3 dates)
+python -m nalanda.cli assemble --start-date 2021-06-10 --end-date 2021-06-12
+
+# Parallel (47.0s for 3 dates, wall time includes overhead but individual tasks run concurrently)
+python -m nalanda.cli assemble --start-date 2021-06-10 --end-date 2021-06-12 --parallel
+```
 
 
 Where:

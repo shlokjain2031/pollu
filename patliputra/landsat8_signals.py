@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Download Landsat-8 TOA images for each date in landsat8_image_dates.txt,
-sample them at grid points, and compute spectral indices (NDVI, MNDWI, NDBI, IBI).
+Fetch Landsat-8 raw band values for grid cells and write per-date Parquet.
 
-Uses raster_to_grid_df from patliputra.utils.raster_sampling for sampling,
-then computes spectral indices inline.
+NO intermediate TIFFs are stored. For each date, we:
+1. Load the canonical grid
+2. Query Landsat-8 TOA image collection
+3. Batch-fetch band values (B1-B11) for all grid cells via reduceRegions
+4. Write one parquet per date with schema: grid_id, B1, B2, ..., B11
+5. Store in artifacts/v1/landsat8/{city}/{date}.parquet
 
 Prerequisites:
-  - Earth Engine initialized (ee.Initialize())
-  - Grid parquet file exists (you need to create this first)
+  - Earth Engine authenticated (ee.Authenticate() or service account)
+  - Grid artifact exists (artifacts/v1/grids/{city}/grid.parquet)
   
 Usage:
-  python patliputra/download_and_process_landsat.py \
+  python patliputra/landsat8_signals.py \
     --dates-file patliputra/landsat8_image_dates.txt \
-    --grid-parquet path/to/your/grid.parquet \
-    --output-dir cache/landsat_processed \
-    --cache-dir cache/landsat_downloads \
+    --grid-artifact artifacts/v1/grids/mumbai/grid.parquet \
+    --city mumbai \
     --project your-ee-project-id
 """
 
@@ -25,113 +27,30 @@ import argparse
 import sys
 from pathlib import Path
 from typing import List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import tempfile
+import shutil
 import json
+import time
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ee
-import numpy as np
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point
 
-# Import the raster_to_grid_df function from raster_sampling
-from patliputra.utils.raster_sampling import raster_to_grid_df
+from manifest.landsat_manifest import LandsatManifest
 
 
 def read_dates(dates_file: Path) -> List[str]:
     """Read dates from text file, one per line."""
     with open(dates_file, "r") as f:
         dates = [line.strip() for line in f if line.strip()]
-    return sorted(set(dates))  # unique and sorted
+    return sorted(set(dates))
 
 
-def split_bbox_into_tiles(bbox: tuple, tile_size_deg: float = 0.05) -> List[tuple]:
+def get_landsat8_image(date_str: str, bbox: tuple) -> ee.Image:
     """
-    Split a bounding box into smaller tiles to avoid Earth Engine download limits.
-
-    Parameters
-    ----------
-    bbox : tuple
-        (west, south, east, north) in EPSG:4326
-    tile_size_deg : float
-        Size of each tile in degrees (default 0.05 ≈ 5.5km at Mumbai latitude)
-
-    Returns
-    -------
-    List[tuple]
-        List of tile bboxes (west, south, east, north)
-    """
-    west, south, east, north = bbox
-    tiles = []
-
-    x = west
-    while x < east:
-        y = south
-        while y < north:
-            tile_west = x
-            tile_south = y
-            tile_east = min(x + tile_size_deg, east)
-            tile_north = min(y + tile_size_deg, north)
-            tiles.append((tile_west, tile_south, tile_east, tile_north))
-            y = tile_north
-        x = tile_east
-
-    return tiles
-
-
-def download_landsat_tile(
-    image: ee.Image,
-    tile_bbox: tuple,
-    tile_path: Path,
-) -> Path:
-    """
-    Download a single tile of a Landsat image.
-
-    Parameters
-    ----------
-    image : ee.Image
-        Earth Engine image
-    tile_bbox : tuple
-        (west, south, east, north) for this tile
-    tile_path : Path
-        Where to save the tile
-
-    Returns
-    -------
-    Path
-        Path to downloaded tile
-    """
-    import requests
-
-    west, south, east, north = tile_bbox
-    geometry = ee.Geometry.Rectangle([west, south, east, north])
-
-    url = image.getDownloadURL(
-        {"scale": 30, "region": geometry, "filePerBand": False, "format": "GeoTIFF"}
-    )
-
-    response = requests.get(url, stream=True, timeout=600)
-    response.raise_for_status()
-
-    tile_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(tile_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
-
-    return tile_path
-
-
-def download_landsat_image(
-    date_str: str,
-    bbox: tuple,
-    output_path: Path,
-    tile_cache_dir: Path,
-) -> Path:
-    """
-    Download a Landsat-8 TOA image for the given date using tiled approach.
-
-    Downloads the image in smaller tiles to avoid Earth Engine 50MB limit,
-    then merges them into a single GeoTIFF.
+    Query Landsat-8 Collection 2 Level-1 TOA for given date and bbox.
 
     Parameters
     ----------
@@ -139,20 +58,17 @@ def download_landsat_image(
         Date in YYYY-MM-DD format
     bbox : tuple
         (west, south, east, north) in EPSG:4326
-    output_path : Path
-        Where to save the final merged GeoTIFF
-    tile_cache_dir : Path
-        Directory to cache individual tiles
 
     Returns
     -------
-    Path
-        Path to merged file
-    """
-    import rasterio
-    from rasterio.merge import merge as rio_merge
-    import requests
+    ee.Image
+        Landsat-8 TOA image with bands B1-B11
 
+    Raises
+    ------
+    RuntimeError
+        If no image found for date
+    """
     west, south, east, north = bbox
     geometry = ee.Geometry.Rectangle([west, south, east, north])
 
@@ -165,7 +81,6 @@ def download_landsat_image(
         .sort("system:time_start")
     )
 
-    # Get first image (or mosaic if multiple)
     count = collection.size().getInfo()
     if count == 0:
         raise RuntimeError(f"No Landsat-8 image found for {date_str}")
@@ -173,117 +88,241 @@ def download_landsat_image(
     if count == 1:
         image = collection.first()
     else:
-        # If multiple scenes, mosaic them
+        # Multiple scenes: mosaic
         image = collection.mosaic()
 
-    # Select all TOA bands (B1-B11)
+    # Select all TOA bands
     bands = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11"]
-    image = image.select(bands)
+    return image.select(bands)
 
-    # Split into tiles
-    tiles = split_bbox_into_tiles(bbox, tile_size_deg=0.05)
-    print(f"  Downloading {len(tiles)} tiles for {date_str}...")
 
-    # Download each tile in parallel
-    tile_paths = []
-    tile_dir = tile_cache_dir / f"tiles_{date_str}"
-    tile_dir.mkdir(parents=True, exist_ok=True)
+def fetch_band_values_batched(
+    image: ee.Image,
+    grid_gdf: gpd.GeoDataFrame,
+    batch_size: int = 1000,
+    max_workers: int = 10,
+) -> pd.DataFrame:
+    """
+    Fetch raw band values for all grid cells using batched reduceRegions (concurrent).
 
-    def download_tile_task(idx: int, tile_bbox: tuple) -> tuple[int, Path | None]:
-        """Download a single tile and return (index, path or None)."""
-        tile_path = tile_dir / f"tile_{idx:03d}.tif"
+    For each grid cell (30m point), samples Landsat bands at 30m resolution.
+    Since Landsat is 30m native, this is essentially point sampling.
+    Batches are fetched concurrently to improve performance.
 
-        if tile_path.exists():
-            return (idx, tile_path)
+    Parameters
+    ----------
+    image : ee.Image
+        Landsat-8 image with bands B1-B11
+    grid_gdf : gpd.GeoDataFrame
+        Grid with columns: grid_id, geometry (Point)
+    batch_size : int
+        Number of cells per EE request (default 1000)
+    max_workers : int
+        Number of concurrent workers (default 10)
 
-        try:
-            download_landsat_tile(image, tile_bbox, tile_path)
-            return (idx, tile_path)
-        except Exception as e:
-            print(f"    ✗ Tile {idx+1}/{len(tiles)} failed: {e}")
-            return (idx, None)
+    Returns
+    -------
+    pd.DataFrame
+        Columns: grid_id, B1, B2, ..., B11
+    """
+    print(f"  Fetching band values for {len(grid_gdf):,} cells (batch_size={batch_size}, workers={max_workers})...")
+    
+    # Ensure grid is in WGS84 for EE
+    if grid_gdf.crs and grid_gdf.crs.to_string() != "EPSG:4326":
+        grid_wgs84 = grid_gdf.to_crs("EPSG:4326")
+    else:
+        grid_wgs84 = grid_gdf
 
-    # Use ThreadPoolExecutor for parallel downloads
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(download_tile_task, idx, tile_bbox): idx
-            for idx, tile_bbox in enumerate(tiles)
-        }
+    total_batches = (len(grid_wgs84) + batch_size - 1) // batch_size
+    
+    def fetch_batch(batch_idx: int) -> tuple[int, list[dict]]:
+        """Fetch a single batch of grid cells."""
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(grid_wgs84))
+        batch_gdf = grid_wgs84.iloc[start_idx:end_idx]
 
-        completed_count = 0
-        for future in as_completed(futures):
-            completed_count += 1
-            idx, tile_path = future.result()
-            if tile_path:
-                tile_paths.append(tile_path)
-                status = "cached" if tile_path.exists() else "downloaded"
-                print(
-                    f"    ✓ Tile {idx+1}/{len(tiles)} {status} ({completed_count}/{len(tiles)} complete)"
-                )
+        # Convert to EE FeatureCollection
+        features = []
+        for idx, row in batch_gdf.iterrows():
+            pt = row.geometry
+            # Attach image-level angle properties to each feature so they
+            # are included in reduceRegions results. Compute solar_zenith as
+            # (90 - SUN_ELEVATION). Sensor properties may be missing.
+            feat = ee.Feature(ee.Geometry.Point([pt.x, pt.y]))
+            feat = feat.set({
+                "grid_id": row["grid_id"],
+                "solar_azimuth": image.get("SUN_AZIMUTH"),
+                "solar_zenith": ee.Number(90).subtract(ee.Number(image.get("SUN_ELEVATION"))),
+                "sensor_azimuth": image.get("SENSOR_AZIMUTH"),
+                "sensor_zenith": image.get("SENSOR_ZENITH"),
+            })
+            features.append(feat)
 
-    if not tile_paths:
-        raise RuntimeError(f"Failed to download any tiles for {date_str}")
+        fc = ee.FeatureCollection(features)
 
-    # Merge tiles into single GeoTIFF
-    print(f"  Merging {len(tile_paths)} tiles...")
-    src_files = [rasterio.open(p) for p in tile_paths]
-
-    try:
-        mosaic, out_transform = rio_merge(src_files)
-
-        # Get metadata from first tile
-        out_meta = src_files[0].meta.copy()
-        out_meta.update(
-            {
-                "driver": "GTiff",
-                "height": mosaic.shape[1],
-                "width": mosaic.shape[2],
-                "transform": out_transform,
-                "compress": "deflate",
-            }
+        # Reduce regions at 30m scale (matches Landsat native resolution)
+        reduced = image.reduceRegions(
+            collection=fc,
+            reducer=ee.Reducer.mean(),
+            scale=30,  # Landsat native resolution
+            tileScale=1,
         )
 
-        # Write merged file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(output_path, "w", **out_meta) as dest:
-            dest.write(mosaic)
+        # Fetch results with retry/backoff for transient EE failures
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result_list = reduced.getInfo()["features"]
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"EE getInfo failed after {max_retries} attempts: {e}")
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                time.sleep(wait_time)
+        
+        # Extract properties
+        batch_results = []
+        for feat in result_list:
+            batch_results.append(feat["properties"])
+        
+        return (batch_idx, batch_results)
+    
+    # Submit all batches concurrently
+    all_results = []
+    completed_count = 0
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all batch jobs
+        futures = {
+            executor.submit(fetch_batch, batch_idx): batch_idx
+            for batch_idx in range(total_batches)
+        }
+        
+        # Process results as they complete
+        for future in as_completed(futures):
+            batch_idx, batch_results = future.result()
+            all_results.extend(batch_results)
+            completed_count += 1
+            
+            # Calculate cells processed
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(grid_wgs84))
+            
+            if completed_count % 10 == 0 or completed_count == total_batches:
+                print(f"    Completed {completed_count}/{total_batches} batches ({len(all_results):,}/{len(grid_wgs84):,} cells)")
 
-        print(f"  → Merged to {output_path}")
+    # Convert to DataFrame
+    df = pd.DataFrame(all_results)
 
-    finally:
-        for src in src_files:
-            src.close()
+    # EE reduceRegions returns raw band names (B1, B2, ..., B11)
+    # Sort bands numerically (B1, B2, ..., B11) to preserve expected order
+    band_cols = [c for c in df.columns if c.startswith("B") and c[1:].isdigit()]
+    band_cols = sorted(band_cols, key=lambda c: int(c[1:]))
 
-    return output_path
+    # Ensure we have grid_id
+    if "grid_id" not in df.columns:
+        raise RuntimeError("grid_id missing from EE results")
+
+    # Keep only grid_id + band columns in numeric order
+    keep_cols = ["grid_id"] + band_cols
+    df = df[keep_cols]
+    
+    # Reindex to match canonical grid order (deterministic row ordering)
+    # Merge with original grid to preserve row_idx order
+    grid_order = grid_gdf[["grid_id"]].copy()
+    grid_order["_order"] = range(len(grid_order))
+    df = grid_order.merge(df, on="grid_id", how="left").sort_values("_order").drop(columns=["_order"])
+    
+    print(f"  ✓ Fetched {len(df):,} cells with {len(band_cols)} bands (reindexed to grid order)")
+    return df
+
+
+def write_artifact_atomic(
+    df: pd.DataFrame,
+    artifact_path: Path,
+    metadata: dict,
+    manifest: LandsatManifest,
+    date_str: str,
+) -> None:
+    """
+    Write parquet artifact atomically via temp file + rename, then register in manifest.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Data to write
+    artifact_path : Path
+        Final artifact path
+    metadata : dict
+        Metadata to write alongside (as {artifact_path}.meta.json)
+    manifest : LandsatManifest
+        Landsat manifest instance for registration
+    date_str : str
+        Date (YYYY-MM-DD)
+    """
+    # Mark producing
+    request_id = f"landsat8_{manifest.city}_{date_str}"
+    manifest.mark_producing(date_str, request_id)
+    
+    try:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write to temp file
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            delete=False,
+            dir=artifact_path.parent,
+            suffix=".parquet.tmp",
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            df.to_parquet(tmp_path, engine="pyarrow", index=False)
+        
+        # Atomic rename
+        shutil.move(str(tmp_path), str(artifact_path))
+        
+        # Write metadata
+        meta_path = artifact_path.with_suffix(".parquet.meta.json")
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Mark ok in manifest
+        manifest.mark_ok(date_str, artifact_path)
+        
+        print(f"  ✓ Wrote {artifact_path} ({len(df):,} rows)")
+        
+    except Exception as e:
+        # Mark error in manifest
+        manifest.mark_error(date_str, str(e))
+        raise
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download and process Landsat-8 images for dates in a text file"
+        description="Fetch Landsat-8 raw band values for grid cells (per-date Parquet)"
     )
     parser.add_argument(
         "--dates-file",
         type=Path,
-        default=Path("patliputra/landsat8_image_dates.txt"),
+        default=Path("artifacts/v1/landsat8/mumbai/landsat8_image_dates.txt"),
         help="Path to dates file (one date per line, YYYY-MM-DD)",
     )
     parser.add_argument(
-        "--grid-parquet",
+        "--grid-artifact",
         type=Path,
         required=True,
-        help="Path to grid GeoParquet file (must have grid_id and geometry columns)",
+        help="Path to grid artifact parquet (artifacts/v1/grids/{city}/grid.parquet)",
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("cache/landsat_processed"),
-        help="Directory to save processed parquet files",
+        "--city",
+        type=str,
+        default="mumbai",
+        help="City name (used in output path)",
     )
     parser.add_argument(
-        "--cache-dir",
+        "--artifacts-root",
         type=Path,
-        default=Path("cache/landsat_downloads"),
-        help="Directory to cache downloaded GeoTIFFs",
+        default=Path("artifacts"),
+        help="Root directory for artifacts",
     )
     parser.add_argument(
         "--bbox",
@@ -292,13 +331,16 @@ def main():
         help="Bounding box as west,south,east,north in EPSG:4326",
     )
     parser.add_argument(
-        "--target-crs",
-        type=str,
-        default="EPSG:32643",
-        help="Target CRS for reprojection",
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Number of grid cells per EE request",
     )
     parser.add_argument(
-        "--target-res", type=float, default=30.0, help="Target resolution in meters"
+        "--max-workers",
+        type=int,
+        default=10,
+        help="Number of concurrent workers for batch fetching (default: 10)",
     )
     parser.add_argument(
         "--project",
@@ -309,13 +351,21 @@ def main():
 
     args = parser.parse_args()
 
+    # Initialize Landsat manifest for this city
+    manifest = LandsatManifest(
+        city=args.city,
+        artifacts_root=args.artifacts_root,
+        version="v1"
+    )
+    print(f"✓ Landsat manifest initialized: {manifest.db_path}")
+
     # Initialize Earth Engine
     try:
         ee.Initialize(project=args.project)
-        print(f"Earth Engine initialized with project: {args.project}")
+        print(f"✓ Earth Engine initialized (project: {args.project})")
     except Exception as e:
-        print(f"Failed to initialize Earth Engine: {e}")
-        print("Make sure you have authenticated with: earthengine authenticate")
+        print(f"✗ Failed to initialize Earth Engine: {e}")
+        print("  Run: python scripts/auth_earth_engine.py")
         sys.exit(1)
 
     # Parse bbox
@@ -325,146 +375,107 @@ def main():
         sys.exit(1)
     bbox = tuple(bbox_parts)
 
+    # Load grid artifact
+    if not args.grid_artifact.exists():
+        print(f"✗ Grid artifact not found: {args.grid_artifact}")
+        sys.exit(1)
+
+    print(f"Loading grid from {args.grid_artifact}...")
+    grid_gdf = gpd.read_parquet(args.grid_artifact)
+    print(f"  ✓ Loaded {len(grid_gdf):,} grid cells")
+    
+    # Check required columns
+    if "grid_id" not in grid_gdf.columns:
+        print("✗ Grid must have 'grid_id' column")
+        sys.exit(1)
+    if "geometry" not in grid_gdf.columns:
+        print("✗ Grid must have 'geometry' column")
+        sys.exit(1)
+
     # Read dates
     if not args.dates_file.exists():
-        print(f"Error: dates file not found: {args.dates_file}")
+        print(f"✗ Dates file not found: {args.dates_file}")
         sys.exit(1)
 
     dates = read_dates(args.dates_file)
-    print(f"Found {len(dates)} dates to process")
+    print(f"✓ Found {len(dates)} dates to process")
 
-    # Check grid exists
-    if not args.grid_parquet.exists():
-        print(f"Error: grid parquet not found: {args.grid_parquet}")
-        print(
-            "You need to create a grid parquet first with grid_id and geometry columns"
-        )
-        sys.exit(1)
+    # Prepare output directory
+    output_dir = args.artifacts_root / "v1" / "landsat8" / args.city
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"✓ Output directory: {output_dir}")
 
-    # Ensure output directory exists
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    args.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Track failed dates
+    # Track progress
     failed_dates = []
+    processed_count = 0
 
     # Process each date
     for idx, date_str in enumerate(dates, start=1):
         print(f"\n[{idx}/{len(dates)}] Processing {date_str}")
 
-        # Define paths
-        tif_path = args.cache_dir / f"landsat8_{date_str}.tif"
-        out_parquet = args.output_dir / f"landsat8_{date_str}_signals.parquet"
+        # Use canonical artifacts layout for Landsat: artifacts/v1/landsat8/{city}/{date}.parquet
+        artifact_path = args.artifacts_root / "v1" / "landsat8" / args.city / f"{date_str}.parquet"
 
-        # Skip if already processed
-        if out_parquet.exists():
-            print(f"  ✓ Already processed: {out_parquet}")
+        # Skip if already exists
+        if artifact_path.exists():
+            print(f"  ✓ Already exists: {artifact_path}")
+            processed_count += 1
             continue
 
         try:
-            # Download if not cached
-            if not tif_path.exists():
-                tif_path = download_landsat_image(
-                    date_str, bbox, tif_path, args.cache_dir
-                )
-            else:
-                print(f"  ✓ Using cached: {tif_path}")
+            # Get Landsat image
+            print(f"  Querying Landsat-8 collection...")
+            image = get_landsat8_image(date_str, bbox)
+            print(f"  ✓ Image found")
 
-            # Process raster using raster_sampling
-            print(f"  → Processing raster...")
-            df = raster_to_grid_df(
-                raster_path=tif_path,
-                grid_parquet_path=args.grid_parquet,
-                out_parquet=None,  # Don't write yet - we'll add indices first
-                cache_dir=args.cache_dir,
-                target_crs=args.target_crs,
-                target_res=args.target_res,
-                use_vrt=True,
-                parallel=True,
+            # Fetch band values for all grid cells
+            df = fetch_band_values_batched(
+                image=image,
+                grid_gdf=grid_gdf,
+                batch_size=args.batch_size,
+                max_workers=args.max_workers,
             )
 
-            # Compute spectral indices (NDVI, MNDWI, NDBI, IBI)
-            print(f"  → Computing spectral indices...")
-            
-            # NDVI = (NIR - Red) / (NIR + Red) = (B5 - B4) / (B5 + B4)
-            if "toa_b5" in df.columns and "toa_b4" in df.columns:
-                b5 = df["toa_b5"].to_numpy(dtype="float64")
-                b4 = df["toa_b4"].to_numpy(dtype="float64")
-                denom = b5 + b4
-                ndvi = np.where(
-                    np.isfinite(denom) & (np.abs(denom) > 0), (b5 - b4) / denom, np.nan
-                )
-                df["ndvi"] = ndvi
+            # Prepare metadata
+            metadata = {
+                "date": date_str,
+                "city": args.city,
+                "source": "LANDSAT/LC08/C02/T1_TOA",
+                "bands": ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11"],
+                "grid_cells": len(df),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "bbox": bbox,
+            }
 
-            # MNDWI = (Green - SWIR1) / (Green + SWIR1) = (B3 - B6) / (B3 + B6)
-            if "toa_b3" in df.columns and "toa_b6" in df.columns:
-                b3 = df["toa_b3"].to_numpy(dtype="float64")
-                b6 = df["toa_b6"].to_numpy(dtype="float64")
-                denom = b3 + b6
-                mndwi = np.where(
-                    np.isfinite(denom) & (np.abs(denom) > 0), (b3 - b6) / denom, np.nan
-                )
-                df["mndwi"] = mndwi
-
-            # NDBI = (SWIR1 - NIR) / (SWIR1 + NIR) = (B6 - B5) / (B6 + B5)
-            if "toa_b6" in df.columns and "toa_b5" in df.columns:
-                b6 = df["toa_b6"].to_numpy(dtype="float64")
-                b5 = df["toa_b5"].to_numpy(dtype="float64")
-                denom = b6 + b5
-                ndbi = np.where(
-                    np.isfinite(denom) & (np.abs(denom) > 0), (b6 - b5) / denom, np.nan
-                )
-                df["ndbi"] = ndbi
-
-            # IBI = (NDBI - (NDVI + MNDWI)/2) / (NDBI + (NDVI + MNDWI)/2)
-            # Canonical Index of Built-up Areas per Xu (2008)
-            if "ndbi" in df.columns and "ndvi" in df.columns and "mndwi" in df.columns:
-                a = df["ndbi"].to_numpy(dtype="float64")
-                b = df["ndvi"].to_numpy(dtype="float64")
-                c = df["mndwi"].to_numpy(dtype="float64")
-                combo = (b + c) / 2.0
-                numer = a - combo
-                denom = a + combo
-                ibi = np.where(
-                    np.isfinite(denom) & (np.abs(denom) > 0), numer / denom, np.nan
-                )
-                df["ibi"] = ibi
-
-            # Write to parquet
-            print(f"  → Writing to {out_parquet}...")
-            gdf_out = gpd.GeoDataFrame(
-                df.drop(columns=["geometry"]), 
-                geometry=df["geometry"], 
-                crs=args.target_crs
-            )
-            gdf_out.to_parquet(out_parquet, engine="pyarrow", index=False)
-            print(f"  ✓ Saved {len(df)} rows to {out_parquet}")
+            # Write artifact
+            write_artifact_atomic(df, artifact_path, metadata, manifest, date_str)
+            processed_count += 1
 
         except Exception as e:
-            print(f"  ✗ Failed to process {date_str}: {e}")
+            print(f"  ✗ Failed: {e}")
             failed_dates.append((date_str, str(e)))
             continue
 
-    # Print summary
+    # Summary
     print(f"\n{'='*60}")
-    print(f"✓ Completed processing {len(dates)} dates")
-    print(f"  - Successful: {len(dates) - len(failed_dates)}")
+    print(f"✓ Processed {processed_count}/{len(dates)} dates")
+    print(f"  - Successful: {processed_count}")
     print(f"  - Failed: {len(failed_dates)}")
-    print(f"Output directory: {args.output_dir}")
-    
+    print(f"Output: {output_dir}")
+
     if failed_dates:
         print(f"\n⚠ Failed dates:")
         for date_str, error in failed_dates:
-            print(f"  - {date_str}: {error[:80]}..." if len(error) > 80 else f"  - {date_str}: {error}")
+            print(f"  - {date_str}: {error[:80]}")
         
-        # Write failed dates to file
-        failed_log = args.output_dir / "failed_dates.txt"
+        # Write failed log
+        failed_log = output_dir / "failed_dates.log"
         with open(failed_log, "w") as f:
-            f.write("# Dates that failed processing\n")
-            f.write("# Format: YYYY-MM-DD | Error message\n\n")
+            f.write("# Failed Landsat-8 fetches\n")
+            f.write(f"# Generated: {datetime.now(timezone.utc).isoformat()}\n\n")
             for date_str, error in failed_dates:
                 f.write(f"{date_str} | {error}\n")
-        print(f"\nFailed dates logged to: {failed_log}")
+        print(f"\nFailed log: {failed_log}")
 
 
 if __name__ == "__main__":
