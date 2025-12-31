@@ -258,8 +258,19 @@ def compute_landsat_features(
     # Select output columns
     index_cols = ['ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi']
     band_cols = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11']
+    angle_cols = ['solar_azimuth', 'solar_zenith', 'sensor_azimuth', 'sensor_zenith']
     
     output_cols = ['grid_id', 'landsat_date'] + index_cols
+    
+    # Add scene_cloud_cover if available
+    if 'scene_cloud_cover' in df.columns:
+        output_cols.append('scene_cloud_cover')
+    
+    # Add angle properties
+    for col in angle_cols:
+        if col in df.columns:
+            output_cols.append(col)
+    
     if include_bands:
         output_cols.extend(band_cols)
     
@@ -271,7 +282,11 @@ def compute_landsat_features(
 
 def get_landsat_feature_columns(include_bands: bool = True) -> List[str]:
     """Return list of Landsat feature column names (excluding keys)."""
-    cols = ['ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi']
+    cols = [
+        'ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi',
+        'scene_cloud_cover',
+        'solar_azimuth', 'solar_zenith', 'sensor_azimuth', 'sensor_zenith',
+    ]
     if include_bands:
         cols.extend(['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11'])
     return cols
