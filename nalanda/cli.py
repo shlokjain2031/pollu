@@ -1,0 +1,787 @@
+"""Command-line interface for training data pipeline.
+
+This module provides CLI tools for:
+- Batch processing multiple dates
+- Validating assembled training data
+- Generating pipeline reports
+
+Usage:
+    # Process single date
+    python -m nalanda.cli assemble --date 2021-06-12
+    
+    # Process date range
+    python -m nalanda.cli assemble --start-date 2021-06-07 --end-date 2021-06-18
+    
+    # Validate existing training data
+    python -m nalanda.cli validate --date 2021-06-12
+    
+    # Validate all available dates
+    python -m nalanda.cli validate --all
+    
+    # Generate report
+    python -m nalanda.cli report --output report.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, asdict
+from datetime import datetime as dt, timedelta
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+
+import pandas as pd
+
+from nalanda.training import (
+    assemble_training_data,
+    save_training_data,
+    load_target,
+    get_training_feature_columns,
+    DEFAULT_TARGET_DIR,
+    DEFAULT_OUTPUT_DIR,
+)
+
+
+# ============================================================================
+# Data classes for results
+# ============================================================================
+
+@dataclass
+class AssemblyResult:
+    """Result from assembling training data for one date."""
+    date: str
+    success: bool
+    rows: int = 0
+    columns: int = 0
+    elapsed_seconds: float = 0.0
+    error: Optional[str] = None
+    output_path: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ValidationResult:
+    """Result from validating training data for one date."""
+    date: str
+    valid: bool
+    rows: int = 0
+    columns: int = 0
+    null_pct: Dict[str, float] = None
+    warnings: List[str] = None
+    errors: List[str] = None
+    
+    def __post_init__(self):
+        if self.null_pct is None:
+            self.null_pct = {}
+        if self.warnings is None:
+            self.warnings = []
+        if self.errors is None:
+            self.errors = []
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ============================================================================
+# Date utilities
+# ============================================================================
+
+def get_date_range(start_date: str, end_date: str) -> List[str]:
+    """Generate list of dates between start and end (inclusive).
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        
+    Returns:
+        List of date strings.
+    """
+    start = dt.strptime(start_date, "%Y-%m-%d")
+    end = dt.strptime(end_date, "%Y-%m-%d")
+    
+    dates = []
+    current = start
+    while current <= end:
+        dates.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    
+    return dates
+
+
+def get_available_target_dates(target_dir: Path = DEFAULT_TARGET_DIR) -> List[str]:
+    """Get list of dates that have target data available.
+    
+    Args:
+        target_dir: Base directory for target artifacts.
+        
+    Returns:
+        Sorted list of date strings.
+    """
+    if not target_dir.exists():
+        return []
+    
+    dates = []
+    for d in target_dir.iterdir():
+        if d.is_dir() and (d / "target.parquet").exists():
+            try:
+                dt.strptime(d.name, "%Y-%m-%d")
+                dates.append(d.name)
+            except ValueError:
+                continue
+    
+    return sorted(dates)
+
+
+def get_available_training_dates(output_dir: Path = DEFAULT_OUTPUT_DIR) -> List[str]:
+    """Get list of dates that have assembled training data.
+    
+    Args:
+        output_dir: Base directory for training outputs.
+        
+    Returns:
+        Sorted list of date strings.
+    """
+    if not output_dir.exists():
+        return []
+    
+    dates = []
+    for d in output_dir.iterdir():
+        if d.is_dir() and (d / "training.parquet").exists():
+            try:
+                dt.strptime(d.name, "%Y-%m-%d")
+                dates.append(d.name)
+            except ValueError:
+                continue
+    
+    return sorted(dates)
+
+
+# ============================================================================
+# Assembly command
+# ============================================================================
+
+def assemble_single(
+    date: str,
+    city: str = 'mumbai',
+    include_bands: bool = False,
+    no_spatial: bool = False,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    dry_run: bool = False,
+) -> AssemblyResult:
+    """Assemble training data for a single date.
+    
+    Args:
+        date: Target date (YYYY-MM-DD)
+        city: City name
+        include_bands: Include raw Landsat bands
+        no_spatial: Skip Sentinel spatial features
+        output_dir: Output directory
+        dry_run: If True, compute but don't save
+        
+    Returns:
+        AssemblyResult with status and metrics.
+    """
+    start_time = time.time()
+    
+    try:
+        df = assemble_training_data(
+            date=date,
+            city=city,
+            include_landsat_bands=include_bands,
+            include_sentinel_spatial=not no_spatial,
+            skip_missing_satellite=True,
+        )
+        
+        elapsed = time.time() - start_time
+        
+        if dry_run:
+            return AssemblyResult(
+                date=date,
+                success=True,
+                rows=len(df),
+                columns=len(df.columns),
+                elapsed_seconds=elapsed,
+                output_path=None,
+            )
+        
+        output_path = save_training_data(df, date, output_dir)
+        
+        return AssemblyResult(
+            date=date,
+            success=True,
+            rows=len(df),
+            columns=len(df.columns),
+            elapsed_seconds=elapsed,
+            output_path=str(output_path),
+        )
+        
+    except Exception as e:
+        elapsed = time.time() - start_time
+        return AssemblyResult(
+            date=date,
+            success=False,
+            elapsed_seconds=elapsed,
+            error=str(e),
+        )
+
+
+def assemble_batch(
+    dates: List[str],
+    city: str = 'mumbai',
+    include_bands: bool = False,
+    no_spatial: bool = False,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    dry_run: bool = False,
+    verbose: bool = True,
+    parallel: bool = False,
+    max_workers: Optional[int] = None,
+) -> List[AssemblyResult]:
+    """Assemble training data for multiple dates.
+    
+    Args:
+        dates: List of dates to process
+        city: City name
+        include_bands: Include raw Landsat bands
+        no_spatial: Skip Sentinel spatial features
+        output_dir: Output directory
+        dry_run: If True, compute but don't save
+        verbose: Print progress
+        parallel: If True, process dates in parallel
+        max_workers: Max parallel workers (default: CPU count)
+        
+    Returns:
+        List of AssemblyResults.
+    """
+    total = len(dates)
+    
+    if parallel:
+        # Parallel processing with ProcessPoolExecutor
+        if verbose:
+            print(f"\nProcessing {total} dates in parallel (workers: {max_workers or 'auto'})...")
+        
+        results = []
+        completed_count = 0
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_date = {
+                executor.submit(
+                    assemble_single,
+                    date=date,
+                    city=city,
+                    include_bands=include_bands,
+                    no_spatial=no_spatial,
+                    output_dir=output_dir,
+                    dry_run=dry_run,
+                ): date
+                for date in dates
+            }
+            
+            # Process as they complete
+            for future in as_completed(future_to_date):
+                date = future_to_date[future]
+                completed_count += 1
+                
+                try:
+                    result = future.result()
+                    results.append(result)
+                    
+                    if verbose:
+                        if result.success:
+                            print(f"  [{completed_count}/{total}] ✓ {date}: {result.rows:,} rows in {result.elapsed_seconds:.1f}s")
+                        else:
+                            print(f"  [{completed_count}/{total}] ✗ {date}: {result.error}")
+                except Exception as e:
+                    # Handle unexpected errors during future execution
+                    error_result = AssemblyResult(
+                        date=date,
+                        success=False,
+                        error=f"Parallel execution error: {e}",
+                    )
+                    results.append(error_result)
+                    if verbose:
+                        print(f"  [{completed_count}/{total}] ✗ {date}: {e}")
+        
+        # Sort results by date to maintain consistent order
+        results.sort(key=lambda r: r.date)
+        
+    else:
+        # Sequential processing (original behavior)
+        results = []
+        
+        for i, date in enumerate(dates, 1):
+            if verbose:
+                print(f"\n[{i}/{total}] Processing {date}...")
+            
+            result = assemble_single(
+                date=date,
+                city=city,
+                include_bands=include_bands,
+                no_spatial=no_spatial,
+                output_dir=output_dir,
+                dry_run=dry_run,
+            )
+            results.append(result)
+            
+            if verbose:
+                if result.success:
+                    print(f"  ✓ {result.rows:,} rows, {result.columns} cols in {result.elapsed_seconds:.1f}s")
+                else:
+                    print(f"  ✗ Error: {result.error}")
+    
+    return results
+
+
+# ============================================================================
+# Validation command
+# ============================================================================
+
+def validate_training_data(
+    date: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> ValidationResult:
+    """Validate assembled training data for a single date.
+    
+    Checks:
+    - File exists and is readable
+    - Required columns present
+    - No all-null columns
+    - Reasonable null percentages
+    - Value ranges for key features
+    
+    Args:
+        date: Date to validate (YYYY-MM-DD)
+        output_dir: Directory containing training.parquet files
+        
+    Returns:
+        ValidationResult with status and diagnostics.
+    """
+    warnings = []
+    errors = []
+    
+    # Check file exists
+    training_path = output_dir / date / "training.parquet"
+    if not training_path.exists():
+        return ValidationResult(
+            date=date,
+            valid=False,
+            errors=[f"File not found: {training_path}"],
+        )
+    
+    # Try to load
+    try:
+        df = pd.read_parquet(training_path)
+    except Exception as e:
+        return ValidationResult(
+            date=date,
+            valid=False,
+            errors=[f"Failed to read parquet: {e}"],
+        )
+    
+    # Check required columns
+    required_cols = ['row_idx', 'timestamp', 'pm25_t', 'target_trust', 'n_sensors']
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        errors.append(f"Missing required columns: {missing_cols}")
+    
+    # Check for all-null columns
+    all_null_cols = [c for c in df.columns if df[c].isna().all()]
+    if all_null_cols:
+        errors.append(f"All-null columns: {all_null_cols}")
+    
+    # Compute null percentages
+    null_pct = {}
+    high_null_threshold = 0.5  # 50%
+    
+    for col in df.columns:
+        pct = df[col].isna().mean()
+        null_pct[col] = round(pct * 100, 1)
+        
+        if pct > high_null_threshold and col not in ['evi', 'ui_light', 'si', 'local_ndvi_std', 'ndvi_s2']:
+            warnings.append(f"High null rate ({pct*100:.1f}%) in column: {col}")
+    
+    # Check value ranges
+    if 'pm25_t' in df.columns:
+        pm25 = df['pm25_t'].dropna()
+        if pm25.min() < 0:
+            errors.append(f"Negative pm25_t values found (min: {pm25.min()})")
+        if pm25.max() > 1000:
+            warnings.append(f"Unusually high pm25_t values (max: {pm25.max()})")
+    
+    if 'temperature_2m' in df.columns:
+        temp = df['temperature_2m'].dropna()
+        if temp.min() < -60 or temp.max() > 60:
+            warnings.append(f"Temperature out of expected range: [{temp.min():.1f}, {temp.max():.1f}]")
+    
+    if 'ndvi' in df.columns:
+        ndvi = df['ndvi'].dropna()
+        if ndvi.min() < -1 or ndvi.max() > 1:
+            warnings.append(f"NDVI out of [-1, 1] range: [{ndvi.min():.3f}, {ndvi.max():.3f}]")
+    
+    # Check row count
+    if len(df) == 0:
+        errors.append("DataFrame is empty")
+    elif len(df) < 1000:
+        warnings.append(f"Low row count: {len(df)}")
+    
+    # Check for duplicate keys
+    if 'row_idx' in df.columns and 'timestamp' in df.columns:
+        dups = df.duplicated(subset=['row_idx', 'timestamp']).sum()
+        if dups > 0:
+            errors.append(f"Found {dups} duplicate (row_idx, timestamp) pairs")
+    
+    return ValidationResult(
+        date=date,
+        valid=len(errors) == 0,
+        rows=len(df),
+        columns=len(df.columns),
+        null_pct=null_pct,
+        warnings=warnings,
+        errors=errors,
+    )
+
+
+def validate_batch(
+    dates: List[str],
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    verbose: bool = True,
+) -> List[ValidationResult]:
+    """Validate training data for multiple dates.
+    
+    Args:
+        dates: List of dates to validate
+        output_dir: Directory containing training.parquet files
+        verbose: Print progress
+        
+    Returns:
+        List of ValidationResults.
+    """
+    results = []
+    
+    for date in dates:
+        result = validate_training_data(date, output_dir)
+        results.append(result)
+        
+        if verbose:
+            status = "✓" if result.valid else "✗"
+            if result.valid:
+                warn_count = len(result.warnings)
+                warn_str = f" ({warn_count} warnings)" if warn_count > 0 else ""
+                print(f"  {status} {date}: {result.rows:,} rows, {result.columns} cols{warn_str}")
+            else:
+                print(f"  {status} {date}: {', '.join(result.errors)}")
+    
+    return results
+
+
+# ============================================================================
+# Report command
+# ============================================================================
+
+def generate_report(
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    target_dir: Path = DEFAULT_TARGET_DIR,
+) -> Dict[str, Any]:
+    """Generate a summary report of the training pipeline.
+    
+    Args:
+        output_dir: Directory containing training.parquet files
+        target_dir: Directory containing target.parquet files
+        
+    Returns:
+        Dict with report data.
+    """
+    target_dates = get_available_target_dates(target_dir)
+    training_dates = get_available_training_dates(output_dir)
+    
+    # Missing dates (have target but no training)
+    missing_dates = sorted(set(target_dates) - set(training_dates))
+    
+    # Validate all training dates
+    validation_results = []
+    for date in training_dates:
+        result = validate_training_data(date, output_dir)
+        validation_results.append(result.to_dict())
+    
+    # Compute summary statistics
+    valid_count = sum(1 for r in validation_results if r['valid'])
+    invalid_count = len(validation_results) - valid_count
+    
+    total_rows = sum(r['rows'] for r in validation_results)
+    
+    # Get expected columns
+    expected_cols = get_training_feature_columns()
+    
+    report = {
+        'generated_at': dt.now().isoformat(),
+        'summary': {
+            'target_dates_available': len(target_dates),
+            'training_dates_assembled': len(training_dates),
+            'missing_dates': len(missing_dates),
+            'valid_training_files': valid_count,
+            'invalid_training_files': invalid_count,
+            'total_rows': total_rows,
+            'expected_feature_columns': len(expected_cols),
+        },
+        'date_coverage': {
+            'first_target_date': target_dates[0] if target_dates else None,
+            'last_target_date': target_dates[-1] if target_dates else None,
+            'first_training_date': training_dates[0] if training_dates else None,
+            'last_training_date': training_dates[-1] if training_dates else None,
+            'missing_dates': missing_dates,
+        },
+        'validation_results': validation_results,
+    }
+    
+    return report
+
+
+# ============================================================================
+# CLI entry points
+# ============================================================================
+
+def cmd_assemble(args):
+    """Handle 'assemble' command."""
+    # Determine dates to process
+    if args.date:
+        dates = [args.date]
+    elif args.start_date and args.end_date:
+        dates = get_date_range(args.start_date, args.end_date)
+    elif args.all:
+        dates = get_available_target_dates()
+        if not dates:
+            print("No target dates found.")
+            return 1
+    else:
+        print("Error: Must specify --date, --start-date/--end-date, or --all")
+        return 1
+    
+    print(f"Assembling training data for {len(dates)} date(s)...")
+    print("=" * 60)
+    
+    results = assemble_batch(
+        dates=dates,
+        city=args.city,
+        include_bands=args.include_bands,
+        no_spatial=args.no_spatial,
+        output_dir=Path(args.output_dir),
+        dry_run=args.dry_run,
+        verbose=True,
+        parallel=args.parallel,
+        max_workers=args.workers,
+    )
+    
+    # Summary
+    success_count = sum(1 for r in results if r.success)
+    fail_count = len(results) - success_count
+    total_rows = sum(r.rows for r in results if r.success)
+    total_time = sum(r.elapsed_seconds for r in results)
+    
+    print("\n" + "=" * 60)
+    print(f"Summary: {success_count}/{len(results)} succeeded")
+    print(f"  Total rows: {total_rows:,}")
+    print(f"  Total time: {total_time:.1f}s")
+    
+    if fail_count > 0:
+        print(f"\nFailed dates:")
+        for r in results:
+            if not r.success:
+                print(f"  - {r.date}: {r.error}")
+    
+    return 0 if fail_count == 0 else 1
+
+
+def cmd_validate(args):
+    """Handle 'validate' command."""
+    # Determine dates to validate
+    if args.date:
+        dates = [args.date]
+    elif args.all:
+        dates = get_available_training_dates(Path(args.output_dir))
+        if not dates:
+            print("No training files found.")
+            return 1
+    else:
+        print("Error: Must specify --date or --all")
+        return 1
+    
+    print(f"Validating training data for {len(dates)} date(s)...")
+    print("=" * 60)
+    
+    results = validate_batch(
+        dates=dates,
+        output_dir=Path(args.output_dir),
+        verbose=True,
+    )
+    
+    # Summary
+    valid_count = sum(1 for r in results if r.valid)
+    invalid_count = len(results) - valid_count
+    warning_count = sum(len(r.warnings) for r in results)
+    
+    print("\n" + "=" * 60)
+    print(f"Summary: {valid_count}/{len(results)} valid")
+    if warning_count > 0:
+        print(f"  Total warnings: {warning_count}")
+    
+    if invalid_count > 0:
+        print(f"\nInvalid dates:")
+        for r in results:
+            if not r.valid:
+                for err in r.errors:
+                    print(f"  - {r.date}: {err}")
+    
+    # Show detailed warnings if requested
+    if args.verbose and warning_count > 0:
+        print(f"\nWarnings:")
+        for r in results:
+            for w in r.warnings:
+                print(f"  - {r.date}: {w}")
+    
+    return 0 if invalid_count == 0 else 1
+
+
+def cmd_report(args):
+    """Handle 'report' command."""
+    print("Generating pipeline report...")
+    
+    report = generate_report(
+        output_dir=Path(args.output_dir),
+        target_dir=Path(args.target_dir),
+    )
+    
+    if args.output:
+        output_path = Path(args.output)
+        with open(output_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        print(f"Report saved to: {output_path}")
+    else:
+        # Print summary to stdout
+        s = report['summary']
+        print("\n" + "=" * 60)
+        print("Pipeline Report")
+        print("=" * 60)
+        print(f"\nDate Coverage:")
+        print(f"  Target dates available: {s['target_dates_available']}")
+        print(f"  Training dates assembled: {s['training_dates_assembled']}")
+        print(f"  Missing dates: {s['missing_dates']}")
+        
+        print(f"\nValidation:")
+        print(f"  Valid files: {s['valid_training_files']}")
+        print(f"  Invalid files: {s['invalid_training_files']}")
+        
+        print(f"\nData Volume:")
+        print(f"  Total rows: {s['total_rows']:,}")
+        print(f"  Expected features: {s['expected_feature_columns']}")
+        
+        if report['date_coverage']['missing_dates']:
+            print(f"\nMissing dates: {', '.join(report['date_coverage']['missing_dates'])}")
+    
+    return 0
+
+
+def cmd_status(args):
+    """Handle 'status' command - quick overview."""
+    target_dates = get_available_target_dates()
+    training_dates = get_available_training_dates()
+    
+    print("Pipeline Status")
+    print("=" * 60)
+    print(f"\nTarget data: {len(target_dates)} dates")
+    if target_dates:
+        print(f"  Range: {target_dates[0]} to {target_dates[-1]}")
+    
+    print(f"\nTraining data: {len(training_dates)} dates")
+    if training_dates:
+        print(f"  Range: {training_dates[0]} to {training_dates[-1]}")
+    
+    missing = sorted(set(target_dates) - set(training_dates))
+    if missing:
+        print(f"\nMissing ({len(missing)}): {', '.join(missing[:5])}")
+        if len(missing) > 5:
+            print(f"  ... and {len(missing) - 5} more")
+    else:
+        print("\n✓ All target dates have training data")
+    
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Training data pipeline CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Check pipeline status
+  python -m nalanda.cli status
+  
+  # Assemble single date
+  python -m nalanda.cli assemble --date 2021-06-12
+  
+  # Assemble date range
+  python -m nalanda.cli assemble --start-date 2021-06-07 --end-date 2021-06-18
+  
+  # Assemble all available target dates
+  python -m nalanda.cli assemble --all
+  
+  # Validate all training data
+  python -m nalanda.cli validate --all
+  
+  # Generate JSON report
+  python -m nalanda.cli report --output report.json
+""",
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # Status command
+    status_parser = subparsers.add_parser('status', help='Show pipeline status')
+    status_parser.set_defaults(func=cmd_status)
+    
+    # Assemble command
+    assemble_parser = subparsers.add_parser('assemble', help='Assemble training data')
+    assemble_parser.add_argument('--date', '-d', help='Single date (YYYY-MM-DD)')
+    assemble_parser.add_argument('--start-date', help='Start date for range')
+    assemble_parser.add_argument('--end-date', help='End date for range')
+    assemble_parser.add_argument('--all', action='store_true', help='Process all available dates')
+    assemble_parser.add_argument('--city', '-c', default='mumbai', help='City name')
+    assemble_parser.add_argument('--include-bands', action='store_true', help='Include raw Landsat bands')
+    assemble_parser.add_argument('--no-spatial', action='store_true', help='Skip Sentinel spatial features')
+    assemble_parser.add_argument('--output-dir', '-o', default=str(DEFAULT_OUTPUT_DIR), help='Output directory')
+    assemble_parser.add_argument('--dry-run', action='store_true', help='Compute but do not save')
+    assemble_parser.add_argument('--parallel', '-p', action='store_true', help='Process dates in parallel')
+    assemble_parser.add_argument('--workers', '-w', type=int, help='Max parallel workers (default: CPU count)')
+    assemble_parser.set_defaults(func=cmd_assemble)
+    
+    # Validate command
+    validate_parser = subparsers.add_parser('validate', help='Validate training data')
+    validate_parser.add_argument('--date', '-d', help='Single date (YYYY-MM-DD)')
+    validate_parser.add_argument('--all', action='store_true', help='Validate all available dates')
+    validate_parser.add_argument('--output-dir', '-o', default=str(DEFAULT_OUTPUT_DIR), help='Training data directory')
+    validate_parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed warnings')
+    validate_parser.set_defaults(func=cmd_validate)
+    
+    # Report command
+    report_parser = subparsers.add_parser('report', help='Generate pipeline report')
+    report_parser.add_argument('--output', '-o', help='Output JSON file (omit for stdout)')
+    report_parser.add_argument('--output-dir', default=str(DEFAULT_OUTPUT_DIR), help='Training data directory')
+    report_parser.add_argument('--target-dir', default=str(DEFAULT_TARGET_DIR), help='Target data directory')
+    report_parser.set_defaults(func=cmd_report)
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 1
+    
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
