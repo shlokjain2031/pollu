@@ -123,7 +123,7 @@ A complete ML specification for 30m-resolution PM2.5 prediction using LightGBM w
 | `centroid_lat`, `centroid_lon` | Same issue |
 | `h3_cell` | Categorical with spatial structure |
 
-**Rationale**: These features allow LightGBM to memorize spatial patterns without learning transferable relationships. Satellite indices + SVF (later) encode spatial characteristics implicitly.
+**Rationale**: These features allow LightGBM to memorize spatial patterns without learning transferable relationships. Satellite indices encode spatial characteristics implicitly.
 
 ### Group F: Target Metadata — EXCLUDE from features
 
@@ -131,17 +131,6 @@ A complete ML specification for 30m-resolution PM2.5 prediction using LightGBM w
 |---------|-----|
 | `target_trust` | Sample weight, not feature |
 | `n_sensors` | Evaluation stratification only |
-
-### Group G: SVF + Buildings (Reserved) — ~20 features
-
-| Feature | Status |
-|---------|--------|
-| `svf` | Planned |
-| `bld_count_{50,100,250,500}m` | Planned |
-| `bld_area_{50,100,250,500}m` | Planned |
-| `bld_density_{50,100,250,500}m` | Planned |
-| `bld_height_mean_{50,100,250,500}m` | Planned |
-| `dist_to_building_edge` | Planned |
 
 ---
 
@@ -203,7 +192,6 @@ lgb_params = {
     # HISTOGRAM BINNING
     # ─────────────────────────────────────────────────────────────
     'max_bin': 255,                # Default; sufficient for continuous features
-                                   # Reserve capacity for SVF features
     'min_data_in_bin': 10,         # Minimum samples per histogram bin
     
     # ─────────────────────────────────────────────────────────────
@@ -584,8 +572,8 @@ After training baseline, inspect SHAP dependence plots for:
 |------|---------|
 | Add monotonic constraints | Based on SHAP inspection |
 | Tune hyperparameters | Bayesian optimization on validation MAE |
-| Add SVF features | Implement `patliputra/svf_earth_engine.py` |
-| Retrain with SVF | Evaluate improvement |
+| Feature engineering | Explore additional derived features |
+| Model ensembling | Evaluate multi-model strategies |
 
 ### Phase 4: Production Hardening (Week 4)
 

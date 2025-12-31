@@ -164,24 +164,5 @@ producer_metadata:
   - git_sha
 atomic_write: tmp -> rename -> mark_ok
 frequency: daily
-
----
-artifact_type: svf_static
-description: |
-  Sky View Factor raster sampled to the grid (static per city/year). Stored as parquet sampled to grid.
-identity_fields:
-  - artifact_type
-  - spatial_id
-  - timestamp
-  - version
-path_template: artifacts/{artifact_type}/{timestamp}/{version}/{spatial_id}.parquet
-format: parquet or GeoTIFF (but sampled parquet is recommended for grid consumers)
-schema_notes:
-  required_columns:
-    - grid_id
-    - svf (float)
-producer_metadata:
-  - source_dem
-  - git_sha
 atomic_write: tmp -> rename -> mark_ok
 frequency: static or per-year

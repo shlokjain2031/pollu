@@ -26,7 +26,6 @@ See detailed analysis: [docs/patliputra_concurrency_analysis.md](docs/patliputra
 | Meteo | Open-Meteo API | Yes (0.5-2s/req) | ❌ Sequential only |
 | Landsat-8 | Earth Engine | Yes (quota) | ❌ Sequential (has internal workers) |
 | Sentinel-2 | Earth Engine | Yes (quota) | ❌ Sequential (has internal workers) |
-| SVF | Earth Engine | Yes (quota) | ❌ Sequential (expensive) |
 | AQI | Local CSV | No | ✅ Can run anytime |
 
 ## Quick Start
@@ -126,16 +125,6 @@ python patliputra/sentinel2_signals.py \
   --workers 2
 ```
 
-### Sky View Factor
-```bash
-python patliputra/svf_earth_engine.py \
-  --grid-artifact artifacts/v1/grids/mumbai/grid.parquet \
-  --city mumbai \
-  --project your-ee-project-id \
-  --year 2019 \
-  --workers 2
-```
-
 ### CPCB AQI (Ground Truth)
 ```bash
 python patliputra/cpcb_aqi.py \
@@ -151,9 +140,8 @@ python patliputra/cpcb_aqi.py \
 | Meteo | 16-20 hours | API rate limited |
 | Landsat-8 | 2-4 hours | ~200-300 dates |
 | Sentinel-2 | 8-12 hours | ~1,000-1,500 dates |
-| SVF | 4-8 hours | Most expensive |
 | AQI | 30 min | Local processing |
-| **Total** | **31-45 hours** | |
+| **Total** | **27-37 hours** | |
 
 ## Production Run (7 Years)
 
@@ -205,17 +193,6 @@ for year in {2014..2020}; do
     --project your-project-id \
     --workers 2
 done
-
-# Stage 4: SVF (one-time)
-python patliputra/svf_earth_engine.py \
-  --grid-artifact artifacts/v1/grids/mumbai/grid.parquet \
-  --city mumbai \
-  --project your-project-id \
-  --year 2019
-
-# Stage 5: AQI (independent, can run anytime)
-python patliputra/cpcb_aqi.py
-```
 
 ## Monitoring
 

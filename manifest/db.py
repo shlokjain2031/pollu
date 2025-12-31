@@ -50,7 +50,6 @@ ALLOWED_ARTIFACT_TYPES = {
     "s5p_no2_signals",
     "openmeteo_meteo",
     "openaq_daily",
-    "svf_static",
 }
 
 

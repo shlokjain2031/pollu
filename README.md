@@ -26,7 +26,6 @@ Sources include:
 
 - Landsat-8 raw bands via Google Earth Engine (derived indices: NDVI, NDBI, MNDWI, BSI, IBI)
 - Sentinel-2 raw bands via Google Earth Engine (EVI, AOT, cloud mask)
-- Sky View Factor (SVF) from Google Open Buildings + NASA DEM via Earth Engine
 - Meteorological variables (temperature, humidity, wind, pressure, precipitation) from Open-Meteo
 - OSM features: road type, construction sites, traffic routes
 - Ground-truth PM2.5 from CPCB AQI monitoring stations
@@ -198,7 +197,6 @@ TOA_B7	SWIR-2 reflectance	GEE (Landsat-8)	Static
 NDVI	(B5–B4)/(B5+B4) vegetation index	Derived	Static
 IBI	Index-based built-up index	Derived	Static
 GVI	Green-view index	Google Street View	Static
-SVF	Sky-view factor	Copernicus DEM	Static
 Meteorology	Temperature, wind, pressure, PBLH	ERA5	Dynamic
 Dust	Road surface, construction proximity	OSM	Static
 Traffic Emission	Bus route length, road density	OSM	Static
