@@ -8,8 +8,8 @@ The migration is done by spatial join on coordinates (x ≈ x_m, y ≈ y_m) with
 canonical new grid. No external data fetching required - pure geometry math.
 
 Usage:
-    python scripts/migrate_old_parquets.py --input cache/old_svf.parquet
-    python scripts/migrate_old_parquets.py --input cache/old_svf.parquet --output cache/static/svf.parquet
+    python scripts/migrate_old_parquets.py --input cache/old_data.parquet
+    python scripts/migrate_old_parquets.py --input cache/old_data.parquet --output cache/static/data.parquet
     python scripts/migrate_old_parquets.py --batch cache/*.parquet --output-dir cache/static/
 """
 

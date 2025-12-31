@@ -48,7 +48,6 @@ python -m patliputra.pipeline status --city mumbai
 | Meteo | `openmeteo_signals.py` | API | Grid |
 | Landsat-8 | `landsat8_signals.py` | Earth Engine | Grid |
 | Sentinel-2 | `sentinel2_signals.py` | Earth Engine | Grid |
-| SVF | `svf_earth_engine.py` | Earth Engine | Grid |
 | AQI | `cpcb_aqi.py` | Local CSV | None |
 
 ## Concurrent vs Sequential: THE ANSWER
@@ -56,7 +55,7 @@ python -m patliputra.pipeline status --city mumbai
 ### ❌ Run SEQUENTIALLY (Recommended)
 
 **Why?**
-1. **Earth Engine Quota**: All satellite stages (Landsat, Sentinel, SVF) share the same project quota
+1. **Earth Engine Quota**: All satellite stages (Landsat, Sentinel) share the same project quota
    - Concurrent execution exhausts quota 2-3x faster
    - Monthly limit: 10,000 EECU-hours
    - Running concurrently doesn't speed up server-side compute
@@ -102,9 +101,8 @@ Saves ~30 minutes total.
 | Meteo | 16-20 hours | **API rate limits** |
 | Landsat-8 | 2-4 hours | **Earth Engine quota** |
 | Sentinel-2 | 8-12 hours | **Earth Engine quota** |
-| SVF | 4-8 hours | **Earth Engine quota** |
 | AQI | 30 min | Disk I/O |
-| **Total** | **31-45 hours** | |
+| **Total** | **27-37 hours** | |
 
 ## Production Usage
 

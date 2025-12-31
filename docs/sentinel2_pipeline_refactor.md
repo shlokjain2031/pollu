@@ -174,5 +174,4 @@ except Exception as e:
 ## References
 
 - [Sentinel-2 SR Harmonized](https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR_HARMONIZED)
-- [Landsat 8 refactor notes](../docs/svf_implementation_notes.md)
 - [Artifact manifest spec](../manifest/README.md)

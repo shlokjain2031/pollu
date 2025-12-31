@@ -12,7 +12,6 @@ Pipeline Stages:
        - Landsat8 (Earth Engine)
        - Sentinel2 (Earth Engine)
     4. Air Quality Ground Truth (CPCB) - INDEPENDENT
-    5. Sky View Factor (SVF) - SEQUENTIAL (Earth Engine quota intensive)
 
 Usage:
     # Run full pipeline for a date range
@@ -56,7 +55,6 @@ class Stage(str, Enum):
     LANDSAT8 = "landsat8"
     SENTINEL2 = "sentinel2"
     AQI = "aqi"
-    SVF = "svf"
 
 
 # Stage dependencies (must run before)
@@ -66,7 +64,6 @@ STAGE_DEPENDENCIES = {
     Stage.LANDSAT8: [Stage.GRID],
     Stage.SENTINEL2: [Stage.GRID],
     Stage.AQI: [],  # Independent, uses raw CSV data
-    Stage.SVF: [Stage.GRID],
 }
 
 
@@ -128,15 +125,6 @@ STAGE_CONFIGS = {
         description="Process CPCB AQI ground truth data",
         required_args=[],
         optional_args=["--input-dir", "--force"],
-    ),
-    Stage.SVF: StageConfig(
-        name=Stage.SVF,
-        script="patliputra/svf_earth_engine.py",
-        concurrent_safe=False,  # Earth Engine quota intensive
-        rate_limited=True,
-        description="Compute Sky View Factor via Earth Engine",
-        required_args=["--grid-artifact", "--city", "--project"],
-        optional_args=["--year", "--workers"],
     ),
 }
 
@@ -229,7 +217,7 @@ class PipelineRunner:
         cmd = [sys.executable, config.script]
         
         # Add common arguments
-        if stage in [Stage.METEO, Stage.LANDSAT8, Stage.SENTINEL2, Stage.SVF]:
+        if stage in [Stage.METEO, Stage.LANDSAT8, Stage.SENTINEL2]:
             cmd.extend(["--grid-artifact", self.grid_artifact])
             cmd.extend(["--city", self.city])
         
@@ -237,7 +225,7 @@ class PipelineRunner:
             cmd.extend(["--start-date", self.start_date])
             cmd.extend(["--end-date", self.end_date])
         
-        if stage in [Stage.LANDSAT8, Stage.SENTINEL2, Stage.SVF] and self.ee_project:
+        if stage in [Stage.LANDSAT8, Stage.SENTINEL2] and self.ee_project:
             cmd.extend(["--project", self.ee_project])
         
         if stage == Stage.METEO and self.hourly:
@@ -489,7 +477,7 @@ def main():
     )
     run_parser.add_argument(
         "--ee-project",
-        help="Earth Engine project ID (required for satellite/SVF stages)",
+        help="Earth Engine project ID (required for satellite stages)",
     )
     run_parser.add_argument(
         "--hourly",

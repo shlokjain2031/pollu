@@ -131,33 +131,7 @@ python patliputra/sentinel2_signals.py \
 
 ---
 
-### 4. Sky View Factor (`svf_earth_engine.py`)
-
-**Type**: Earth Engine API (computationally intensive)  
-**Concurrent safe**: ❌ No (quota intensive)  
-**Rate limited**: ✅ Yes (quota-based)  
-
-**Bottlenecks**:
-- Most expensive Earth Engine operation in pipeline
-- Uses building data + DEM for horizon angle calculations
-- High compute quota consumption (~50-100 EECU per grid batch)
-
-**Mumbai scale**:
-- 509,209 grid cells
-- Batched processing (typically ~10k cells per job)
-- ~50-100 jobs total
-- Estimated: 2,500-5,000 EECU total
-
-**Recommendation**: ❌ **SEQUENTIAL** (already has internal parallelism)
-
-**Why not concurrent?**
-- Single most expensive operation
-- Would consume monthly quota in days if run concurrently
-- Scripts already optimize batching internally
-
----
-
-### 5. Air Quality Ground Truth (`cpcb_aqi.py`)
+### 4. Air Quality Ground Truth (`cpcb_aqi.py`)
 
 **Type**: Local CSV processing  
 **Concurrent safe**: ✅ Yes (no external dependencies)  
@@ -218,9 +192,8 @@ python -m patliputra.pipeline run \
 - Meteo: 16-20 hours (API rate limited)
 - Landsat-8: 2-4 hours (Earth Engine)
 - Sentinel-2: 8-12 hours (Earth Engine)
-- SVF: 4-8 hours (Earth Engine)
 - AQI: 30 minutes (local)
-- **Total: ~31-45 hours**
+- **Total: ~27-37 hours**
 
 ---
 
@@ -254,11 +227,7 @@ for year in {2014..2020}; do
     --workers 2
 done
 
-# Stage 4: SVF (one-time per city)
-python patliputra/svf_earth_engine.py \
-  --city mumbai --year 2019
-
-# Stage 5: AQI (can run anytime, independent)
+# Stage 4: AQI (can run anytime, independent)
 python patliputra/cpcb_aqi.py
 ```
 
@@ -280,7 +249,7 @@ AQI_PID=$!
 
 # Run main pipeline
 python -m patliputra.pipeline run \
-  --stages meteo,landsat8,sentinel2,svf \
+  --stages meteo,landsat8,sentinel2 \
   --city mumbai \
   --start-date 2014-01-01 \
   --end-date 2020-12-31
