@@ -457,7 +457,11 @@ def main():
             )
 
             # Prepare metadata
-            scene_cloud_cover_val = df['scene_cloud_cover'].iloc[0] if 'scene_cloud_cover' in df.columns else None
+            scene_cloud_cover_val = (
+                df['scene_cloud_cover'].iloc[0] 
+                if 'scene_cloud_cover' in df.columns and len(df) > 0 
+                else None
+            )
             metadata = {
                 "date": date_str,
                 "city": args.city,
