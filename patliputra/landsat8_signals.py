@@ -41,6 +41,22 @@ import geopandas as gpd
 from manifest.landsat_manifest import LandsatManifest
 
 
+TARGET_ROW_IDX_PATH = Path("/tmp/target_row_idx")
+
+
+def load_target_row_idxs(target_path: Path = TARGET_ROW_IDX_PATH) -> set[int] | None:
+    """Load target row_idxs from parquet file.
+    
+    Returns:
+        Set of target row_idxs, or None if file does not exist.
+    """
+    if not target_path.exists():
+        return None
+    
+    df = pd.read_parquet(target_path)
+    return set(df['row_idx'].values)
+
+
 def read_dates(dates_file: Path) -> List[str]:
     """Read dates from text file, one per line."""
     with open(dates_file, "r") as f:
@@ -107,6 +123,7 @@ def fetch_band_values_batched(
     grid_gdf: gpd.GeoDataFrame,
     batch_size: int = 1000,
     max_workers: int = 10,
+    target_row_idxs: set[int] | None = None,
 ) -> pd.DataFrame:
     """
     Fetch raw band values for all grid cells using batched reduceRegions (concurrent).
@@ -125,12 +142,21 @@ def fetch_band_values_batched(
         Number of cells per EE request (default 1000)
     max_workers : int
         Number of concurrent workers (default 10)
+    target_row_idxs : set[int] | None
+        If provided, filter grid to only these row_idxs before fetching
 
     Returns
     -------
     pd.DataFrame
         Columns: grid_id, B1, B2, ..., B11
     """
+    # Filter grid if target_row_idxs provided
+    if target_row_idxs is not None:
+        if 'row_idx' not in grid_gdf.columns:
+            raise ValueError("Grid must have 'row_idx' column when target_row_idxs is provided")
+        grid_gdf = grid_gdf[grid_gdf['row_idx'].isin(target_row_idxs)].copy()
+        print(f"  Filtered to {len(grid_gdf):,} target cells (from {len(target_row_idxs):,} target row_idxs)")
+    
     print(f"  Fetching band values for {len(grid_gdf):,} cells (batch_size={batch_size}, workers={max_workers})...")
     
     # Ensure grid is in WGS84 for EE
@@ -411,6 +437,18 @@ def main():
     if "geometry" not in grid_gdf.columns:
         print("✗ Grid must have 'geometry' column")
         sys.exit(1)
+    
+    # Load target row_idxs if available
+    target_row_idxs = load_target_row_idxs()
+    if target_row_idxs is not None:
+        print(f"✓ Loaded {len(target_row_idxs):,} target row_idxs from {TARGET_ROW_IDX_PATH}")
+        if "row_idx" not in grid_gdf.columns:
+            print("✗ Grid must have 'row_idx' column when target row_idxs are provided")
+            sys.exit(1)
+    else:
+        print(f"⚠ No target row_idxs found at {TARGET_ROW_IDX_PATH}")
+        print(f"  Will process all {len(grid_gdf):,} grid cells (consider running compute_target_row_idxs.py)")
+
 
     # Read dates
     if not args.dates_file.exists():
@@ -454,6 +492,7 @@ def main():
                 grid_gdf=grid_gdf,
                 batch_size=args.batch_size,
                 max_workers=args.max_workers,
+                target_row_idxs=target_row_idxs,
             )
 
             # Prepare metadata
