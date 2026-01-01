@@ -157,15 +157,7 @@ def create_grid(
         grid_gdf.to_parquet(tmp_grid_path, index=False)
         file_size_mb = tmp_grid_path.stat().st_size / (1024 * 1024)
         print(f"  ✓ Wrote {n_points:,} points ({file_size_mb:.2f} MB)")
-        
-        # Write lightweight non-geometry Parquet
-        tmp_nd_path = tmpdir_path / "grid_nd.parquet"
-        print(f"  Writing grid_nd.parquet...")
-        grid_nd = grid_gdf.drop(columns=['geometry'])
-        grid_nd.to_parquet(tmp_nd_path, index=False)
-        nd_size_mb = tmp_nd_path.stat().st_size / (1024 * 1024)
-        print(f"  ✓ Wrote {len(grid_gdf):,} points ({nd_size_mb:.2f} MB, no geometry)")
-    
+            
         # Compute grid bounding boxes
         grid_bbox_proj = (
             float(grid_gdf['x_m'].min()),
