@@ -113,10 +113,37 @@ if str(_PROJECT_ROOT) not in sys.path:
 from manifest.openmeteo_manifest import OpenMeteoManifest
 
 
-TARGET_ROW_IDX_PATH = Path("/tmp/target_row_idx")
+DEFAULT_TARGET_ROW_IDX_PATH = "/tmp/target_row_idx.parquet"
 
 
-def load_target_row_idxs(target_path: Path = TARGET_ROW_IDX_PATH) -> set[int] | None:
+def validate_target_row_idx_path(path: Path) -> None:
+    """Validate that target row_idx path parent directory exists and is writable.
+    
+    Args:
+        path: Path to target row_idx parquet file
+        
+    Raises:
+        RuntimeError if directory is not writable or cannot be created
+    """
+    parent = path.parent
+    
+    # Try to create parent if it doesn't exist
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise RuntimeError(f"Cannot create directory {parent}: {e}")
+    
+    # Test writeability
+    try:
+        # Attempt a small write to verify permissions
+        test_file = parent / ".write_test"
+        test_file.touch()
+        test_file.unlink()
+    except Exception as e:
+        raise RuntimeError(f"Directory {parent} is not writable: {e}")
+
+
+def load_target_row_idxs(target_path: Path) -> set[int] | None:
     """Load target row_idxs from parquet file.
     
     Returns:
@@ -839,8 +866,21 @@ def main():
         default=0.5,
         help="Delay between API requests in seconds (default: 0.5s, increase for rate limiting)",
     )
+    parser.add_argument(
+        "--target-row-idx",
+        type=Path,
+        default=Path(DEFAULT_TARGET_ROW_IDX_PATH),
+        help=f"Path to target row_idx parquet file (default: {DEFAULT_TARGET_ROW_IDX_PATH})",
+    )
     
     args = parser.parse_args()
+    
+    # Validate target row_idx path
+    try:
+        validate_target_row_idx_path(args.target_row_idx)
+    except RuntimeError as e:
+        print(f"✗ {e}")
+        sys.exit(1)
     
     # Auto-adjust workers for hourly mode (12M rows per date = high memory)
     if args.hourly and args.max_workers > 2:
@@ -875,9 +915,9 @@ def main():
     print(f"  ✓ Grid spans {unique_tiles} unique meteo tiles")
     
     # Load target row_idxs and filter grid if available
-    target_row_idxs = load_target_row_idxs()
+    target_row_idxs = load_target_row_idxs(args.target_row_idx)
     if target_row_idxs is not None:
-        print(f"✓ Loaded {len(target_row_idxs):,} target row_idxs from {TARGET_ROW_IDX_PATH}")
+        print(f"✓ Loaded {len(target_row_idxs):,} target row_idxs from {args.target_row_idx}")
         if "row_idx" not in grid_gdf.columns:
             print("✗ Grid must have 'row_idx' column when target row_idxs are provided")
             sys.exit(1)
@@ -892,7 +932,7 @@ def main():
         unique_tiles = grid_with_tiles["meteo_tile_id"].nunique()
         print(f"  ✓ Filtered grid spans {unique_tiles} unique meteo tiles")
     else:
-        print(f"⚠ No target row_idxs found at {TARGET_ROW_IDX_PATH}")
+        print(f"⚠ No target row_idxs found at {args.target_row_idx}")
         print(f"  Will process all {len(grid_with_tiles):,} grid cells (consider running compute_target_row_idxs.py)")
     
     # Drop x_m, y_m to save memory (only need grid_id + meteo_tile_id)
