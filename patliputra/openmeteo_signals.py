@@ -113,6 +113,22 @@ if str(_PROJECT_ROOT) not in sys.path:
 from manifest.openmeteo_manifest import OpenMeteoManifest
 
 
+TARGET_ROW_IDX_PATH = Path("/tmp/target_row_idx")
+
+
+def load_target_row_idxs(target_path: Path = TARGET_ROW_IDX_PATH) -> set[int] | None:
+    """Load target row_idxs from parquet file.
+    
+    Returns:
+        Set of target row_idxs, or None if file does not exist.
+    """
+    if not target_path.exists():
+        return None
+    
+    df = pd.read_parquet(target_path)
+    return set(df['row_idx'].values)
+
+
 # Reanalysis model resolutions in meters
 MODEL_RESOLUTION_M = {
     "ecmwf_ifs": 9000,      # ~9km
@@ -857,6 +873,27 @@ def main():
     grid_with_tiles = assign_meteo_tiles(grid_gdf, tile_size_m)
     unique_tiles = grid_with_tiles["meteo_tile_id"].nunique()
     print(f"  ✓ Grid spans {unique_tiles} unique meteo tiles")
+    
+    # Load target row_idxs and filter grid if available
+    target_row_idxs = load_target_row_idxs()
+    if target_row_idxs is not None:
+        print(f"✓ Loaded {len(target_row_idxs):,} target row_idxs from {TARGET_ROW_IDX_PATH}")
+        if "row_idx" not in grid_gdf.columns:
+            print("✗ Grid must have 'row_idx' column when target row_idxs are provided")
+            sys.exit(1)
+        # Filter grid_with_tiles to only target cells
+        grid_with_tiles = grid_with_tiles.merge(
+            grid_gdf[['grid_id', 'row_idx']], on='grid_id', how='left'
+        )
+        grid_with_tiles = grid_with_tiles[grid_with_tiles['row_idx'].isin(target_row_idxs)].copy()
+        grid_with_tiles = grid_with_tiles.drop(columns=['row_idx'])
+        print(f"  ✓ Filtered to {len(grid_with_tiles):,} target cells")
+        # Recompute unique tiles after filtering
+        unique_tiles = grid_with_tiles["meteo_tile_id"].nunique()
+        print(f"  ✓ Filtered grid spans {unique_tiles} unique meteo tiles")
+    else:
+        print(f"⚠ No target row_idxs found at {TARGET_ROW_IDX_PATH}")
+        print(f"  Will process all {len(grid_with_tiles):,} grid cells (consider running compute_target_row_idxs.py)")
     
     # Drop x_m, y_m to save memory (only need grid_id + meteo_tile_id)
     grid_with_tiles = grid_with_tiles[['grid_id', 'meteo_tile_id']].copy()
