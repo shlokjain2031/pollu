@@ -6,9 +6,9 @@ Production-grade hyperlocal PM2.5 prediction system using LightGBM, satellite im
 
 Pollu predicts PM2.5 concentrations at 30-meter resolution across entire cities using:
 - **LightGBM regression** with Huber loss and trust-weighted samples
-- **Multi-source remote sensing**: Landsat-8, Sentinel-2, S5P NO₂
+- **Multi-source remote sensing**: Landsat-8, Sentinel-2
 - **Meteorological signals**: OpenMeteo/ERA5 hourly data with temporal lags
-- **Ground truth**: CPCB + OpenAQ station networks
+- **Ground truth**: CPCB station networks
 - **Temporal validation**: Forward-chaining splits (2017-2023 train, 2023-2024 val, 2024-2025 test)
 
 **Key features:**
@@ -26,11 +26,11 @@ Pollu is organized into five specialized modules:
 
 | Module | Codename | Purpose | Status |
 |--------|----------|---------|--------|
-| **Data Pipeline** | Patliputra | Multi-source data ingestion (satellite, meteo, AQI) | ✅ Production |
-| **Feature Engineering** | Nalanda | Training data assembly with temporal lags | ✅ Production |
-| **ML Training** | Dwarka | LightGBM model training and evaluation | 🔄 In Development |
-| **Persistence** | Takshashila | Artifact storage and metadata tracking | ✅ Production |
-| **API Serving** | Ujjayini | FastAPI inference endpoint | 📋 Planned |
+| **Data Pipeline** | Patliputra | Multi-source data ingestion (satellite, meteo, AQI) | Production |
+| **Feature Engineering** | Nalanda | Training data assembly with temporal lags | Production |
+| **ML Training** | Dwarka | LightGBM model training and evaluation | In Development |
+| **Persistence** | Takshashila | Artifact storage and metadata tracking | Production |
+| **API Serving** | Ujjayini | FastAPI inference endpoint | Planned |
 
 ---
 
@@ -63,7 +63,7 @@ python -m patliputra.pipeline run \
 - Satellite data: 10-16 hours (Earth Engine quota limited)
 - **Total: ~27-37 hours**
 
-⚠️ **Run stages sequentially** — API rate limits and Earth Engine quotas prevent parallelization.
+**Run stages sequentially** — API rate limits and Earth Engine quotas prevent parallelization.
 
 ### 2. Feature Engineering (Nalanda)
 
@@ -213,11 +213,9 @@ Fetches, validates, and normalizes multi-source environmental data into standard
 2. **Meteorology** (`openmeteo_signals.py`): Hourly weather data from OpenMeteo API
 3. **Landsat-8** (`landsat8_signals.py`): Spectral indices via Earth Engine
 4. **Sentinel-2** (`sentinel2_signals.py`): EVI, cloud mask, texture features via Earth Engine
-5. **S5P NO₂** (`s5p_no2.py`): Atmospheric chemistry from Sentinel-5P
 6. **CPCB AQI** (`cpcb_aqi.py`): Ground truth PM2.5 from monitoring stations
-7. **OpenAQ** (`openaq.py`): Supplemental PM2.5 from sensor network
 
-**Output format**: Parquet files organized by `artifacts/{source}/{city}/{date}.parquet`
+**Output format**: Parquet files organized by `artifacts/v1/{source}/{city}/{date}.parquet`
 
 **Artifact contract**: Each parquet includes:
 - `grid_id`: Unique grid cell identifier
@@ -433,7 +431,6 @@ pollu/
 │   ├── openmeteo_signals.py
 │   ├── landsat8_signals.py
 │   ├── sentinel2_signals.py
-│   ├── s5p_no2.py
 │   ├── cpcb_aqi.py
 │   └── pipeline.py      # Orchestration
 ├── nalanda/             # Feature engineering
