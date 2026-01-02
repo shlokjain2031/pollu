@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import List
@@ -43,6 +44,7 @@ import pandas as pd
 import geopandas as gpd
 
 from manifest.sentinel2_manifest import Sentinel2Manifest
+from patliputra.logging_utils import setup_logging
 
 
 DEFAULT_TARGET_ROW_IDX_PATH = "/tmp/target_row_idx.parquet"
@@ -416,6 +418,9 @@ def write_artifact_atomic(
 
 
 def main():
+    # Initialize logging
+    logger = setup_logging("sentinel2")
+    
     parser = argparse.ArgumentParser(
         description="Fetch Sentinel-2 raw band values for grid cells (per-date Parquet)"
     )

@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import List
@@ -39,6 +40,7 @@ import pandas as pd
 import geopandas as gpd
 
 from manifest.landsat_manifest import LandsatManifest
+from patliputra.logging_utils import setup_logging
 
 
 DEFAULT_TARGET_ROW_IDX_PATH = "/tmp/target_row_idx.parquet"
@@ -411,6 +413,9 @@ def write_artifact_atomic(
 
 
 def main():
+    # Initialize logging
+    logger = setup_logging("landsat8")
+    
     parser = argparse.ArgumentParser(
         description="Fetch Landsat-8 raw band values for grid cells (per-date Parquet)"
     )
