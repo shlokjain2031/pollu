@@ -102,7 +102,7 @@ STAGE_CONFIGS = {
         rate_limited=False,
         description="Compute target row_idxs from sensor influence zones",
         required_args=["--city"],
-        optional_args=["--bbox", "--grid-artifact", "--radius-m", "--output", "--api-token"],
+        optional_args=["--bbox", "--grid-artifact", "--radius-m", "--output", "--openaq-token"],
     ),
     Stage.METEO: StageConfig(
         name=Stage.METEO,
@@ -201,7 +201,7 @@ class PipelineRunner:
         end_date: Optional[str] = None,
         grid_artifact: Optional[str] = None,
         ee_project: Optional[str] = None,
-        api_token: Optional[str] = None,
+        openaq_token: Optional[str] = None,
         hourly: bool = False,
         verbose: bool = False,
     ):
@@ -210,7 +210,7 @@ class PipelineRunner:
         self.end_date = end_date
         self.grid_artifact = grid_artifact or f"artifacts/v1/grids/{city}/grid.parquet"
         self.ee_project = ee_project
-        self.api_token = api_token
+        self.openaq_token = openaq_token
         self.hourly = hourly
         self.verbose = verbose
         
@@ -246,8 +246,8 @@ class PipelineRunner:
         if stage == Stage.COMPUTE_TARGET_ROW_IDXS:
             cmd.extend(["--city", self.city])
             cmd.extend(["--grid-artifact", self.grid_artifact])
-            if self.api_token:
-                cmd.extend(["--api-token", self.api_token])
+            if self.openaq_token:
+                cmd.extend(["--openaq-token", self.openaq_token])
         
         if stage in [Stage.METEO, Stage.LANDSAT8, Stage.SENTINEL2]:
             cmd.extend(["--grid-artifact", self.grid_artifact])
@@ -518,7 +518,7 @@ def main():
         help="Earth Engine project ID (required for satellite stages)",
     )
     run_parser.add_argument(
-        "--api-token",
+        "--openaq-token",
         required=True,
         help="OpenAQ API token (for compute_target_row_idxs stage)",
     )
@@ -582,7 +582,7 @@ def main():
             end_date=args.end_date,
             grid_artifact=args.grid_artifact,
             ee_project=args.ee_project,
-            api_token=args.api_token,
+            openaq_token=args.openaq_token,
             hourly=args.hourly,
             verbose=args.verbose,
         )
