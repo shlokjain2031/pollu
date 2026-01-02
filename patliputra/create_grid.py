@@ -231,6 +231,13 @@ def create_grid(
             json.dump(metadata, f, indent=2)
         print(f"  ✓ Wrote metadata.json (git SHA: {git_sha[:8]})")
         
+        # Also write a geometry-less version (grid_nd.parquet) for lightweight reads
+        tmp_nd_path = tmpdir_path / "grid_nd.parquet"
+        print(f"  Writing grid_nd.parquet (no geometry)...")
+        grid_nd = grid_gdf.drop(columns=["geometry"]) 
+        grid_nd.to_parquet(tmp_nd_path, index=False)
+        print(f"  ✓ Wrote grid_nd.parquet")
+
         # Atomic rename: move all files to final destination
         print(f"\n[13/13] Atomic move to artifact directory...")
         final_grid_path = artifact_dir / "grid.parquet"

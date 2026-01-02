@@ -51,6 +51,7 @@ import pandas as pd
 class Stage(str, Enum):
     """Pipeline stages in dependency order."""
     GRID = "grid"
+    COMPUTE_TARGET_ROW_IDXS = "compute_target_row_idxs"
     METEO = "meteo"
     LANDSAT8 = "landsat8"
     SENTINEL2 = "sentinel2"
@@ -60,9 +61,10 @@ class Stage(str, Enum):
 # Stage dependencies (must run before)
 STAGE_DEPENDENCIES = {
     Stage.GRID: [],
-    Stage.METEO: [Stage.GRID],
-    Stage.LANDSAT8: [Stage.GRID],
-    Stage.SENTINEL2: [Stage.GRID],
+    Stage.COMPUTE_TARGET_ROW_IDXS: [Stage.GRID],
+    Stage.METEO: [Stage.GRID, Stage.COMPUTE_TARGET_ROW_IDXS],
+    Stage.LANDSAT8: [Stage.GRID, Stage.COMPUTE_TARGET_ROW_IDXS],
+    Stage.SENTINEL2: [Stage.GRID, Stage.COMPUTE_TARGET_ROW_IDXS],
     Stage.AQI: [],  # Independent, uses raw CSV data
 }
 
@@ -90,6 +92,15 @@ STAGE_CONFIGS = {
         required_args=["--grid-id", "--grid-version"],
         optional_args=["--bounds"],
     ),
+    Stage.COMPUTE_TARGET_ROW_IDXS: StageConfig(
+        name=Stage.COMPUTE_TARGET_ROW_IDXS,
+        script="patliputra/compute_target_row_idxs.py",
+        concurrent_safe=True,
+        rate_limited=False,
+        description="Compute target row_idxs from sensor influence zones",
+        required_args=["--city"],
+        optional_args=["--bbox", "--grid-artifact", "--radius-m", "--output", "--api-token"],
+    ),
     Stage.METEO: StageConfig(
         name=Stage.METEO,
         script="patliputra/openmeteo_signals.py",
@@ -105,8 +116,8 @@ STAGE_CONFIGS = {
         concurrent_safe=False,  # Earth Engine quotas
         rate_limited=True,
         description="Fetch Landsat-8 satellite data via Earth Engine",
-        required_args=["--grid-artifact", "--city", "--dates-file", "--project"],
-        optional_args=["--workers"],
+        required_args=["--grid-artifact", "--city", "--start-date", "--end-date", "--project"],
+        optional_args=["--batch-size", "--max-workers", "--target-row-idx"],
     ),
     Stage.SENTINEL2: StageConfig(
         name=Stage.SENTINEL2,
@@ -187,6 +198,7 @@ class PipelineRunner:
         end_date: Optional[str] = None,
         grid_artifact: Optional[str] = None,
         ee_project: Optional[str] = None,
+        api_token: Optional[str] = None,
         hourly: bool = False,
         verbose: bool = False,
     ):
@@ -195,6 +207,7 @@ class PipelineRunner:
         self.end_date = end_date
         self.grid_artifact = grid_artifact or f"artifacts/v1/grids/{city}/grid.parquet"
         self.ee_project = ee_project
+        self.api_token = api_token
         self.hourly = hourly
         self.verbose = verbose
         
@@ -213,15 +226,31 @@ class PipelineRunner:
             print(f"Rate limited: {config.rate_limited}")
             print(f"{'='*80}\n")
         
-        # Build command
-        cmd = [sys.executable, config.script]
+        # Build command. If the configured script is a path (contains '/'
+        # or ends with '.py'), run it as a module using `-m` so package
+        # imports resolve correctly when executed from the project root.
+        script = config.script
+        if script.endswith(".py") or "/" in script:
+            module = script.replace("/", ".")
+            if module.endswith(".py"):
+                module = module[:-3]
+            cmd = [sys.executable, "-m", module]
+        else:
+            # assume already a module path
+            cmd = [sys.executable, "-m", script]
         
         # Add common arguments
+        if stage == Stage.COMPUTE_TARGET_ROW_IDXS:
+            cmd.extend(["--city", self.city])
+            cmd.extend(["--grid-artifact", self.grid_artifact])
+            if self.api_token:
+                cmd.extend(["--api-token", self.api_token])
+        
         if stage in [Stage.METEO, Stage.LANDSAT8, Stage.SENTINEL2]:
             cmd.extend(["--grid-artifact", self.grid_artifact])
             cmd.extend(["--city", self.city])
         
-        if stage in [Stage.METEO, Stage.SENTINEL2] and self.start_date and self.end_date:
+        if stage in [Stage.METEO, Stage.LANDSAT8, Stage.SENTINEL2] and self.start_date and self.end_date:
             cmd.extend(["--start-date", self.start_date])
             cmd.extend(["--end-date", self.end_date])
         
@@ -461,10 +490,12 @@ def main():
     )
     run_parser.add_argument(
         "--start-date",
+        required=True,
         help="Start date (YYYY-MM-DD)",
     )
     run_parser.add_argument(
         "--end-date",
+        required=True,
         help="End date (YYYY-MM-DD)",
     )
     run_parser.add_argument(
@@ -477,7 +508,13 @@ def main():
     )
     run_parser.add_argument(
         "--ee-project",
+        required=True,
         help="Earth Engine project ID (required for satellite stages)",
+    )
+    run_parser.add_argument(
+        "--api-token",
+        required=True,
+        help="OpenAQ API token (for compute_target_row_idxs stage)",
     )
     run_parser.add_argument(
         "--hourly",
@@ -539,6 +576,7 @@ def main():
             end_date=args.end_date,
             grid_artifact=args.grid_artifact,
             ee_project=args.ee_project,
+            api_token=args.api_token,
             hourly=args.hourly,
             verbose=args.verbose,
         )
