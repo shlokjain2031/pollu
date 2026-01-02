@@ -19,6 +19,7 @@ tmp/
 artifacts/
 manifest/grid/
 test_output/
+logs/
 
 # Testing
 fake/
