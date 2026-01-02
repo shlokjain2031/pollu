@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -102,6 +103,8 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import requests
+
+from patliputra.logging_utils import setup_logging
 
 # Add project root to path for imports
 import sys
@@ -803,6 +806,9 @@ def process_single_date(
 
 
 def main():
+    # Initialize logging
+    logger = setup_logging("openmeteo")
+    
     parser = argparse.ArgumentParser(
         description="Fetch Open-Meteo meteorology and map to 30m grid"
     )

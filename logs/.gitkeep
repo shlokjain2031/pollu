@@ -1,0 +1,14 @@
+# Logging directory - automatically created at runtime
+# Each data stream creates its own subdirectory:
+# logs/
+#   pipeline/
+#     20260102_120000.log
+#     20260102_120030.log
+#   landsat8/
+#     20260102_115000.log
+#   sentinel2/
+#     20260102_114500.log
+#   openmeteo/
+#     20260102_113000.log
+#
+# See patliputra/logging_utils.py for logging configuration.

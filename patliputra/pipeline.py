@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -46,6 +47,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import pandas as pd
+
+from patliputra.logging_utils import setup_logging
 
 
 class Stage(str, Enum):
@@ -474,6 +477,9 @@ class PipelineRunner:
 
 
 def main():
+    # Initialize logging
+    logger = setup_logging("pipeline")
+    
     parser = argparse.ArgumentParser(
         description="Patliputra data pipeline orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
