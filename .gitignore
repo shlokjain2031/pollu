@@ -19,7 +19,6 @@ tmp/
 artifacts/
 manifest/grid/
 test_output/
-cpcb_aqi_data/
 
 # Testing
 fake/
