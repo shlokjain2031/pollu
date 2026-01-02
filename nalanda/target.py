@@ -322,21 +322,23 @@ class TargetAssembler:
     
     def __init__(
         self,
-        sensor_json_path: str | Path,
         grid_parquet_path: str | Path,
+        openaq_token: str,
+        bbox: str,
         radius_m: float = DEFAULT_RADIUS_M,
     ):
         """Initialize target assembler.
         
         Args:
-            sensor_json_path: Path to openaq_sensor_ids.json.
             grid_parquet_path: Path to grid parquet artifact.
+            openaq_token: OpenAQ API token for fetching sensor locations.
+            bbox: Bounding box as "west,south,east,north" (EPSG:4326).
             radius_m: Influence radius in meters.
         """
         self.radius_m = radius_m
         
         # Load and prepare sensors
-        self.sensors_df = load_sensor_locations(sensor_json_path)
+        self.sensors_df = load_sensor_locations(openaq_token, bbox)
         self.sensors_df = add_utm_coords_to_sensors(self.sensors_df)
         
         # Build grid index
@@ -352,9 +354,11 @@ class TargetAssembler:
         # Compute statistics
         self.n_sensors = len(self.sensors_df)
         self.n_sensors_in_grid = len(self.influence_zones)
-        self.total_influenced_cells = sum(
-            len(zone) for zone in self.influence_zones.values()
-        )
+        # Count unique influenced cells (not summing overlaps)
+        unique_row_idxs = set()
+        for zone in self.influence_zones.values():
+            unique_row_idxs.update(zone['row_idx'].values)
+        self.total_influenced_cells = len(unique_row_idxs)
     
     def assemble_day(
         self,
