@@ -32,17 +32,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-read -r -p "start-date [${START_DATE:-}]: " INPUT
 START_DATE="${START_DATE:-$INPUT}"
-read -r -p "end-date [${END_DATE:-}]: " INPUT
 END_DATE="${END_DATE:-$INPUT}"
-read -r -p "openaq-token [${OPENAQ_TOKEN:+******}]: " INPUT
 OPENAQ_TOKEN="${OPENAQ_TOKEN:-$INPUT}"
-read -r -p "ee-project [${EE_PROJECT:-}]: " INPUT
 EE_PROJECT="${EE_PROJECT:-$INPUT}"
-read -r -p "bbox [${BBOX:-72.7763,18.8939,72.9797,19.2701}]: " INPUT
 BBOX="${BBOX:-$INPUT}"
-read -r -p "city [${CITY:-mumbai}]: " INPUT
 CITY="${CITY:-$INPUT}"
 
 # Validate required
