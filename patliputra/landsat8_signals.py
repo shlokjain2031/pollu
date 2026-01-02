@@ -87,11 +87,33 @@ def load_target_row_idxs(target_path: Path) -> set[int] | None:
     return set(df['row_idx'].values)
 
 
-def read_dates(dates_file: Path) -> List[str]:
-    """Read dates from text file, one per line."""
-    with open(dates_file, "r") as f:
-        dates = [line.strip() for line in f if line.strip()]
-    return sorted(set(dates))
+def generate_date_range(start_date: str, end_date: str) -> List[str]:
+    """Generate list of dates from start to end (inclusive) as YYYY-MM-DD strings.
+    
+    Parameters
+    ----------
+    start_date : str
+        Start date in YYYY-MM-DD format
+    end_date : str
+        End date in YYYY-MM-DD format
+    
+    Returns
+    -------
+    List[str]
+        Sorted list of date strings
+    """
+    from datetime import datetime, timedelta
+    
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    
+    dates = []
+    current = start
+    while current <= end:
+        dates.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    
+    return sorted(dates)
 
 
 def get_landsat8_image(date_str: str, bbox: tuple) -> ee.Image:
@@ -377,12 +399,6 @@ def main():
         description="Fetch Landsat-8 raw band values for grid cells (per-date Parquet)"
     )
     parser.add_argument(
-        "--dates-file",
-        type=Path,
-        default=Path("artifacts/v1/landsat8/mumbai/landsat8_image_dates.txt"),
-        help="Path to dates file (one date per line, YYYY-MM-DD)",
-    )
-    parser.add_argument(
         "--grid-artifact",
         type=Path,
         required=True,
@@ -393,6 +409,18 @@ def main():
         type=str,
         default="mumbai",
         help="City name (used in output path)",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        required=True,
+        help="Start date in YYYY-MM-DD format",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        required=True,
+        help="End date in YYYY-MM-DD format",
     )
     parser.add_argument(
         "--artifacts-root",
@@ -493,13 +521,13 @@ def main():
         print(f"  Will process all {len(grid_gdf):,} grid cells (consider running compute_target_row_idxs.py)")
 
 
-    # Read dates
-    if not args.dates_file.exists():
-        print(f"✗ Dates file not found: {args.dates_file}")
+    # Generate date range
+    try:
+        dates = generate_date_range(args.start_date, args.end_date)
+        print(f"✓ Generated {len(dates)} dates from {args.start_date} to {args.end_date}")
+    except ValueError as e:
+        print(f"✗ Invalid date format: {e}")
         sys.exit(1)
-
-    dates = read_dates(args.dates_file)
-    print(f"✓ Found {len(dates)} dates to process")
 
     # Prepare output directory
     output_dir = args.artifacts_root / "v1" / "landsat8" / args.city
