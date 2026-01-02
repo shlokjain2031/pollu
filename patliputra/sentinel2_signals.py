@@ -192,6 +192,7 @@ def fetch_band_values_batched(
     batch_size: int = 1000,
     max_workers: int = 10,
     target_row_idxs: set[int] | None = None,
+    tile_scale: int = 2,
 ) -> pd.DataFrame:
     """
     Fetch raw band values for all grid cells using batched reduceRegions (concurrent).
@@ -234,12 +235,14 @@ def fetch_band_values_batched(
         grid_wgs84 = grid_gdf
 
     total_batches = (len(grid_wgs84) + batch_size - 1) // batch_size
+    print(f"  Total batches: {total_batches} (batch_size={batch_size})")
     
     def fetch_batch(batch_idx: int) -> tuple[int, list[dict]]:
         """Fetch a single batch of grid cells."""
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(grid_wgs84))
         batch_gdf = grid_wgs84.iloc[start_idx:end_idx]
+        print(f"    Starting batch {batch_idx+1}/{total_batches} (rows {start_idx}-{end_idx})")
 
         # Convert to EE FeatureCollection
         features = []
@@ -256,7 +259,7 @@ def fetch_band_values_batched(
             collection=fc,
             reducer=ee.Reducer.mean(),
             scale=30,  # Target grid resolution
-            tileScale=1,
+            tileScale=tile_scale,
         )
 
         # Fetch results with retry/backoff for transient EE failures
@@ -281,8 +284,10 @@ def fetch_band_values_batched(
     # Submit all batches concurrently
     all_results = []
     completed_count = 0
+    effective_workers = min(max_workers, total_batches if total_batches > 0 else 1, 8)
+    print(f"  Using {effective_workers} worker(s) for {total_batches} batches")
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         # Submit all batch jobs
         futures = {
             executor.submit(fetch_batch, batch_idx): batch_idx
@@ -291,7 +296,11 @@ def fetch_band_values_batched(
         
         # Process results as they complete
         for future in as_completed(futures):
-            batch_idx, batch_results = future.result()
+            try:
+                batch_idx, batch_results = future.result()
+            except Exception as e:
+                print(f"    ✗ Batch failed with error: {e}")
+                raise
             all_results.extend(batch_results)
             completed_count += 1
             
@@ -449,13 +458,13 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1000,
+        default=500,
         help="Number of grid cells per EE request",
     )
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=10,
+        default=4,
         help="Number of concurrent workers for batch fetching (default: 10)",
     )
     parser.add_argument(
@@ -469,6 +478,12 @@ def main():
         type=Path,
         default=Path(DEFAULT_TARGET_ROW_IDX_PATH),
         help=f"Path to target row_idx parquet file (default: {DEFAULT_TARGET_ROW_IDX_PATH})",
+    )
+    parser.add_argument(
+        "--tile-scale",
+        type=int,
+        default=2,
+        help="Earth Engine tileScale to use for reduceRegions (default: 2)",
     )
 
     args = parser.parse_args()
