@@ -40,6 +40,7 @@ import pandas as pd
 import requests
 
 from nalanda.spatial_utils import GridIndex, add_utm_coords_to_sensors
+from nalanda.sensor_locations import load_sensor_locations
 
 
 DEFAULT_RADIUS_M = 250.0
@@ -189,6 +190,18 @@ def fetch_openaq_sensors(
     df = df.drop(columns=["lat_round", "lon_round", "latlon_key"])
     
     print(f"  ✓ {len(df)} unique PM2.5 sensor locations")
+
+    # Print all the location_names of the sensors fetched
+    location_names = df["location_name"].tolist()
+    print("  → Sensor location names fetched:")
+    for name in location_names:
+        print(f"    - {name}")
+
+    
+    # df must be filtered using the file extraction logic
+    # used in nalanda/sensor_locations.py to ensure consistency
+    
+
     
     return df
 
@@ -318,7 +331,7 @@ def main():
         print("No API token provided; using rate-limited public access")
     print()
     
-    sensors_df = fetch_openaq_sensors(bbox=args.bbox, api_token=api_token)
+    sensors_df = load_sensor_locations(openaq_token=api_token, bbox=args.bbox)
     
     if sensors_df.empty:
         print(f"\n✗ No sensors found in bbox. Cannot compute target row_idxs.")

@@ -28,10 +28,10 @@ from nalanda.target import TargetAssembler, DEFAULT_RADIUS_M, DEFAULT_TRUST_KERN
 
 # Default paths
 PROJECT_ROOT = Path(__file__).parent.parent
-DEFAULT_SENSOR_JSON = PROJECT_ROOT / "cache" / "openaq_sensor_ids.json"
 DEFAULT_GRID_PARQUET = PROJECT_ROOT / "artifacts" / "v1" / "grids" / "mumbai" / "grid.parquet"
 DEFAULT_AQI_DIR = PROJECT_ROOT / "artifacts" / "v1" / "aqi"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "artifacts" / "v1" / "training"
+DEFAULT_BBOX = "72.7763,18.8939,72.9797,19.2701"  # Mumbai
 
 
 def get_aqi_artifact_path(date: str, aqi_dir: Path = DEFAULT_AQI_DIR) -> Path:
@@ -183,15 +183,20 @@ def process_date_worker(args: tuple) -> dict:
     was already processed.
     
     Args:
-        args: Tuple of (date, sensor_json, grid_parquet, radius_m, aqi_dir, output_dir, force)
+        args: Tuple of (date, grid_parquet, openaq_token, bbox, radius_m, aqi_dir, output_dir, force)
         
     Returns:
         Processing result dict.
     """
-    date, sensor_json, grid_parquet, radius_m, aqi_dir, output_dir, force = args
+    date, grid_parquet, openaq_token, bbox, radius_m, aqi_dir, output_dir, force = args
     
     # Initialize assembler in worker process
-    assembler = TargetAssembler(sensor_json, grid_parquet, radius_m=radius_m)
+    assembler = TargetAssembler(
+        grid_parquet_path=grid_parquet,
+        openaq_token=openaq_token,
+        bbox=bbox,
+        radius_m=radius_m,
+    )
     
     # Try to load previous day's target for lag computation
     prev_day = (datetime.strptime(date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -293,12 +298,18 @@ Examples:
         help='Number of parallel workers (default: 1)',
     )
     
-    # Path options
+    # OpenAQ and spatial options (required)
     parser.add_argument(
-        '--sensor-json',
-        type=Path,
-        default=DEFAULT_SENSOR_JSON,
-        help='Path to sensor metadata JSON',
+        '--openaq-token',
+        type=str,
+        required=True,
+        help='OpenAQ API token for fetching sensor locations',
+    )
+    parser.add_argument(
+        '--bbox',
+        type=str,
+        default=DEFAULT_BBOX,
+        help=f'Bounding box as "west,south,east,north" (default: {DEFAULT_BBOX})',
     )
     parser.add_argument(
         '--grid-parquet',
@@ -355,8 +366,9 @@ Examples:
         # Serial processing with single assembler
         print(f"\nInitializing assembler...")
         assembler = TargetAssembler(
-            args.sensor_json,
-            args.grid_parquet,
+            grid_parquet_path=args.grid_parquet,
+            openaq_token=args.openaq_token,
+            bbox=args.bbox,
             radius_m=args.radius,
         )
         print(f"  {assembler}")
@@ -420,8 +432,9 @@ Examples:
         worker_args = [
             (
                 date,
-                args.sensor_json,
                 args.grid_parquet,
+                args.openaq_token,
+                args.bbox,
                 args.radius,
                 args.aqi_dir,
                 args.output_dir,
