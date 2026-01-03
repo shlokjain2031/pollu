@@ -393,5 +393,141 @@ def main():
         print("\n(dry run - not saved)")
 
 
+# ============================================================================
+# Split materialization
+# ============================================================================
+
+def materialize_splits(
+    input_dir: Path = DEFAULT_OUTPUT_DIR,
+    output_base_dir: Optional[Path] = None,
+    timestamp_col: str = "timestamp",
+) -> dict:
+    """Materialize train/val/test splits from assembled training data.
+    
+    Loads all available parquet files from input_dir, filters by split
+    boundaries, and writes to separate train/val/test directories.
+    
+    Args:
+        input_dir: Directory containing date-partitioned training parquet files
+        output_base_dir: Base directory for output (creates train/, val/, test/ subdirs)
+        timestamp_col: Name of timestamp column
+        
+    Returns:
+        Dictionary with metadata about each split (row counts, date ranges, checksums)
+    """
+    from nalanda.splits import get_split_mask, validate_splits
+    import hashlib
+    
+    if output_base_dir is None:
+        output_base_dir = PROJECT_ROOT / "artifacts"
+    
+    output_base_dir = Path(output_base_dir)
+    
+    # Create output directories
+    train_dir = output_base_dir / "train"
+    val_dir = output_base_dir / "val"
+    test_dir = output_base_dir / "test"
+    
+    for d in [train_dir, val_dir, test_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Loading training data from: {input_dir}")
+    
+    # Find all parquet files
+    date_dirs = sorted([d for d in input_dir.iterdir() if d.is_dir()])
+    
+    if not date_dirs:
+        raise ValueError(f"No date directories found in {input_dir}")
+    
+    # Load all data
+    dfs = []
+    for date_dir in date_dirs:
+        parquet_files = list(date_dir.glob("*.parquet"))
+        for pq_file in parquet_files:
+            df = pd.read_parquet(pq_file)
+            dfs.append(df)
+    
+    if not dfs:
+        raise ValueError(f"No parquet files found in {input_dir}")
+    
+    print(f"  Loaded {len(dfs)} parquet files from {len(date_dirs)} dates")
+    
+    # Concatenate all data
+    full_df = pd.concat(dfs, ignore_index=True)
+    print(f"  Total rows: {len(full_df):,}")
+    print(f"  Date range: {full_df[timestamp_col].min()} to {full_df[timestamp_col].max()}")
+    
+    # Validate splits
+    print("\nValidating split boundaries...")
+    validation_results = validate_splits(full_df, timestamp_col=timestamp_col, strict=True)
+    print(f"  ✓ All timestamps assigned to valid splits")
+    
+    # Split data
+    print("\nCreating splits...")
+    splits = {}
+    
+    for split_name, output_dir in [
+        ("train", train_dir),
+        ("validation", val_dir),
+        ("test", test_dir),
+    ]:
+        print(f"\n  {split_name.upper()}:")
+        mask = get_split_mask(full_df, split_name, timestamp_col)
+        split_df = full_df[mask].copy()
+        
+        if len(split_df) == 0:
+            print(f"    ⚠️  Warning: No data for {split_name} split")
+            continue
+        
+        # Sort by timestamp for efficient reading
+        split_df = split_df.sort_values([timestamp_col, "row_idx"]).reset_index(drop=True)
+        
+        # Compute metadata
+        min_ts = split_df[timestamp_col].min()
+        max_ts = split_df[timestamp_col].max()
+        row_count = len(split_df)
+        
+        # Save as single parquet file
+        output_path = output_dir / f"{split_name}.parquet"
+        split_df.to_parquet(
+            output_path,
+            engine="pyarrow",
+            compression="snappy",
+            index=False,
+        )
+        
+        # Compute checksum
+        with open(output_path, "rb") as f:
+            file_hash = hashlib.sha256(f.read()).hexdigest()
+        
+        file_size_mb = output_path.stat().st_size / (1024 * 1024)
+        
+        splits[split_name] = {
+            "path": str(output_path),
+            "rows": row_count,
+            "columns": len(split_df.columns),
+            "min_timestamp": str(min_ts),
+            "max_timestamp": str(max_ts),
+            "size_mb": round(file_size_mb, 2),
+            "sha256": file_hash,
+        }
+        
+        print(f"    Rows: {row_count:,}")
+        print(f"    Date range: {min_ts} to {max_ts}")
+        print(f"    Size: {file_size_mb:.2f} MB")
+        print(f"    Saved: {output_path}")
+        print(f"    SHA256: {file_hash[:16]}...")
+    
+    # Save metadata
+    metadata_path = output_base_dir / "splits_metadata.json"
+    import json
+    with open(metadata_path, "w") as f:
+        json.dump(splits, f, indent=2)
+    
+    print(f"\n✓ Split metadata saved to: {metadata_path}")
+    
+    return splits
+
+
 if __name__ == '__main__':
     main()
