@@ -41,8 +41,16 @@ from nalanda.training import (
     save_training_data,
     load_target,
     get_training_feature_columns,
+    materialize_splits,
     DEFAULT_TARGET_DIR,
     DEFAULT_OUTPUT_DIR,
+)
+from nalanda.splits import (
+    validate_splits,
+    assert_no_leakage,
+    get_split_mask,
+    print_split_summary,
+    SPLIT_RANGES,
 )
 
 
@@ -686,6 +694,154 @@ def cmd_report(args):
     return 0
 
 
+def cmd_validate_splits(args):
+    """Handle 'validate-splits' command - verify temporal split boundaries."""
+    
+    # If --summary flag, just print split configuration
+    if args.summary:
+        print_split_summary()
+        return 0
+    
+    # Load training data to validate
+    output_dir = Path(args.output_dir)
+    
+    if args.file:
+        # Validate a specific parquet file
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            return 1
+        
+        print(f"Validating split boundaries in: {file_path.name}")
+        df = pd.read_parquet(file_path)
+        
+        if args.timestamp_col not in df.columns:
+            print(f"Error: Timestamp column '{args.timestamp_col}' not found", file=sys.stderr)
+            print(f"Available columns: {', '.join(df.columns)}", file=sys.stderr)
+            return 1
+        
+        try:
+            results = validate_splits(df, timestamp_col=args.timestamp_col, strict=not args.no_strict)
+            
+            # Print results
+            print("\n" + "=" * 60)
+            print("Split Validation Results")
+            print("=" * 60)
+            print(f"Valid: {results['valid']}")
+            print(f"Total rows: {results['total_rows']:,}")
+            print(f"Unassigned rows: {results['unassigned_rows']:,}")
+            print(f"\nDate range: {results['date_range']['min']} to {results['date_range']['max']}")
+            print(f"\nSplit distribution:")
+            for split, count in results['split_counts'].items():
+                pct = 100 * count / results['total_rows'] if results['total_rows'] > 0 else 0
+                print(f"  {split:12} {count:8,} rows ({pct:5.1f}%)")
+            
+            if results['issues']:
+                print(f"\n⚠️  Issues found ({len(results['issues'])}):")
+                for issue in results['issues']:
+                    print(f"  - {issue}")
+                return 1
+            else:
+                print("\n✓ All split invariants satisfied")
+                return 0
+                
+        except AssertionError as e:
+            print(f"\n❌ Split validation failed:", file=sys.stderr)
+            print(f"  {e}", file=sys.stderr)
+            return 1
+    
+    elif args.splits:
+        # Validate that train/val/test DataFrames have no leakage
+        # Expects three files: train.parquet, val.parquet, test.parquet
+        train_file = output_dir / "train.parquet"
+        val_file = output_dir / "val.parquet"
+        test_file = output_dir / "test.parquet"
+        
+        missing = []
+        if not train_file.exists():
+            missing.append("train.parquet")
+        if not val_file.exists():
+            missing.append("val.parquet")
+        if not test_file.exists():
+            missing.append("test.parquet")
+        
+        if missing:
+            print(f"Error: Missing split files: {', '.join(missing)}", file=sys.stderr)
+            print(f"Expected in: {output_dir}", file=sys.stderr)
+            return 1
+        
+        print(f"Loading train/val/test splits from: {output_dir}")
+        train_df = pd.read_parquet(train_file)
+        val_df = pd.read_parquet(val_file)
+        test_df = pd.read_parquet(test_file)
+        
+        print(f"  Train: {len(train_df):,} rows")
+        print(f"  Val:   {len(val_df):,} rows")
+        print(f"  Test:  {len(test_df):,} rows")
+        
+        try:
+            assert_no_leakage(train_df, val_df, test_df, timestamp_col=args.timestamp_col)
+            print("\n✓ No temporal leakage detected")
+            print("✓ 48h gaps enforced between splits")
+            print("✓ Temporal ordering verified (train < val < test)")
+            return 0
+        except AssertionError as e:
+            print(f"\n❌ Leakage detected:", file=sys.stderr)
+            print(f"  {e}", file=sys.stderr)
+            return 1
+    
+    else:
+        # No specific validation mode selected
+        print("Error: Must specify --file, --splits, or --summary", file=sys.stderr)
+        print("Run with --help for usage", file=sys.stderr)
+        return 1
+
+
+def cmd_create_splits(args):
+    """Handle 'create-splits' command - materialize train/val/test splits."""
+    
+    print("Materializing train/validation/test splits...")
+    print(f"Input: {args.input_dir}")
+    print(f"Output: {args.output_dir}")
+    print()
+    
+    try:
+        splits_metadata = materialize_splits(
+            input_dir=Path(args.input_dir),
+            output_base_dir=Path(args.output_dir),
+            timestamp_col=args.timestamp_col,
+        )
+        
+        print("\n" + "="*60)
+        print("SPLIT SUMMARY")
+        print("="*60)
+        
+        total_rows = sum(s["rows"] for s in splits_metadata.values())
+        total_size = sum(s["size_mb"] for s in splits_metadata.values())
+        
+        for split_name in ["train", "validation", "test"]:
+            if split_name in splits_metadata:
+                s = splits_metadata[split_name]
+                pct = 100 * s["rows"] / total_rows if total_rows > 0 else 0
+                print(f"\n{split_name.upper()}:")
+                print(f"  Rows: {s['rows']:,} ({pct:.1f}%)")
+                print(f"  Date range: {s['min_timestamp']} to {s['max_timestamp']}")
+                print(f"  Path: {s['path']}")
+        
+        print(f"\nTotal: {total_rows:,} rows, {total_size:.2f} MB")
+        print("\n✓ Splits materialized successfully")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"\n❌ Failed to create splits:", file=sys.stderr)
+        print(f"  {e}", file=sys.stderr)
+        import traceback
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+
+
 def cmd_status(args):
     """Handle 'status' command - quick overview."""
     target_dates = get_available_target_dates()
@@ -773,6 +929,69 @@ Examples:
     report_parser.add_argument('--output-dir', default=str(DEFAULT_OUTPUT_DIR), help='Training data directory')
     report_parser.add_argument('--target-dir', default=str(DEFAULT_TARGET_DIR), help='Target data directory')
     report_parser.set_defaults(func=cmd_report)
+    
+    # Validate-splits command
+    validate_splits_parser = subparsers.add_parser(
+        'validate-splits',
+        help='Validate temporal split boundaries and check for leakage'
+    )
+    validate_splits_parser.add_argument(
+        '--file', '-f',
+        help='Validate split boundaries in a single parquet file'
+    )
+    validate_splits_parser.add_argument(
+        '--splits', '-s',
+        action='store_true',
+        help='Validate train/val/test split files for leakage (expects train.parquet, val.parquet, test.parquet)'
+    )
+    validate_splits_parser.add_argument(
+        '--summary',
+        action='store_true',
+        help='Print split configuration summary and exit'
+    )
+    validate_splits_parser.add_argument(
+        '--output-dir', '-o',
+        default=str(DEFAULT_OUTPUT_DIR),
+        help='Directory containing split files (for --splits mode)'
+    )
+    validate_splits_parser.add_argument(
+        '--timestamp-col',
+        default='timestamp',
+        help='Name of the timestamp column (default: timestamp)'
+    )
+    validate_splits_parser.add_argument(
+        '--no-strict',
+        action='store_true',
+        help='Report issues as warnings instead of failing'
+    )
+    validate_splits_parser.set_defaults(func=cmd_validate_splits)
+    
+    # Create-splits command
+    create_splits_parser = subparsers.add_parser(
+        'create-splits',
+        help='Materialize train/validation/test splits from assembled training data'
+    )
+    create_splits_parser.add_argument(
+        '--input-dir', '-i',
+        default=str(DEFAULT_OUTPUT_DIR),
+        help='Input directory containing date-partitioned training parquet files'
+    )
+    create_splits_parser.add_argument(
+        '--output-dir', '-o',
+        default=str(Path(__file__).parent.parent / "artifacts"),
+        help='Output base directory (creates train/, val/, test/ subdirs)'
+    )
+    create_splits_parser.add_argument(
+        '--timestamp-col',
+        default='timestamp',
+        help='Name of the timestamp column (default: timestamp)'
+    )
+    create_splits_parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Show detailed error traces'
+    )
+    create_splits_parser.set_defaults(func=cmd_create_splits)
     
     args = parser.parse_args()
     
