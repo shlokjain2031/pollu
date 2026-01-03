@@ -566,7 +566,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 For questions, issues, or collaboration:
 - GitHub Issues: [github.com/shlokjain/pollu/issues](https://github.com/shlokjain/pollu/issues)
-- Email: shlok@example.com (replace with actual email)
+- Email: jainshlok20@gmail.com
 
 ---
 
