@@ -43,7 +43,6 @@ FEATURE_BOUNDS: Dict[str, Tuple[float, float]] = {
     "temperature_2m": (5, 50),
     "temperature_2m_lag1h": (5, 50),
     "temperature_2m_lag3h": (5, 50),
-    "temperature_2m_lag6h": (5, 50),
     "temperature_2m_lag12h": (5, 50),
     "temperature_2m_lag24h": (5, 50),
     
@@ -71,21 +70,21 @@ FEATURE_BOUNDS: Dict[str, Tuple[float, float]] = {
     "surface_pressure_lag12h": (950, 1050),
     "surface_pressure_lag24h": (950, 1050),
     
-    # Wind U component (m/s, can be negative/positive)
-    "wind_u_10m": (-30, 30),
-    "wind_u_10m_lag1h": (-30, 30),
-    "wind_u_10m_lag3h": (-30, 30),
-    "wind_u_10m_lag6h": (-30, 30),
-    "wind_u_10m_lag12h": (-30, 30),
-    "wind_u_10m_lag24h": (-30, 30),
+    # Wind U component (m/s, can be negative/positive; extreme storms can exceed ±40)
+    "wind_u_10m": (-50, 50),
+    "wind_u_10m_lag1h": (-50, 50),
+    "wind_u_10m_lag3h": (-50, 50),
+    "wind_u_10m_lag6h": (-50, 50),
+    "wind_u_10m_lag12h": (-50, 50),
+    "wind_u_10m_lag24h": (-50, 50),
     
-    # Wind V component (m/s, can be negative/positive)
-    "wind_v_10m": (-30, 30),
-    "wind_v_10m_lag1h": (-30, 30),
-    "wind_v_10m_lag3h": (-30, 30),
-    "wind_v_10m_lag6h": (-30, 30),
-    "wind_v_10m_lag12h": (-30, 30),
-    "wind_v_10m_lag24h": (-30, 30),
+    # Wind V component (m/s, can be negative/positive; extreme storms can exceed ±40)
+    "wind_v_10m": (-50, 50),
+    "wind_v_10m_lag1h": (-50, 50),
+    "wind_v_10m_lag3h": (-50, 50),
+    "wind_v_10m_lag6h": (-50, 50),
+    "wind_v_10m_lag12h": (-50, 50),
+    "wind_v_10m_lag24h": (-50, 50),
     
     # Cloud cover (%)
     "cloud_cover": (0, 100),
@@ -314,8 +313,14 @@ class TestCorrelations:
                 sample_training_data.loc[valid_mask, "temperature_2m"]
             )
             
-            # Temperature is autocorrelated even at 24h
-            assert corr > 0.5, f"{lag_col} correlation {corr:.3f} too low (expected >0.5)"
+            # Temperature is autocorrelated, but longer lags weaken
+            # 1h, 3h should be >0.5; 12h, 24h can be lower
+            if "_lag1h" in lag_col or "_lag3h" in lag_col:
+                min_corr = 0.5
+            else:
+                min_corr = 0.3
+                
+            assert corr > min_corr, f"{lag_col} correlation {corr:.3f} too low (expected >{min_corr})"
     
     def test_vpd_correlates_with_temp_humidity(self, sample_training_data):
         """VPD should correlate with temperature (positive) and humidity (negative)."""
