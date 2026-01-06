@@ -505,6 +505,7 @@ class TestMaterializeSplits:
         splits_meta = materialize_splits(
             input_dir=input_dir,
             output_base_dir=output_dir,
+            parallel=False,  # Disable parallelism in tests for determinism
         )
         
         # Check directories exist
@@ -512,10 +513,14 @@ class TestMaterializeSplits:
         assert (output_dir / "val").exists()
         assert (output_dir / "test").exists()
         
-        # Check files exist
-        assert (output_dir / "train" / "train.parquet").exists()
-        assert (output_dir / "val" / "validation.parquet").exists()
-        assert (output_dir / "test" / "test.parquet").exists()
+        # Check that files were created (file-by-file approach creates multiple files)
+        train_files = list((output_dir / "train").glob("*.parquet"))
+        val_files = list((output_dir / "val").glob("*.parquet"))
+        test_files = list((output_dir / "test").glob("*.parquet"))
+        
+        assert len(train_files) > 0, "Train split should have at least one file"
+        assert len(val_files) > 0, "Validation split should have at least one file"
+        assert len(test_files) > 0, "Test split should have at least one file"
         
         # Check metadata
         assert "train" in splits_meta
@@ -547,12 +552,20 @@ class TestMaterializeSplits:
         output_dir = tmp_path / "output"
         
         # Materialize
-        materialize_splits(input_dir=input_dir, output_base_dir=output_dir)
+        materialize_splits(
+            input_dir=input_dir,
+            output_base_dir=output_dir,
+            parallel=False,
+        )
         
-        # Load splits
-        train_df = pd.read_parquet(output_dir / "train" / "train.parquet")
-        val_df = pd.read_parquet(output_dir / "val" / "validation.parquet")
-        test_df = pd.read_parquet(output_dir / "test" / "test.parquet")
+        # Load all files from each split
+        train_dfs = [pd.read_parquet(f) for f in (output_dir / "train").glob("*.parquet")]
+        val_dfs = [pd.read_parquet(f) for f in (output_dir / "val").glob("*.parquet")]
+        test_dfs = [pd.read_parquet(f) for f in (output_dir / "test").glob("*.parquet")]
+        
+        train_df = pd.concat(train_dfs, ignore_index=True) if train_dfs else pd.DataFrame(columns=["timestamp"])
+        val_df = pd.concat(val_dfs, ignore_index=True) if val_dfs else pd.DataFrame(columns=["timestamp"])
+        test_df = pd.concat(test_dfs, ignore_index=True) if test_dfs else pd.DataFrame(columns=["timestamp"])
         
         # Check no overlap
         from nalanda.splits import assert_no_leakage
@@ -579,7 +592,11 @@ class TestMaterializeSplits:
         output_dir = tmp_path / "output"
         
         # Materialize
-        materialize_splits(input_dir=input_dir, output_base_dir=output_dir)
+        materialize_splits(
+            input_dir=input_dir,
+            output_base_dir=output_dir,
+            parallel=False,
+        )
         
         # Check metadata file exists
         metadata_path = output_dir / "splits_metadata.json"
@@ -593,10 +610,10 @@ class TestMaterializeSplits:
         assert "validation" in metadata
         assert "test" in metadata
         
-        # Check required fields
+        # Check required fields (updated for new implementation)
         for split in ["train", "validation", "test"]:
             assert "rows" in metadata[split]
-            assert "columns" in metadata[split]
+            assert "file_count" in metadata[split]  # Changed from "columns"
             assert "min_timestamp" in metadata[split]
             assert "max_timestamp" in metadata[split]
             assert "sha256" in metadata[split]

@@ -397,26 +397,157 @@ def main():
 # Split materialization
 # ============================================================================
 
+def _determine_split_for_file(
+    parquet_file: Path,
+    timestamp_col: str = "timestamp",
+) -> Optional[str]:
+    """Determine which split a parquet file belongs to based on its timestamps.
+    
+    Reads only the timestamp column to minimize memory usage.
+    
+    Args:
+        parquet_file: Path to parquet file
+        timestamp_col: Name of timestamp column
+        
+    Returns:
+        Split name ('train', 'validation', 'test') or None if mixed/gap/excluded
+    """
+    from nalanda.splits import get_split
+    
+    # Read only timestamp column
+    df = pd.read_parquet(parquet_file, columns=[timestamp_col])
+    
+    if len(df) == 0:
+        return None
+    
+    # Check all timestamps belong to same split
+    splits_in_file = set()
+    for ts in df[timestamp_col]:
+        try:
+            split = get_split(pd.Timestamp(ts))
+            if split not in ['train', 'validation', 'test']:
+                # Skip gap/excluded data
+                continue
+            splits_in_file.add(split)
+        except ValueError:
+            # 2025+ or other excluded timestamps
+            continue
+    
+    # File must belong to exactly one split
+    if len(splits_in_file) == 1:
+        return list(splits_in_file)[0]
+    elif len(splits_in_file) == 0:
+        # All timestamps are gap/excluded
+        return None
+    else:
+        # Mixed splits in one file - need to load and filter
+        return "mixed"
+
+
+def _copy_file_to_split(
+    source_file: Path,
+    split_name: str,
+    output_dirs: dict,
+    timestamp_col: str = "timestamp",
+) -> dict:
+    """Copy a parquet file to the appropriate split directory.
+    
+    If file contains mixed splits, loads and filters the data.
+    
+    Args:
+        source_file: Source parquet file
+        split_name: Target split ('train', 'validation', 'test', or 'mixed')
+        output_dirs: Dict mapping split names to output directories
+        timestamp_col: Name of timestamp column
+        
+    Returns:
+        Dict with file metadata (rows, min/max timestamps, target split)
+    """
+    from nalanda.splits import get_split_mask
+    import shutil
+    
+    if split_name == "mixed":
+        # Load full file and split it
+        df = pd.read_parquet(source_file)
+        
+        results = []
+        for target_split in ['train', 'validation', 'test']:
+            mask = get_split_mask(df, target_split, timestamp_col)
+            split_df = df[mask]
+            
+            if len(split_df) == 0:
+                continue
+            
+            # Generate unique filename
+            output_dir = output_dirs[target_split]
+            output_file = output_dir / f"{source_file.parent.name}_{source_file.stem}_{target_split}.parquet"
+            
+            # Save filtered data
+            split_df.to_parquet(output_file, engine="pyarrow", compression="snappy", index=False)
+            
+            results.append({
+                "split": target_split,
+                "source": str(source_file),
+                "target": str(output_file),
+                "rows": len(split_df),
+                "min_timestamp": str(split_df[timestamp_col].min()),
+                "max_timestamp": str(split_df[timestamp_col].max()),
+            })
+        
+        return {"type": "mixed", "results": results}
+    
+    elif split_name in ['train', 'validation', 'test']:
+        # Simple copy - all data belongs to one split
+        output_dir = output_dirs[split_name]
+        output_file = output_dir / f"{source_file.parent.name}_{source_file.stem}.parquet"
+        
+        # Copy file
+        shutil.copy2(source_file, output_file)
+        
+        # Read metadata
+        df = pd.read_parquet(source_file, columns=[timestamp_col])
+        
+        return {
+            "type": "copy",
+            "split": split_name,
+            "source": str(source_file),
+            "target": str(output_file),
+            "rows": len(df),
+            "min_timestamp": str(df[timestamp_col].min()),
+            "max_timestamp": str(df[timestamp_col].max()),
+        }
+    
+    else:
+        # Skip (gap/excluded data)
+        return {"type": "skip", "source": str(source_file)}
+
+
 def materialize_splits(
     input_dir: Path = DEFAULT_OUTPUT_DIR,
     output_base_dir: Optional[Path] = None,
     timestamp_col: str = "timestamp",
+    parallel: bool = True,
+    max_workers: Optional[int] = None,
 ) -> dict:
     """Materialize train/val/test splits from assembled training data.
     
-    Loads all available parquet files from input_dir, filters by split
-    boundaries, and writes to separate train/val/test directories.
+    Uses file-by-file processing to avoid loading all data into memory.
+    Parallelizes file processing for speed.
     
     Args:
         input_dir: Directory containing date-partitioned training parquet files
         output_base_dir: Base directory for output (creates train/, val/, test/ subdirs)
         timestamp_col: Name of timestamp column
+        parallel: If True, process files in parallel
+        max_workers: Max parallel workers (default: CPU count)
         
     Returns:
-        Dictionary with metadata about each split (row counts, date ranges, checksums)
+        Dictionary with metadata about each split (row counts, date ranges, file counts)
     """
-    from nalanda.splits import get_split_mask, validate_splits
+    from nalanda.splits import validate_splits
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     import hashlib
+    import json
     
     if output_base_dir is None:
         output_base_dir = PROJECT_ROOT / "artifacts"
@@ -428,10 +559,16 @@ def materialize_splits(
     val_dir = output_base_dir / "val"
     test_dir = output_base_dir / "test"
     
-    for d in [train_dir, val_dir, test_dir]:
+    output_dirs = {
+        "train": train_dir,
+        "validation": val_dir,
+        "test": test_dir,
+    }
+    
+    for d in output_dirs.values():
         d.mkdir(parents=True, exist_ok=True)
     
-    print(f"Loading training data from: {input_dir}")
+    print(f"Scanning training data from: {input_dir}")
     
     # Find all parquet files
     date_dirs = sorted([d for d in input_dir.iterdir() if d.is_dir()])
@@ -439,94 +576,201 @@ def materialize_splits(
     if not date_dirs:
         raise ValueError(f"No date directories found in {input_dir}")
     
-    # Load all data
-    dfs = []
+    all_parquet_files = []
     for date_dir in date_dirs:
         parquet_files = list(date_dir.glob("*.parquet"))
-        for pq_file in parquet_files:
-            df = pd.read_parquet(pq_file)
-            dfs.append(df)
+        all_parquet_files.extend(parquet_files)
     
-    if not dfs:
+    if not all_parquet_files:
         raise ValueError(f"No parquet files found in {input_dir}")
     
-    print(f"  Loaded {len(dfs)} parquet files from {len(date_dirs)} dates")
+    print(f"  Found {len(all_parquet_files)} parquet files from {len(date_dirs)} dates")
     
-    # Concatenate all data
-    full_df = pd.concat(dfs, ignore_index=True)
-    print(f"  Total rows: {len(full_df):,}")
-    print(f"  Date range: {full_df[timestamp_col].min()} to {full_df[timestamp_col].max()}")
+    # Process files
+    print("\nDetermining split assignments...")
     
-    # Validate splits
-    print("\nValidating split boundaries...")
-    validation_results = validate_splits(full_df, timestamp_col=timestamp_col, strict=True)
-    print(f"  ✓ All timestamps assigned to valid splits")
+    file_assignments = {}
     
-    # Split data
-    print("\nCreating splits...")
-    splits = {}
-    
-    for split_name, output_dir in [
-        ("train", train_dir),
-        ("validation", val_dir),
-        ("test", test_dir),
-    ]:
-        print(f"\n  {split_name.upper()}:")
-        mask = get_split_mask(full_df, split_name, timestamp_col)
-        split_df = full_df[mask].copy()
+    if parallel and len(all_parquet_files) > 1:
+        print(f"  Processing in parallel (workers: {max_workers or 'auto'})...")
         
-        if len(split_df) == 0:
-            print(f"    ⚠️  Warning: No data for {split_name} split")
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_file = {
+                executor.submit(_determine_split_for_file, pq_file, timestamp_col): pq_file
+                for pq_file in all_parquet_files
+            }
+            
+            for future in as_completed(future_to_file):
+                pq_file = future_to_file[future]
+                try:
+                    split_name = future.result()
+                    if split_name:
+                        file_assignments[pq_file] = split_name
+                except Exception as e:
+                    print(f"  ⚠️  Error processing {pq_file.name}: {e}")
+    else:
+        for pq_file in all_parquet_files:
+            split_name = _determine_split_for_file(pq_file, timestamp_col)
+            if split_name:
+                file_assignments[pq_file] = split_name
+    
+    # Summary of assignments
+    assignment_counts = {}
+    for split_name in file_assignments.values():
+        assignment_counts[split_name] = assignment_counts.get(split_name, 0) + 1
+    
+    print(f"  File assignments:")
+    for split_name, count in sorted(assignment_counts.items()):
+        print(f"    {split_name}: {count} files")
+    
+    # Copy files to splits
+    print("\nCopying files to split directories...")
+
+    copy_results = []
+
+    # Group files so we run target files first, then training files, then others.
+    def _group_files_assignments(assignments: dict):
+        target_group = []
+        training_group = []
+        other_group = []
+        for sf, sn in assignments.items():
+            name = sf.name.lower()
+            if "target" in name:
+                target_group.append((sf, sn))
+            elif "training" in name or ("train" in name and "training" not in name):
+                training_group.append((sf, sn))
+            else:
+                other_group.append((sf, sn))
+        return [target_group, training_group, other_group]
+
+    groups = _group_files_assignments(file_assignments)
+
+    # Process each group sequentially (target -> training -> others). Within each group
+    # we may use parallel workers if requested.
+    for group_idx, group in enumerate(groups, 1):
+        if not group:
+            continue
+
+        group_name = "target" if group_idx == 1 else ("training" if group_idx == 2 else "other")
+        print(f"  Processing group: {group_name} ({len(group)} files)")
+
+        if parallel and len(group) > 1:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_file = {
+                    executor.submit(
+                        _copy_file_to_split,
+                        source_file,
+                        split_name,
+                        output_dirs,
+                        timestamp_col
+                    ): source_file
+                    for source_file, split_name in group
+                }
+
+                completed = 0
+                for future in as_completed(future_to_file):
+                    completed += 1
+                    try:
+                        result = future.result()
+                        copy_results.append(result)
+                        if completed % 10 == 0:
+                            print(f"  Processed {completed}/{len(group)} files in group {group_name}...")
+                    except Exception as e:
+                        source_file = future_to_file[future]
+                        print(f"  ⚠️  Error copying {source_file.name}: {e}")
+        else:
+            for source_file, split_name in group:
+                try:
+                    result = _copy_file_to_split(source_file, split_name, output_dirs, timestamp_col)
+                    copy_results.append(result)
+                except Exception as e:
+                    print(f"  ⚠️  Error copying {source_file.name}: {e}")
+    
+    # Aggregate results
+    print("\nAggregating split statistics...")
+    
+    split_stats = {
+        "train": {"files": [], "rows": 0, "min_ts": None, "max_ts": None},
+        "validation": {"files": [], "rows": 0, "min_ts": None, "max_ts": None},
+        "test": {"files": [], "rows": 0, "min_ts": None, "max_ts": None},
+    }
+    
+    for result in copy_results:
+        if result["type"] == "mixed":
+            for sub_result in result["results"]:
+                split = sub_result["split"]
+                split_stats[split]["files"].append(sub_result["target"])
+                split_stats[split]["rows"] += sub_result["rows"]
+                
+                min_ts = pd.Timestamp(sub_result["min_timestamp"])
+                max_ts = pd.Timestamp(sub_result["max_timestamp"])
+                
+                if split_stats[split]["min_ts"] is None or min_ts < split_stats[split]["min_ts"]:
+                    split_stats[split]["min_ts"] = min_ts
+                if split_stats[split]["max_ts"] is None or max_ts > split_stats[split]["max_ts"]:
+                    split_stats[split]["max_ts"] = max_ts
+        
+        elif result["type"] == "copy":
+            split = result["split"]
+            split_stats[split]["files"].append(result["target"])
+            split_stats[split]["rows"] += result["rows"]
+            
+            min_ts = pd.Timestamp(result["min_timestamp"])
+            max_ts = pd.Timestamp(result["max_timestamp"])
+            
+            if split_stats[split]["min_ts"] is None or min_ts < split_stats[split]["min_ts"]:
+                split_stats[split]["min_ts"] = min_ts
+            if split_stats[split]["max_ts"] is None or max_ts > split_stats[split]["max_ts"]:
+                split_stats[split]["max_ts"] = max_ts
+    
+    # Compute directory-level checksums and sizes
+    print("\nComputing checksums and sizes...")
+    
+    splits_metadata = {}
+    
+    for split_name in ["train", "validation", "test"]:
+        stats = split_stats[split_name]
+        output_dir = output_dirs[split_name]
+        
+        if stats["rows"] == 0:
+            print(f"  ⚠️  {split_name.upper()}: No data")
             continue
         
-        # Sort by timestamp for efficient reading
-        split_df = split_df.sort_values([timestamp_col, "row_idx"]).reset_index(drop=True)
+        # Compute total size
+        total_size = sum(Path(f).stat().st_size for f in stats["files"]) / (1024 * 1024)
         
-        # Compute metadata
-        min_ts = split_df[timestamp_col].min()
-        max_ts = split_df[timestamp_col].max()
-        row_count = len(split_df)
+        # Compute combined checksum of all files
+        hash_obj = hashlib.sha256()
+        for file_path in sorted(stats["files"]):
+            with open(file_path, "rb") as f:
+                hash_obj.update(f.read())
+        combined_hash = hash_obj.hexdigest()
         
-        # Save as single parquet file
-        output_path = output_dir / f"{split_name}.parquet"
-        split_df.to_parquet(
-            output_path,
-            engine="pyarrow",
-            compression="snappy",
-            index=False,
-        )
-        
-        # Compute checksum
-        with open(output_path, "rb") as f:
-            file_hash = hashlib.sha256(f.read()).hexdigest()
-        
-        file_size_mb = output_path.stat().st_size / (1024 * 1024)
-        
-        splits[split_name] = {
-            "path": str(output_path),
-            "rows": row_count,
-            "columns": len(split_df.columns),
-            "min_timestamp": str(min_ts),
-            "max_timestamp": str(max_ts),
-            "size_mb": round(file_size_mb, 2),
-            "sha256": file_hash,
+        splits_metadata[split_name] = {
+            "path": str(output_dir),
+            "file_count": len(stats["files"]),
+            "rows": stats["rows"],
+            "min_timestamp": str(stats["min_ts"]),
+            "max_timestamp": str(stats["max_ts"]),
+            "size_mb": round(total_size, 2),
+            "sha256": combined_hash,
         }
         
-        print(f"    Rows: {row_count:,}")
-        print(f"    Date range: {min_ts} to {max_ts}")
-        print(f"    Size: {file_size_mb:.2f} MB")
-        print(f"    Saved: {output_path}")
-        print(f"    SHA256: {file_hash[:16]}...")
+        print(f"  {split_name.upper()}:")
+        print(f"    Files: {len(stats['files'])}")
+        print(f"    Rows: {stats['rows']:,}")
+        print(f"    Date range: {stats['min_ts']} to {stats['max_ts']}")
+        print(f"    Size: {total_size:.2f} MB")
+        print(f"    SHA256: {combined_hash[:16]}...")
     
     # Save metadata
     metadata_path = output_base_dir / "splits_metadata.json"
-    import json
     with open(metadata_path, "w") as f:
-        json.dump(splits, f, indent=2)
+        json.dump(splits_metadata, f, indent=2)
     
     print(f"\n✓ Split metadata saved to: {metadata_path}")
     
-    return splits
+    return splits_metadata
 
 
 if __name__ == '__main__':
