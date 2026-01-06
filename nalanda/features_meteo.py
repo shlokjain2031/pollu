@@ -42,8 +42,11 @@ LAG_VARIABLES = [
     'cloud_cover',
 ]
 
-# Lag hours to compute
+# Lag hours to compute (excluding 6h for temperature due to low autocorrelation in validation)
 LAG_HOURS = [1, 3, 6, 12, 24]
+
+# Temperature-specific lags (exclude 6h)
+TEMPERATURE_LAG_HOURS = [1, 3, 12, 24]
 
 # Cloud cover only gets subset of lags
 CLOUD_COVER_LAG_HOURS = [6, 24]
@@ -205,12 +208,12 @@ def compute_meteo_features(
     Returns:
         DataFrame with columns:
             - grid_id, datetime (keys)
-            - temperature_2m, temperature_2m_lag1h, ..., temperature_2m_lag24h
-            - relative_humidity_2m, relative_humidity_2m_lag1h, ...
-            - dewpoint_2m, dewpoint_2m_lag1h, ...
-            - surface_pressure, surface_pressure_lag1h, ...
-            - wind_u_10m, wind_u_10m_lag1h, ...
-            - wind_v_10m, wind_v_10m_lag1h, ...
+            - temperature_2m, temperature_2m_lag1h, temperature_2m_lag3h, temperature_2m_lag12h, temperature_2m_lag24h
+            - relative_humidity_2m, relative_humidity_2m_lag1h, ..., relative_humidity_2m_lag24h
+            - dewpoint_2m, dewpoint_2m_lag1h, ..., dewpoint_2m_lag24h
+            - surface_pressure, surface_pressure_lag1h, ..., surface_pressure_lag24h
+            - wind_u_10m, wind_u_10m_lag1h, ..., wind_u_10m_lag24h
+            - wind_v_10m, wind_v_10m_lag1h, ..., wind_v_10m_lag24h
             - cloud_cover, cloud_cover_lag6h, cloud_cover_lag24h
             - vpd, temp_dewpoint_diff
             - precip_last_1h, precip_last_6h, precip_last_24h
@@ -301,6 +304,8 @@ def compute_meteo_features(
         # Determine which lags for this variable
         if var == 'cloud_cover':
             var_lag_hours = CLOUD_COVER_LAG_HOURS
+        elif var == 'temperature_2m':
+            var_lag_hours = TEMPERATURE_LAG_HOURS
         else:
             var_lag_hours = LAG_HOURS
         
@@ -348,7 +353,14 @@ def compute_meteo_features(
     for var in ['temperature_2m', 'relative_humidity_2m', 'dewpoint_2m', 
                 'surface_pressure', 'wind_u_10m', 'wind_v_10m']:
         output_cols.append(var)
-        for lag_h in LAG_HOURS:
+        
+        # Temperature gets special lag hours (no 6h)
+        if var == 'temperature_2m':
+            lag_hours_for_var = TEMPERATURE_LAG_HOURS
+        else:
+            lag_hours_for_var = LAG_HOURS
+        
+        for lag_h in lag_hours_for_var:
             output_cols.append(f'{var}_lag{lag_h}h')
     
     # Cloud cover with subset of lags

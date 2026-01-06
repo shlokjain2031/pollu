@@ -305,6 +305,9 @@ def save_training_data(
     output_path = output_dir / date / "training.parquet"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # Sort by row_idx and timestamp for deterministic ordering
+    df = df.sort_values(['row_idx', 'timestamp']).reset_index(drop=True)
+    
     df.to_parquet(output_path, index=False)
     
     return output_path

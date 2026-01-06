@@ -63,6 +63,10 @@ def write_target_parquet(
     
     # Optimize dtypes for storage
     df = target_df.copy()
+    
+    # Sort by row_idx and timestamp for deterministic ordering
+    df = df.sort_values(['row_idx', 'timestamp']).reset_index(drop=True)
+    
     df['row_idx'] = df['row_idx'].astype('int64')
     df['pm25_t'] = df['pm25_t'].astype('float32')
     df['target_trust'] = df['target_trust'].astype('float32')
