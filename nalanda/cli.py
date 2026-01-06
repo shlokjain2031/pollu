@@ -41,10 +41,10 @@ from nalanda.training import (
     save_training_data,
     load_target,
     get_training_feature_columns,
-    materialize_splits,
     DEFAULT_TARGET_DIR,
     DEFAULT_OUTPUT_DIR,
 )
+from nalanda.training_splits_logged import materialize_splits_logged
 from nalanda.splits import (
     validate_splits,
     assert_no_leakage,
@@ -806,7 +806,7 @@ def cmd_create_splits(args):
     print()
     
     try:
-        splits_metadata = materialize_splits(
+        splits_metadata = materialize_splits_logged(
             input_dir=Path(args.input_dir),
             output_base_dir=Path(args.output_dir),
             timestamp_col=args.timestamp_col,
