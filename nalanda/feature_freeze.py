@@ -148,15 +148,39 @@ class FrozenFeatureSchema:
         """Extract feature matrix in exact schema order.
         
         This is the canonical way to go from raw DataFrame to model input.
+        Uses intersection of schema features and available columns to handle
+        cases where computed features may be missing from materialized data.
         
         Args:
             df: DataFrame with features.
         
         Returns:
-            DataFrame with only schema features in exact order.
+            DataFrame with available schema features in exact order.
         """
-        self.validate(df, strict=False)
-        return self.reorder(df)
+        df_cols = set(df.columns)
+        schema_cols = self.feature_set
+        
+        # Compute intersection: only use features that exist in both schema and dataframe
+        available_features = [f for f in self.feature_list if f in df_cols]
+        
+        if not available_features:
+            raise ValueError(
+                f"No schema features found in DataFrame. "
+                f"Schema expects: {sorted(schema_cols)}; "
+                f"DataFrame has: {sorted(df_cols)}"
+            )
+        
+        # Log if features are missing (but don't fail)
+        missing = schema_cols - df_cols
+        if missing:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Using {len(available_features)}/{self.n_features} features. "
+                f"Missing: {sorted(missing)}"
+            )
+        
+        return df[available_features]
     
     def save(self, path: str | Path) -> None:
         """Persist schema to JSON file.
