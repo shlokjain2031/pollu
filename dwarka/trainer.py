@@ -336,6 +336,48 @@ def load_validation_data(
     return X, y, weights
 
 
+def iter_validation_chunks(
+    data_dir: Path,
+    schema: FrozenFeatureSchema,
+    chunk_size_days: int = 30,
+    target_col: str = "pm25_t",
+    weight_col: str = "target_trust",
+) -> Iterator[Tuple[pd.DataFrame, pd.Series, np.ndarray, int]]:
+    """Iterate over validation data in chunks (memory-efficient).
+    
+    Args:
+        data_dir: Base directory containing date-partitioned data
+        schema: Frozen feature schema
+        chunk_size_days: Number of days per chunk
+        target_col: Target column name
+        weight_col: Weight column name
+        
+    Yields:
+        Tuple of (X, y, weights, chunk_idx)
+    """
+    date_dirs = get_date_dirs_for_split(data_dir, "validation")
+    
+    if not date_dirs:
+        raise ValueError(f"No validation date directories found in {data_dir}")
+    
+    logger.info(f"Found {len(date_dirs)} validation date directories")
+    logger.info(f"Date range: {date_dirs[0].name} to {date_dirs[-1].name}")
+    
+    # Chunk the date directories
+    for chunk_idx, start_idx in enumerate(range(0, len(date_dirs), chunk_size_days)):
+        chunk_dirs = date_dirs[start_idx : start_idx + chunk_size_days]
+        
+        logger.info(f"Loading validation chunk {chunk_idx + 1}: {chunk_dirs[0].name} to {chunk_dirs[-1].name} ({len(chunk_dirs)} days)")
+        
+        X, y, weights = load_date_chunk(
+            chunk_dirs, schema, target_col, weight_col
+        )
+        
+        logger.info(f"  Validation chunk size: {len(X):,} rows")
+        
+        yield X, y, weights, chunk_idx
+
+
 # =============================================================================
 # LightGBM Dataset Construction
 # =============================================================================
@@ -423,37 +465,52 @@ def train_single_chunk(
 def train_chunked(
     data_dir: Path,
     schema: FrozenFeatureSchema,
-    val_X: pd.DataFrame,
-    val_y: pd.Series,
-    val_weights: np.ndarray,
+    val_X: Optional[pd.DataFrame],
+    val_y: Optional[pd.Series],
+    val_weights: Optional[np.ndarray],
     params: Dict[str, Any],
     chunk_size_days: int = 30,
     num_iterations_per_chunk: int = 500,
     early_stopping_rounds: int = 100,
     target_col: str = "pm25_t",
     weight_col: str = "target_trust",
+    val_dir: Optional[Path] = None,
+    use_chunked_val: bool = False,
+    val_chunk_size: int = 30,
 ) -> Tuple[lgb.Booster, Dict[str, Any]]:
     """Train LightGBM with chunked data loading.
     
     Args:
         data_dir: Base directory with date-partitioned training data
         schema: Frozen feature schema
-        val_X, val_y, val_weights: Validation data (kept in memory)
+        val_X, val_y, val_weights: Validation data (if use_chunked_val=False)
         params: LightGBM parameters
         chunk_size_days: Days per training chunk
         num_iterations_per_chunk: Max iterations per chunk
         early_stopping_rounds: Early stopping patience
         target_col: Target column name
         weight_col: Weight column name
+        val_dir: Validation directory (if use_chunked_val=True)
+        use_chunked_val: Whether to use chunked validation loading
+        val_chunk_size: Days per validation chunk (if use_chunked_val=True)
         
     Returns:
         Tuple of (trained model, training info)
     """
-    # Create validation dataset once
-    val_ds = create_lgb_dataset(
-        val_X, val_y, val_weights,
-        feature_names=schema.feature_list,
-    )
+    # Create validation dataset (either in-memory or prepare for chunked)
+    if use_chunked_val:
+        if val_dir is None:
+            raise ValueError("val_dir required when use_chunked_val=True")
+        val_ds = None  # Will create per-chunk
+        logger.info("Using chunked validation evaluation")
+    else:
+        if val_X is None or val_y is None or val_weights is None:
+            raise ValueError("val_X, val_y, val_weights required when use_chunked_val=False")
+        val_ds = create_lgb_dataset(
+            val_X, val_y, val_weights,
+            feature_names=schema.feature_list,
+        )
+        logger.info("Using in-memory validation evaluation")
     
     model = None
     total_samples = 0
@@ -469,8 +526,22 @@ def train_chunked(
         train_ds = create_lgb_dataset(
             X, y, weights,
             feature_names=schema.feature_list,
-            reference=val_ds if model is None else None,
+            reference=val_ds if (model is None and val_ds is not None) else None,
         )
+        
+        # If using chunked validation, load first validation chunk for this iteration
+        if use_chunked_val and val_ds is None:
+            # Load first validation chunk for early stopping
+            val_chunks = list(iter_validation_chunks(
+                val_dir, schema, val_chunk_size, target_col, weight_col
+            ))
+            if val_chunks:
+                val_X_chunk, val_y_chunk, val_weights_chunk, _ = val_chunks[0]
+                val_ds = create_lgb_dataset(
+                    val_X_chunk, val_y_chunk, val_weights_chunk,
+                    feature_names=schema.feature_list,
+                )
+                logger.info(f"Using validation chunk with {len(val_X_chunk):,} samples for early stopping")
         
         # Train (continue from previous model if exists)
         model, info = train_single_chunk(
@@ -675,6 +746,8 @@ def train_baseline(
     model_version: str = "baseline_v1",
     use_chunked: bool = True,
     chunk_size_days: int = 30,
+    use_chunked_val: bool = False,
+    val_chunk_size: int = 30,
     notes: str = "",
 ) -> Dict[str, Any]:
     """End-to-end training pipeline.
@@ -687,6 +760,8 @@ def train_baseline(
         model_version: Version string
         use_chunked: Whether to use chunked training
         chunk_size_days: Days per chunk (if chunked)
+        use_chunked_val: Whether to use chunked validation loading
+        val_chunk_size: Days per validation chunk (if use_chunked_val=True)
         notes: Optional notes
         
     Returns:
@@ -703,16 +778,32 @@ def train_baseline(
     logger.info("=" * 60)
     schema = load_frozen_schema(schema_path)
     
-    # 2. Load validation data (keep in memory)
+    # 2. Load validation data (chunked or full)
     logger.info("=" * 60)
     logger.info("STEP 2: Loading validation data")
     logger.info("=" * 60)
-    val_X, val_y, val_weights = load_validation_data(
-        val_dir,
-        schema,
-        target_col=TRAINING_CONFIG["target_col"],
-        weight_col=TRAINING_CONFIG["weight_col"],
-    )
+    
+    if use_chunked_val:
+        logger.info("Using chunked validation (memory-efficient)")
+        val_X, val_y, val_weights = None, None, None
+        n_val_samples = 0
+        # Count validation samples
+        for _, val_y_chunk, _, _ in iter_validation_chunks(
+            val_dir, schema, val_chunk_size,
+            TRAINING_CONFIG["target_col"],
+            TRAINING_CONFIG["weight_col"],
+        ):
+            n_val_samples += len(val_y_chunk)
+        logger.info(f"Total validation samples (across chunks): {n_val_samples:,}")
+    else:
+        logger.info("Loading full validation set into memory")
+        val_X, val_y, val_weights = load_validation_data(
+            val_dir,
+            schema,
+            target_col=TRAINING_CONFIG["target_col"],
+            weight_col=TRAINING_CONFIG["weight_col"],
+        )
+        n_val_samples = len(val_X)
     
     # Get validation date range
     val_dirs = get_date_dirs_for_split(val_dir, "validation")
@@ -738,6 +829,9 @@ def train_baseline(
             early_stopping_rounds=TRAINING_CONFIG["early_stopping_rounds"],
             target_col=TRAINING_CONFIG["target_col"],
             weight_col=TRAINING_CONFIG["weight_col"],
+            val_dir=val_dir if use_chunked_val else None,
+            use_chunked_val=use_chunked_val,
+            val_chunk_size=val_chunk_size,
         )
         
         train_dirs = get_date_dirs_for_split(train_dir, "train")
@@ -778,7 +872,7 @@ def train_baseline(
         params=params,
         train_date_range=train_date_range,
         val_date_range=val_date_range,
-        n_val_samples=len(val_X),
+        n_val_samples=n_val_samples,
         model_version=model_version,
         notes=notes,
     )
@@ -791,7 +885,7 @@ def train_baseline(
     logger.info(f"Duration: {duration:.1f} seconds")
     logger.info(f"Best iteration: {training_info['best_iteration']}")
     logger.info(f"Train samples: {training_info['n_train_samples']:,}")
-    logger.info(f"Val samples: {len(val_X):,}")
+    logger.info(f"Val samples: {n_val_samples:,}")
     
     val_metrics = training_info["best_score"].get("val", {})
     for metric, value in val_metrics.items():
@@ -805,7 +899,7 @@ def train_baseline(
         "best_iteration": training_info["best_iteration"],
         "duration_seconds": duration,
         "n_train_samples": training_info["n_train_samples"],
-        "n_val_samples": len(val_X),
+        "n_val_samples": n_val_samples,
         "val_metrics": val_metrics,
     }
 
@@ -880,6 +974,17 @@ Examples:
         help="Days per training chunk (default: 30)",
     )
     parser.add_argument(
+        "--no-chunked-val",
+        action="store_true",
+        help="Load full validation data into memory (default: chunked for memory efficiency)",
+    )
+    parser.add_argument(
+        "--val-chunk-size",
+        type=int,
+        default=30,
+        help="Days per validation chunk (default: 30)",
+    )
+    parser.add_argument(
         "--notes",
         type=str,
         default="",
@@ -902,6 +1007,8 @@ def main() -> int:
             model_version=args.model_version,
             use_chunked=not args.no_chunked,
             chunk_size_days=args.chunk_size,
+            use_chunked_val=not args.no_chunked_val,
+            val_chunk_size=args.val_chunk_size,
             notes=args.notes,
         )
         
