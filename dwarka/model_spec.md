@@ -16,6 +16,7 @@ A complete ML specification for 30m-resolution PM2.5 prediction using LightGBM w
 
 ## Temporal Split Strategy
 
+**Partition definition:**
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        2017-2025 Timeline                           │
@@ -28,12 +29,18 @@ A complete ML specification for 30m-resolution PM2.5 prediction using LightGBM w
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Split parameters:**
 - **Train**: 2017-01-01 to 2023-06-28 (~6.5 years)
 - **Gap**: 48 hours (2 days) — eliminates `pm25_t_lag24h` leakage
 - **Validation**: 2023-07-01 to 2024-06-28 (~1 year)
 - **Gap**: 48 hours
 - **Test**: 2024-07-01 to 2025-06-30 (~1 year)
+
+**Physical materialization approach:**
+- Split boundaries computed by timestamp range: rows with `timestamp < 2023-06-29` → train; `timestamp ∈ [2023-07-01, 2024-06-30]` → validation; `timestamp ≥ 2024-07-01` → test
+- Physical artifact files created per `(grid_id, group_idx)` with sequential processing order: **target artifacts first, then training artifacts**
+- All materialized parquet files sorted deterministically by `['row_idx', 'timestamp']` to ensure reproducible row ordering across runs
+- Within each group, features extracted only from the grid's assigned split (train/val/test) to prevent leakage across temporal boundaries
+- Heavy logging to `logs/` directory for all materialization steps; any errors logged with full traceback for debugging
 
 **Seasonal stratification for reporting:**
 - **Winter** (Nov-Feb): High pollution, stable meteorology
