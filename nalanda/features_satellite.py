@@ -173,13 +173,22 @@ def compute_landsat_indices(df: pd.DataFrame) -> pd.DataFrame:
     # Avoid division by zero
     eps = 1e-10
     
-    # Extract bands as arrays for vectorized computation
-    red = df['B4'].values
-    nir = df['B5'].values
-    green = df['B3'].values
-    blue = df['B2'].values
-    swir1 = df['B6'].values
-    swir2 = df['B7'].values
+    # Extract bands - handle None values by replacing with NaN
+    import numpy as np
+    
+    # Helper to safely extract band values
+    def safe_band_extract(band_col):
+        """Extract band values, converting None to NaN."""
+        values = df[band_col].values
+        # Replace None with NaN
+        return np.where(values == None, np.nan, values).astype(float)
+    
+    red = safe_band_extract('B4')
+    nir = safe_band_extract('B5')
+    green = safe_band_extract('B3')
+    blue = safe_band_extract('B2')
+    swir1 = safe_band_extract('B6')
+    swir2 = safe_band_extract('B7')
     
     # NDVI: Normalized Difference Vegetation Index
     # NDVI = (NIR - Red) / (NIR + Red)
@@ -218,6 +227,7 @@ def compute_landsat_features(
     """Compute all Landsat8 features for a target date.
     
     Uses temporal matching: finds most recent Landsat date <= target_date.
+    Handles bad acquisitions (all None) by interpolating with neighboring valid data.
     
     Args:
         target_date: Target date (YYYY-MM-DD).
@@ -229,28 +239,115 @@ def compute_landsat_features(
     Returns:
         DataFrame with columns:
             - grid_id (key)
-            - landsat_date (source date used)
+            - landsat_date (source date used or "interpolated")
             - ndvi, mndwi, ndbi, bsi, ibi (indices)
             - B1-B11 (if include_bands=True)
             
     Raises:
         ValueError: If no Landsat data available for or before target_date.
     """
+    import numpy as np
+    
     # Find available dates
-    available = get_available_dates(landsat_dir, city)
+    available = sorted(get_available_dates(landsat_dir, city))
     
     if not available:
         raise ValueError(f"No Landsat data found in {landsat_dir / city}")
     
-    # Find most recent date
-    source_date = find_most_recent_date(target_date, available)
+    target_dt = dt.strptime(target_date, '%Y-%m-%d')
     
+    # Helper to check if data is valid
+    def is_valid_landsat(data_df):
+        """Check if Landsat data has valid values (not all None)."""
+        if data_df is None or data_df.empty:
+            return False
+        if 'B4' not in data_df.columns or 'B5' not in data_df.columns:
+            return False
+        # Check if B4 and B5 have actual values
+        b4_valid = not (data_df['B4'].isna().all() or (data_df['B4'] == None).all())
+        b5_valid = not (data_df['B5'].isna().all() or (data_df['B5'] == None).all())
+        return b4_valid and b5_valid
+    
+    # Find most recent valid date <= target_date
+    valid_dates_before = [d for d in available if dt.strptime(d, '%Y-%m-%d') <= target_dt]
+    
+    source_date = None
+    earlier_date = None
+    df = None
+    
+    # Try to find a valid date at or before target
+    for candidate_date in sorted(valid_dates_before, reverse=True):
+        try:
+            candidate_df = load_landsat(candidate_date, city, landsat_dir, grid_ids)
+            if is_valid_landsat(candidate_df):
+                source_date = candidate_date
+                df = candidate_df
+                break
+            else:
+                # This is a bad date, save it and keep looking
+                earlier_date = candidate_date
+        except Exception:
+            continue
+    
+    # If no valid date found before target, check after
+    later_date = None
+    later_df = None
     if source_date is None:
-        raise ValueError(f"No Landsat data available for or before {target_date}")
+        for candidate_date in sorted([d for d in available if dt.strptime(d, '%Y-%m-%d') > target_dt]):
+            try:
+                candidate_df = load_landsat(candidate_date, city, landsat_dir, grid_ids)
+                if is_valid_landsat(candidate_df):
+                    later_date = candidate_date
+                    later_df = candidate_df
+                    break
+            except Exception:
+                continue
+        
+        if later_date is None:
+            raise ValueError(f"No valid Landsat data available for or near {target_date}")
+        
+        # Find a valid earlier date to interpolate with
+        for candidate_date in sorted(valid_dates_before, reverse=True):
+            try:
+                candidate_df = load_landsat(candidate_date, city, landsat_dir, grid_ids)
+                if is_valid_landsat(candidate_df):
+                    earlier_date = candidate_date
+                    df = candidate_df  # Will interpolate with later_df
+                    break
+            except Exception:
+                continue
+        
+        if earlier_date is None:
+            raise ValueError(f"Cannot interpolate: no valid Landsat data found before {target_date}")
+        
+        # Interpolate between earlier and later dates
+        print(f"    Landsat: interpolating between {earlier_date} and {later_date}")
+        df = compute_landsat_indices(df)
+        later_df = compute_landsat_indices(later_df)
+        
+        # Average the indices
+        for col in ['ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi']:
+            df[col] = (df[col] + later_df[col]) / 2
+        
+        # Average bands if available
+        for col in ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11']:
+            if col in df.columns and col in later_df.columns:
+                # Use numpy to handle None values properly
+                earlier_vals = pd.to_numeric(df[col], errors='coerce')
+                later_vals = pd.to_numeric(later_df[col], errors='coerce')
+                df[col] = (earlier_vals + later_vals) / 2
+        
+        # Average metadata
+        if 'scene_cloud_cover' in df.columns and 'scene_cloud_cover' in later_df.columns:
+            earlier_cloud = pd.to_numeric(df['scene_cloud_cover'], errors='coerce')
+            later_cloud = pd.to_numeric(later_df['scene_cloud_cover'], errors='coerce')
+            df['scene_cloud_cover'] = (earlier_cloud + later_cloud) / 2
+        
+        source_date = f"interpolated_{earlier_date}_{later_date}"
     
-    # Load and compute
-    df = load_landsat(source_date, city, landsat_dir, grid_ids)
-    df = compute_landsat_indices(df)
+    else:
+        # Valid source date found, compute indices normally
+        df = compute_landsat_indices(df)
     
     # Add source date column
     df['landsat_date'] = source_date
@@ -258,7 +355,6 @@ def compute_landsat_features(
     # Select output columns
     index_cols = ['ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi']
     band_cols = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11']
-    angle_cols = ['solar_azimuth', 'solar_zenith', 'sensor_azimuth', 'sensor_zenith']
     
     output_cols = ['grid_id', 'landsat_date'] + index_cols
     
@@ -266,10 +362,16 @@ def compute_landsat_features(
     if 'scene_cloud_cover' in df.columns:
         output_cols.append('scene_cloud_cover')
     
-    # Add angle properties
-    for col in angle_cols:
-        if col in df.columns:
-            output_cols.append(col)
+    if include_bands:
+        output_cols.extend(band_cols)
+    
+    # Filter to existing columns (some bands may be missing)
+    output_cols = [c for c in output_cols if c in df.columns]
+    
+    return df[output_cols]
+
+    #     if col in df.columns:
+    #         output_cols.append(col)
     
     if include_bands:
         output_cols.extend(band_cols)
@@ -285,7 +387,8 @@ def get_landsat_feature_columns(include_bands: bool = True) -> List[str]:
     cols = [
         'ndvi', 'mndwi', 'ndbi', 'bsi', 'ibi',
         'scene_cloud_cover',
-        'solar_azimuth', 'solar_zenith', 'sensor_azimuth', 'sensor_zenith',
+        # Note: solar_azimuth removed to ensure schema consistency
+        # 'solar_azimuth', 'solar_zenith', 'sensor_azimuth', 'sensor_zenith',
     ]
     if include_bands:
         cols.extend(['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11'])
@@ -454,9 +557,9 @@ def compute_local_ndvi_std(
     )
     
     # Map back to DataFrame
-    std_values = np.full(len(merged), np.nan)
-    std_values[valid.values] = local_std[rows, cols]
-    result['local_ndvi_std'] = merged[:len(result)]
+    std_values = np.full(len(result), np.nan)
+    std_values[valid.values[:len(result)]] = local_std[rows, cols]
+    result['local_ndvi_std'] = std_values
     
     return result
 
@@ -603,6 +706,63 @@ def compute_sentinel_features(
 def get_sentinel_feature_columns() -> List[str]:
     """Return list of Sentinel2 feature column names (excluding keys)."""
     return ['evi', 'ui_light', 'si', 'cloud_mask', 'local_ndvi_std', 'cloud_fraction_30m', 'ndvi_s2']
+
+
+def compute_satellite_staleness(
+    target_date: str,
+    landsat_date: Optional[str] = None,
+    sentinel_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Compute satellite staleness features.
+    
+    Computes the number of days between the target date and the satellite
+    source dates. This captures data freshness and helps the model understand
+    how old the satellite observations are relative to the prediction target.
+    
+    Args:
+        target_date: Target date (YYYY-MM-DD format).
+        landsat_date: Landsat source date (YYYY-MM-DD format), or None.
+        sentinel_date: Sentinel source date (YYYY-MM-DD format), or None.
+        
+    Returns:
+        DataFrame with columns:
+            - days_since_landsat: int (or NaN if no Landsat data)
+            - days_since_sentinel: int (or NaN if no Sentinel data)
+            
+    Example:
+        >>> staleness = compute_satellite_staleness(
+        ...     target_date='2023-06-15',
+        ...     landsat_date='2023-06-10',
+        ...     sentinel_date='2023-06-12'
+        ... )
+        >>> staleness
+           days_since_landsat  days_since_sentinel
+        0                   5                    3
+    """
+    from datetime import datetime as dt
+    
+    target = dt.strptime(target_date, '%Y-%m-%d')
+    
+    result = pd.DataFrame(index=[0])
+    
+    # Compute days since Landsat
+    if landsat_date is not None:
+        source = dt.strptime(landsat_date, '%Y-%m-%d')
+        result['days_since_landsat'] = (target - source).days
+    else:
+        result['days_since_landsat'] = np.nan
+    
+    # Compute days since Sentinel
+    if sentinel_date is not None:
+        source = dt.strptime(sentinel_date, '%Y-%m-%d')
+        result['days_since_sentinel'] = (target - source).days
+    else:
+        result['days_since_sentinel'] = np.nan
+    
+    return result
+
+
+
 
 
 # ============================================================================

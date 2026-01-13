@@ -45,6 +45,10 @@ from nalanda.features_satellite import (
     get_landsat_feature_columns,
     get_sentinel_feature_columns,
 )
+from nalanda.features_temporal import (
+    compute_temporal_features,
+    get_temporal_feature_columns,
+)
 
 
 # Default paths
@@ -161,6 +165,17 @@ def assemble_training_data(
         FileNotFoundError: If target file doesn't exist.
         ValueError: If required data is missing and skip_missing_satellite=False.
     """
+    # Validate date is within available sensor data range
+    MAX_VALID_DATE = '2024-12-31'
+    date_obj = dt.strptime(date, '%Y-%m-%d')
+    max_date_obj = dt.strptime(MAX_VALID_DATE, '%Y-%m-%d')
+    
+    if date_obj > max_date_obj:
+        raise ValueError(
+            f"Cannot assemble data for {date}: sensor data only available up to {MAX_VALID_DATE}. "
+            f"CPCB sensor data ends at 2024-12-31. Update sensor data sources to process later dates."
+        )
+    
     print(f"Assembling training data for {date}...")
     
     # 1. Load target data
@@ -176,6 +191,11 @@ def assemble_training_data(
     
     # 3. Add grid_id to target
     target_with_grid = target_df.merge(grid_mapping, on='row_idx', how='left')
+    
+    # 3.5. Add temporal features (hour_sin, hour_cos, dow_sin, dow_cos)
+    print("  Computing temporal features...")
+    target_with_grid = compute_temporal_features(target_with_grid)
+    print(f"    Temporal: added hour_sin, hour_cos, dow_sin, dow_cos")
     
     # 4. Compute meteo features
     print("  Computing meteo features...")
@@ -260,6 +280,37 @@ def assemble_training_data(
             how='left',
         )
         print(f"    After Sentinel join: {len(result):,} rows")
+    
+    # 6.5. Add satellite staleness features
+    print("  Computing satellite staleness features...")
+    from nalanda.features_satellite import compute_satellite_staleness
+    
+    # Get the source dates from the joined dataframes
+    landsat_date = None
+    sentinel_date = None
+    
+    if landsat_df is not None and not landsat_df.empty and 'landsat_date' in result.columns:
+        extracted_date = result['landsat_date'].iloc[0]
+        # Check if it's a valid date (not None, not NaT, not empty string)
+        if pd.notna(extracted_date) and extracted_date:
+            landsat_date = str(extracted_date) if not isinstance(extracted_date, str) else extracted_date
+    
+    if sentinel_df is not None and not sentinel_df.empty and 'sentinel_date' in result.columns:
+        extracted_date = result['sentinel_date'].iloc[0]
+        # Check if it's a valid date (not None, not NaT, not empty string)
+        if pd.notna(extracted_date) and extracted_date:
+            sentinel_date = str(extracted_date) if not isinstance(extracted_date, str) else extracted_date
+    
+    staleness_df = compute_satellite_staleness(
+        target_date=date,
+        landsat_date=landsat_date,
+        sentinel_date=sentinel_date,
+    )
+    
+    # Broadcast staleness features to all rows
+    result['days_since_landsat'] = staleness_df['days_since_landsat'].iloc[0]
+    result['days_since_sentinel'] = staleness_df['days_since_sentinel'].iloc[0]
+    print(f"    Added days_since_landsat, days_since_sentinel")
     
     # 7. Reorder columns
     # Keys first, then target, then features

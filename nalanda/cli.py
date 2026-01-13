@@ -825,6 +825,23 @@ def _freeze_features_after_splits(
     import pandas as pd
     from datetime import datetime
     
+    # 1. Freeze from actual split data (not canonical definition)
+    print("\n1. Freezing schema from actual split data...")
+    
+    # Load a representative file to get actual columns
+    train_path = output_base_dir / "train"
+    if not train_path.exists():
+        raise ValueError(f"Train split directory not found: {train_path}")
+    
+    parquet_files = sorted(train_path.glob("*_training.parquet"))
+    if not parquet_files:
+        raise ValueError(f"No training.parquet files found in {train_path}")
+    
+    # Load middle file to get representative schema
+    sample_file = parquet_files[len(parquet_files) // 2]
+    print(f"   Sampling schema from: {sample_file.name}")
+    sample_df = pd.read_parquet(sample_file)
+    
     # Build metadata
     freeze_metadata = {
         "version": "v1",
@@ -833,6 +850,7 @@ def _freeze_features_after_splits(
         "frozen_after_splits": True,
         "include_landsat": True,
         "include_sentinel": True,
+        "sample_file": str(sample_file),
         "split_artifacts": {
             split_name: {
                 "path": str(meta["path"]),
@@ -843,14 +861,10 @@ def _freeze_features_after_splits(
         },
     }
     
-    # 1. Freeze from canonical definition
-    print("\n1. Freezing from canonical definition...")
-    schema = freeze_feature_schema(
-        metadata=freeze_metadata,
-        include_landsat=True,
-        include_sentinel=True,
-    )
-    print(f"   ✓ Frozen {schema.n_features} features")
+    # Freeze from actual dataframe
+    from nalanda.feature_freeze import freeze_from_dataframe
+    schema = freeze_from_dataframe(sample_df, metadata=freeze_metadata)
+    print(f"   ✓ Frozen {schema.n_features} features from actual data")
     print(f"   ✓ Schema hash: {schema.schema_hash}")
     
     # 2. Validate against actual split dataframes
@@ -858,26 +872,24 @@ def _freeze_features_after_splits(
     has_warnings = False
     
     split_dfs = {}
-    for split_name in ["train", "validation", "test"]:
-        if split_name not in splits_metadata:
-            print(f"   ⚠ Skipping {split_name} (not found in metadata)")
-            has_warnings = True
-            continue
+    # Use correct split names: train, val, test (not validation)
+    for split_name in ["train", "val", "test"]:
+        split_path = output_base_dir / split_name
         
-        split_path = Path(splits_metadata[split_name]["path"])
         if not split_path.exists():
-            print(f"   ⚠ Skipping {split_name} (file not found: {split_path})")
+            print(f"   ⚠ Skipping {split_name} (directory not found: {split_path})")
             has_warnings = True
             continue
         
-        # Load a sample to validate schema (first file only if multiple)
+        # Load a sample to validate schema (first few files from directory)
         if split_path.is_dir():
-            parquet_files = sorted(split_path.glob("**/training.parquet"))
+            parquet_files = sorted(split_path.glob("*_training.parquet"))
             if not parquet_files:
                 print(f"   ⚠ No training.parquet files found in {split_path}")
                 has_warnings = True
                 continue
-            sample_path = parquet_files[0]
+            # Sample middle file to get representative data
+            sample_path = parquet_files[len(parquet_files) // 2]
         else:
             sample_path = split_path
         
@@ -888,7 +900,7 @@ def _freeze_features_after_splits(
         # Validate this split
         try:
             schema.validate(df, strict=False)
-            print(f"   ✓ {split_name}: schema validated ({len(df)} rows)")
+            print(f"   ✓ {split_name}: schema validated ({len(df)} rows, {len(df.columns)} cols)")
         except ValueError as e:
             print(f"   ❌ {split_name}: validation failed")
             print(f"      {e}")
@@ -898,9 +910,10 @@ def _freeze_features_after_splits(
     if len(split_dfs) >= 2:
         print("\n3. Cross-validating split consistency...")
         try:
+            # Use correct split name: 'val' not 'validation'
             validate_splits_schema(
                 train_df=split_dfs.get("train", split_dfs[list(split_dfs.keys())[0]]),
-                val_df=split_dfs.get("validation", split_dfs[list(split_dfs.keys())[0]]),
+                val_df=split_dfs.get("val", split_dfs[list(split_dfs.keys())[0]]),
                 test_df=split_dfs.get("test", split_dfs[list(split_dfs.keys())[0]]),
                 schema=schema,
             )
@@ -1036,6 +1049,64 @@ def cmd_status(args):
     return 0
 
 
+def cmd_freeze_schema(args):
+    """Handle 'freeze-schema' command - freeze feature schema from splits."""
+    import json
+    from datetime import datetime
+    
+    splits_dir = Path(args.splits_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else splits_dir / "v1" / "features"
+    
+    print("=" * 80)
+    print("FREEZING FEATURE SCHEMA FROM SPLITS")
+    print("=" * 80)
+    print(f"Splits dir: {splits_dir}")
+    print(f"Output dir: {output_dir}")
+    print()
+    
+    # Check that splits exist
+    train_dir = splits_dir / "train"
+    val_dir = splits_dir / "val"
+    test_dir = splits_dir / "test"
+    
+    if not train_dir.exists():
+        print(f"❌ Train split directory not found: {train_dir}", file=sys.stderr)
+        return 1
+    
+    # Load metadata if available
+    metadata_file = splits_dir / "splits_metadata.json"
+    splits_metadata = {}
+    if metadata_file.exists():
+        with open(metadata_file) as f:
+            metadata_content = json.load(f)
+            # Extract the splits dictionary
+            if isinstance(metadata_content, dict) and "train" in metadata_content:
+                splits_metadata = metadata_content
+            else:
+                print(f"⚠ Could not parse splits_metadata.json", file=sys.stderr)
+    
+    # Call the freeze function
+    try:
+        freeze_success = _freeze_features_after_splits(
+            output_base_dir=splits_dir,
+            splits_metadata=splits_metadata,
+        )
+        
+        if freeze_success:
+            print("\n✓ Feature schema frozen successfully")
+            return 0
+        else:
+            print("\n⚠ Feature schema freeze completed with warnings", file=sys.stderr)
+            return 1
+            
+    except Exception as e:
+        print(f"\n❌ Failed to freeze feature schema:", file=sys.stderr)
+        print(f"  {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Training data pipeline CLI",
@@ -1160,6 +1231,22 @@ Examples:
         help='Show detailed error traces'
     )
     create_splits_parser.set_defaults(func=cmd_create_splits)
+    
+    # Freeze-schema command
+    freeze_schema_parser = subparsers.add_parser(
+        'freeze-schema',
+        help='Freeze feature schema from materialized splits'
+    )
+    freeze_schema_parser.add_argument(
+        '--splits-dir',
+        required=True,
+        help='Directory containing materialized splits (train/, val/, test/)'
+    )
+    freeze_schema_parser.add_argument(
+        '--output-dir',
+        help='Output directory for schema (defaults to splits-dir/v1/features/)'
+    )
+    freeze_schema_parser.set_defaults(func=cmd_freeze_schema)
     
     args = parser.parse_args()
     

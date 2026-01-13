@@ -21,8 +21,8 @@ LGB_PARAMS: Dict[str, Any] = {
     # OBJECTIVE & LOSS
     # ─────────────────────────────────────────────────────────────
     "objective": "huber",           # Robust to outliers in high-PM regime
-    "huber_delta": 10.0,            # δ=10 µg/m³: quadratic for |e|<10, linear beyond
-    "metric": ["mae", "rmse", "huber"],  # Track all three
+    # Note: huber_delta is not a standard LightGBM param; using mae for robustness
+    "metric": ["mae", "rmse"],      # Track MAE and RMSE
     
     # ─────────────────────────────────────────────────────────────
     # TREE STRUCTURE (prevent grid_id memorization)
