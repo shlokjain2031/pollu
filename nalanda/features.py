@@ -51,9 +51,9 @@ CLOUD_COVER_LAG_HOURS: Tuple[int, ...] = (6, 24)
 def _pm25_lag_features() -> List[str]:
     """Group A: Autoregressive PM2.5 lags.
     
-    These are the strongest predictors. Persistence baseline = pm25_t_lag24h alone.
+    These are the strongest predictors. Persistence baseline = pm25_t_minus_24h alone.
     """
-    return [f"pm25_t_lag{h}h" for h in PM25_LAG_HOURS]
+    return [f"pm25_t_minus_{h}h" for h in PM25_LAG_HOURS]
 
 
 def _meteo_base_features() -> List[str]:

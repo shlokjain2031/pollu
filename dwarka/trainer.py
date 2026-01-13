@@ -245,6 +245,28 @@ def load_date_chunk(
     # Extract features using frozen schema
     X = schema.extract_X(combined)
     
+    # Validate and convert feature dtypes to numeric (edge case handling)
+    non_numeric_cols = []
+    all_nan_cols = []
+    
+    for col in X.columns:
+        if X[col].dtype == object or X[col].dtype.name.startswith('string'):
+            non_numeric_cols.append(col)
+        elif X[col].isna().all():
+            all_nan_cols.append(col)
+    
+    if non_numeric_cols:
+        logger.warning(f"Found {len(non_numeric_cols)} non-numeric feature columns: {non_numeric_cols}")
+        logger.warning("Dropping non-numeric columns as LightGBM requires numeric features only")
+        X = X.drop(columns=non_numeric_cols)
+    
+    if all_nan_cols:
+        logger.warning(f"Found {len(all_nan_cols)} all-NaN feature columns: {all_nan_cols}")
+        logger.warning("Dropping all-NaN columns")
+        X = X.drop(columns=all_nan_cols)
+    
+    logger.info(f"Using {len(X.columns)} features after validation (dropped {len(non_numeric_cols) + len(all_nan_cols)})")
+    
     # Extract target
     if target_col not in combined.columns:
         raise ValueError(f"Target column '{target_col}' not found")
@@ -815,6 +837,15 @@ def train_baseline(
     logger.info("=" * 60)
     
     params = LGB_PARAMS.copy()
+    
+    # Remove any LightGBM-invalid parameters
+    invalid_params = ["huber_delta"]  # Not a standard LightGBM param
+    for param in invalid_params:
+        if param in params:
+            logger.warning(f"Removing invalid LightGBM parameter: {param}")
+            params.pop(param)
+    
+    logger.info(f"Using {len(params)} LightGBM parameters")
     
     if use_chunked:
         model, training_info = train_chunked(
