@@ -221,7 +221,7 @@ def save_chunk_checkpoint(
         json.dump(chunk_metadata, f, indent=2)
     temp_metadata_path.rename(metadata_path)
     
-    logger.info(f"  💾 Checkpoint saved: {latest_model_dir}")
+    logger.info(f"  Checkpoint saved: {latest_model_dir}")
     
     return latest_model_dir
 
@@ -305,7 +305,7 @@ def update_progress(
     
     # Log progress
     pct = (len(progress["completed_chunks"]) / total_chunks) * 100
-    logger.info(f"  📊 Progress: {len(progress['completed_chunks'])}/{total_chunks} chunks ({pct:.1f}%)")
+    logger.info(f"  Progress: {len(progress['completed_chunks'])}/{total_chunks} chunks ({pct:.1f}%)")
 
 
 def verify_checkpoint(latest_model_dir: Path) -> bool:
@@ -412,7 +412,7 @@ def load_checkpoint_for_resume(output_dir: Path) -> Optional[Dict[str, Any]]:
         "last_chunk_date_range": progress.get("chunks", {}).get(str(last_chunk), {}).get("date_range"),
     }
     
-    logger.info(f"✅ Found resumable checkpoint: chunk_{last_chunk}")
+    logger.info(f"Found resumable checkpoint: chunk_{last_chunk}")
     logger.info(f"   Session: {resume_info['session_id']}")
     logger.info(f"   Completed: {len(resume_info['completed_chunks'])}/{resume_info['total_chunks']} chunks")
     logger.info(f"   Will resume from chunk {next_chunk}")
@@ -536,14 +536,14 @@ def load_date_chunk(
             found_count += 1
     
     if not dfs:
-        logger.warning(f"⚠️  No training files found in {len(date_files)} files")
+        logger.warning(f"WARNING: No training files found in {len(date_files)} files")
         if date_files:
             logger.warning(f"   File range: {date_files[0].name} to {date_files[-1].name}")
         logger.warning(f"   This chunk will be skipped")
         return None, None, None  # Return None to indicate empty chunk
     
     if found_count < len(date_files):
-        logger.warning(f"⚠️  Found {found_count}/{len(date_files)} training files in this chunk (skipped {len(date_files) - found_count} missing files)")
+        logger.warning(f"WARNING: Found {found_count}/{len(date_files)} training files in this chunk (skipped {len(date_files) - found_count} missing files)")
     
     combined = pd.concat(dfs, ignore_index=True)
     
@@ -637,7 +637,7 @@ def iter_training_chunks(
         
         # Skip empty chunks
         if X is None:
-            logger.info(f"  ⏭️  Skipping empty chunk {chunk_idx}")
+            logger.info(f"  Skipping empty chunk {chunk_idx}")
             continue
         
         logger.info(f"  Chunk size: {len(X):,} rows")
@@ -861,7 +861,7 @@ def train_chunked(
         if lgb is None:
             raise ImportError("lightgbm required")
         model = lgb.Booster(model_file=str(init_model_path))
-        logger.info(f"✅ Model loaded successfully (best_iteration: {model.best_iteration})")
+        logger.info(f"Model loaded successfully (best_iteration: {model.best_iteration})")
     else:
         # Fresh training
         start_chunk_idx = 0
@@ -898,7 +898,7 @@ def train_chunked(
     ):
         # Skip already-completed chunks when resuming
         if chunk_idx < start_chunk_idx:
-            logger.info(f"⏭️  Skipping chunk {chunk_idx + 1}/{total_chunks} (already completed)")
+            logger.info(f"Skipping chunk {chunk_idx + 1}/{total_chunks} (already completed)")
             continue
         
         chunk_start_time = time.time()
@@ -943,7 +943,7 @@ def train_chunked(
         info["duration_seconds"] = chunk_duration
         
         logger.info(f"Chunk {chunk_idx + 1}/{total_chunks} complete. Best iteration: {model.best_iteration}")
-        logger.info(f"  ⏱️  Duration: {chunk_duration:.1f}s")
+        logger.info(f"  Duration: {chunk_duration:.1f}s")
         
         # === CHECKPOINTING ===
         data_info = {
@@ -1203,7 +1203,7 @@ def train_baseline(
         logger.info("=" * 60)
         resume_info = load_checkpoint_for_resume(output_dir)
         if resume_info:
-            logger.info("✅ Will resume from previous training session")
+            logger.info("Will resume from previous training session")
         else:
             logger.info("Starting fresh training session")
     elif force_restart:

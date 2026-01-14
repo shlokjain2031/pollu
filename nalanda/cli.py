@@ -744,7 +744,7 @@ def cmd_validate_splits(args):
                 print(f"  {split:12} {count:8,} rows ({pct:5.1f}%)")
             
             if results['issues']:
-                print(f"\n⚠️  Issues found ({len(results['issues'])}):")
+                print(f"\nWARNING: Issues found ({len(results['issues'])}):)
                 for issue in results['issues']:
                     print(f"  - {issue}")
                 return 1
@@ -753,7 +753,7 @@ def cmd_validate_splits(args):
                 return 0
                 
         except AssertionError as e:
-            print(f"\n❌ Split validation failed:", file=sys.stderr)
+            print(f"\nERROR: Split validation failed:", file=sys.stderr)
             print(f"  {e}", file=sys.stderr)
             return 1
     
@@ -793,7 +793,7 @@ def cmd_validate_splits(args):
             print("✓ Temporal ordering verified (train < val < test)")
             return 0
         except AssertionError as e:
-            print(f"\n❌ Leakage detected:", file=sys.stderr)
+            print(f"\nERROR: Leakage detected:", file=sys.stderr)
             print(f"  {e}", file=sys.stderr)
             return 1
     
@@ -902,7 +902,7 @@ def _freeze_features_after_splits(
             schema.validate(df, strict=False)
             print(f"   ✓ {split_name}: schema validated ({len(df)} rows, {len(df.columns)} cols)")
         except ValueError as e:
-            print(f"   ❌ {split_name}: validation failed")
+            print(f"   ERROR: {split_name}: validation failed")
             print(f"      {e}")
             raise
     
@@ -919,7 +919,7 @@ def _freeze_features_after_splits(
             )
             print("   ✓ All splits have consistent schemas")
         except ValueError as e:
-            print(f"   ❌ Schema mismatch across splits:")
+            print(f"   ERROR: Schema mismatch across splits:")
             print(f"      {e}")
             raise
     else:
@@ -1004,7 +1004,7 @@ def cmd_create_splits(args):
             else:
                 print("\n⚠ Feature schema freeze completed with warnings", file=sys.stderr)
         except Exception as freeze_err:
-            print(f"\n❌ Failed to freeze feature schema:", file=sys.stderr)
+            print(f"\nERROR: Failed to freeze feature schema:", file=sys.stderr)
             print(f"  {freeze_err}", file=sys.stderr)
             if args.verbose:
                 import traceback
@@ -1015,7 +1015,7 @@ def cmd_create_splits(args):
         return 0
         
     except Exception as e:
-        print(f"\n❌ Failed to create splits:", file=sys.stderr)
+        print(f"\nERROR: Failed to create splits:", file=sys.stderr)
         print(f"  {e}", file=sys.stderr)
         import traceback
         if args.verbose:
@@ -1070,7 +1070,7 @@ def cmd_freeze_schema(args):
     test_dir = splits_dir / "test"
     
     if not train_dir.exists():
-        print(f"❌ Train split directory not found: {train_dir}", file=sys.stderr)
+        print(f"ERROR: Train split directory not found: {train_dir}", file=sys.stderr)
         return 1
     
     # Load metadata if available
