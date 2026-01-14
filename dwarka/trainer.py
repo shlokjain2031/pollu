@@ -9,8 +9,8 @@ This module implements the training pipeline for PM2.5 prediction:
 Usage (as script):
     python -m dwarka.trainer \\
         --schema artifacts/v1/features/feature_schema.json \\
-        --train-dir artifacts/v1/training \\
-        --val-dir artifacts/v1/training \\
+        --train-dir artifacts/train \\
+        --val-dir artifacts/val \\
         --output-dir dwarka/models/baseline_v1
 
 Usage (as module):
@@ -18,8 +18,8 @@ Usage (as module):
     
     results = train_baseline(
         schema_path=Path("artifacts/v1/features/feature_schema.json"),
-        train_dir=Path("artifacts/v1/training"),
-        val_dir=Path("artifacts/v1/training"),
+        train_dir=Path("artifacts/train"),
+        val_dir=Path("artifacts/val"),
         output_dir=Path("dwarka/models/baseline_v1"),
     )
 """
@@ -143,6 +143,315 @@ class ModelManifest:
 
 
 # =============================================================================
+# Checkpointing Functions
+# =============================================================================
+
+def generate_session_id(model_version: str = "baseline") -> str:
+    """Generate unique training session ID.
+    
+    Format: {model_version}_{YYYYMMDD}_{HHMMSS}
+    """
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return f"{model_version}_{timestamp}"
+
+
+def save_chunk_checkpoint(
+    model: "lgb.Booster",
+    chunk_idx: int,
+    chunk_date_range: Tuple[str, str],
+    output_dir: Path,
+    training_info: Dict[str, Any],
+    data_info: Dict[str, Any],
+) -> Path:
+    """Save model and metadata after each chunk completes (only latest kept).
+    
+    Args:
+        model: Trained LightGBM model
+        chunk_idx: Chunk number (0-based)
+        chunk_date_range: (start_date, end_date) strings
+        output_dir: Base output directory (e.g., artifacts/models/baseline_v1/)
+        training_info: {best_iteration, best_score, ...}
+        data_info: {n_rows, n_features, dropped_cols, ...}
+    
+    Returns:
+        Path to latest_model directory
+    """
+    checkpoints_dir = output_dir / "checkpoints"
+    latest_model_dir = checkpoints_dir / "latest_model"
+    latest_model_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save model (overwrites previous)
+    model_path = latest_model_dir / "model.txt"
+    temp_model_path = latest_model_dir / "model.txt.tmp"
+    model.save_model(str(temp_model_path))
+    temp_model_path.rename(model_path)
+    
+    # Build chunk metadata
+    chunk_metadata = {
+        "chunk_idx": chunk_idx,
+        "date_range": {
+            "start": chunk_date_range[0],
+            "end": chunk_date_range[1],
+        },
+        "data_info": {
+            "n_rows": data_info.get("n_rows", 0),
+            "n_features_before_drop": data_info.get("n_features_before_drop", 0),
+            "n_features_after_drop": data_info.get("n_features_after_drop", 0),
+            "dropped_non_numeric": data_info.get("dropped_non_numeric", []),
+            "dropped_all_nan": data_info.get("dropped_all_nan", []),
+        },
+        "training_info": {
+            "best_iteration": training_info.get("best_iteration", 0),
+            "early_stopped": training_info.get("best_iteration", 0) < training_info.get("total_iterations", 5000),
+        },
+        "metrics": {
+            "train": training_info.get("best_score", {}).get("train", {}),
+            "val": training_info.get("best_score", {}).get("val", {}),
+        },
+        "timing": {
+            "saved_at": datetime.utcnow().isoformat() + "Z",
+            "duration_seconds": data_info.get("duration_seconds", 0),
+        },
+    }
+    
+    # Save metadata to latest_model/ (overwrites previous)
+    metadata_path = latest_model_dir / "metadata.json"
+    temp_metadata_path = latest_model_dir / "metadata.json.tmp"
+    with open(temp_metadata_path, "w") as f:
+        json.dump(chunk_metadata, f, indent=2)
+    temp_metadata_path.rename(metadata_path)
+    
+    logger.info(f"  💾 Checkpoint saved: {latest_model_dir}")
+    
+    return latest_model_dir
+
+
+def update_progress(
+    output_dir: Path,
+    chunk_idx: int,
+    total_chunks: int,
+    chunk_date_range: Tuple[str, str],
+    training_info: Dict[str, Any],
+    session_id: str,
+    status: str = "completed",
+) -> None:
+    """Update progress.json after each chunk.
+    
+    Args:
+        output_dir: Base output directory
+        chunk_idx: Just completed chunk (0-based)
+        total_chunks: Total chunks to train
+        chunk_date_range: (start_date, end_date) strings
+        training_info: Metrics, timing, etc.
+        session_id: Training session ID
+        status: "completed", "failed", "in_progress"
+    """
+    checkpoints_dir = output_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    progress_file = checkpoints_dir / "progress.json"
+    
+    # Load existing progress or create new
+    if progress_file.exists():
+        with open(progress_file) as f:
+            progress = json.load(f)
+    else:
+        progress = {
+            "training_session_id": session_id,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "total_chunks": total_chunks,
+            "completed_chunks": [],
+            "last_completed_chunk": None,
+            "chunks": {},
+        }
+    
+    # Extract metrics safely
+    best_score = training_info.get("best_score", {})
+    train_metrics = best_score.get("train", {})
+    val_metrics = best_score.get("val", {})
+    
+    # Add/update chunk info
+    progress["chunks"][str(chunk_idx)] = {
+        "date_range": f"{chunk_date_range[0]} to {chunk_date_range[1]}",
+        "status": status,
+        "best_iteration": training_info.get("best_iteration", 0),
+        "train_l1": train_metrics.get("l1", 0),
+        "val_l1": val_metrics.get("l1", 0),
+        "val_rmse": val_metrics.get("rmse", 0),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "duration_seconds": training_info.get("duration_seconds", 0),
+    }
+    
+    # Update completed chunks list
+    if status == "completed":
+        if chunk_idx not in progress["completed_chunks"]:
+            progress["completed_chunks"].append(chunk_idx)
+            progress["completed_chunks"].sort()
+        progress["last_completed_chunk"] = chunk_idx
+    
+    progress["last_updated"] = datetime.utcnow().isoformat() + "Z"
+    
+    # Update resume info
+    progress["resume_info"] = {
+        "can_resume": status == "completed",
+        "next_chunk": chunk_idx + 1 if status == "completed" else chunk_idx,
+        "init_model_path": "checkpoints/latest_model/model.txt" if status == "completed" else None,
+    }
+    
+    # Atomic write
+    temp_progress = checkpoints_dir / "progress.json.tmp"
+    with open(temp_progress, "w") as f:
+        json.dump(progress, f, indent=2)
+    temp_progress.rename(progress_file)
+    
+    # Log progress
+    pct = (len(progress["completed_chunks"]) / total_chunks) * 100
+    logger.info(f"  📊 Progress: {len(progress['completed_chunks'])}/{total_chunks} chunks ({pct:.1f}%)")
+
+
+def verify_checkpoint(latest_model_dir: Path) -> bool:
+    """Verify checkpoint integrity.
+    
+    Args:
+        latest_model_dir: Latest model directory to verify
+        
+    Returns:
+        True if checkpoint is valid
+    """
+    if not latest_model_dir.exists():
+        return False
+    
+    model_path = latest_model_dir / "model.txt"
+    metadata_path = latest_model_dir / "metadata.json"
+    
+    # Check required files exist
+    if not model_path.exists() or not metadata_path.exists():
+        logger.warning(f"Checkpoint incomplete: {latest_model_dir}")
+        return False
+    
+    # Check for temporary files (indicates interrupted save)
+    temp_model = latest_model_dir / "model.txt.tmp"
+    temp_metadata = latest_model_dir / "metadata.json.tmp"
+    if temp_model.exists() or temp_metadata.exists():
+        logger.warning(f"Checkpoint has temporary files: {latest_model_dir}")
+        return False
+    
+    # Verify metadata can be loaded
+    try:
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+        
+        # Check required fields
+        required_fields = ["chunk_idx", "date_range", "data_info", "training_info"]
+        for field in required_fields:
+            if field not in metadata:
+                logger.warning(f"Checkpoint missing field '{field}': {latest_model_dir}")
+                return False
+        
+        return True
+    except Exception as e:
+        logger.warning(f"Checkpoint metadata corrupt: {latest_model_dir} - {e}")
+        return False
+
+
+def load_checkpoint_for_resume(output_dir: Path) -> Optional[Dict[str, Any]]:
+    """Load checkpoint information for resuming training.
+    
+    Args:
+        output_dir: Base output directory
+        
+    Returns:
+        Dict with resume info, or None if no valid checkpoint found
+        {
+            "init_model_path": Path to model file,
+            "next_chunk_idx": Index of next chunk to train,
+            "session_id": Original session ID,
+            "completed_chunks": List of completed chunk indices,
+            "total_chunks": Total chunks in training,
+        }
+    """
+    checkpoints_dir = output_dir / "checkpoints"
+    progress_file = checkpoints_dir / "progress.json"
+    
+    if not progress_file.exists():
+        logger.info("No previous training session found")
+        return None
+    
+    # Load progress
+    try:
+        with open(progress_file) as f:
+            progress = json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load progress.json: {e}")
+        return None
+    
+    # Check if resumable
+    if not progress.get("resume_info", {}).get("can_resume", False):
+        logger.warning("Previous training session not resumable")
+        return None
+    
+    last_chunk = progress.get("last_completed_chunk")
+    if last_chunk is None:
+        logger.info("No completed chunks found")
+        return None
+    
+    # Verify latest checkpoint
+    latest_model_dir = checkpoints_dir / "latest_model"
+    if not verify_checkpoint(latest_model_dir):
+        logger.error(f"Latest checkpoint verification failed")
+        return None
+    
+    model_path = latest_model_dir / "model.txt"
+    next_chunk = last_chunk + 1
+    
+    resume_info = {
+        "init_model_path": model_path,
+        "next_chunk_idx": next_chunk,
+        "session_id": progress.get("training_session_id"),
+        "completed_chunks": progress.get("completed_chunks", []),
+        "total_chunks": progress.get("total_chunks", 0),
+        "last_chunk_date_range": progress.get("chunks", {}).get(str(last_chunk), {}).get("date_range"),
+    }
+    
+    logger.info(f"✅ Found resumable checkpoint: chunk_{last_chunk}")
+    logger.info(f"   Session: {resume_info['session_id']}")
+    logger.info(f"   Completed: {len(resume_info['completed_chunks'])}/{resume_info['total_chunks']} chunks")
+    logger.info(f"   Will resume from chunk {next_chunk}")
+    
+    return resume_info
+
+
+def cleanup_failed_checkpoint(output_dir: Path, chunk_idx: int = None) -> None:
+    """Clean up a failed/incomplete checkpoint.
+    
+    Args:
+        output_dir: Base output directory
+        chunk_idx: Ignored (kept for API compatibility)
+    """
+    latest_model_dir = output_dir / "checkpoints" / "latest_model"
+    
+    if not latest_model_dir.exists():
+        return
+    
+    logger.info(f"Cleaning up failed checkpoint")
+    
+    # Remove temporary files
+    temp_files = [
+        latest_model_dir / "model.txt.tmp",
+        latest_model_dir / "metadata.json.tmp",
+    ]
+    for temp_file in temp_files:
+        if temp_file.exists():
+            temp_file.unlink()
+            logger.info(f"  Removed temp file: {temp_file.name}")
+    
+    # Remove checkpoint directory if incomplete
+    if not verify_checkpoint(latest_model_dir):
+        import shutil
+        shutil.rmtree(latest_model_dir, ignore_errors=True)
+        logger.info(f"  Removed incomplete checkpoint directory")
+
+
+# =============================================================================
 # Schema Loading
 # =============================================================================
 
@@ -181,43 +490,35 @@ def get_date_dirs_for_split(
     data_dir: Path,
     split_name: str,
 ) -> List[Path]:
-    """Get sorted list of date directories for a given split.
+    """Get sorted list of training parquet files for a given split.
     
     Args:
-        data_dir: Base directory containing date-partitioned data
-        split_name: One of 'train', 'validation', 'test'
+        data_dir: Base directory containing training parquet files
+        split_name: One of 'train', 'validation', 'test' (unused, kept for compatibility)
         
     Returns:
-        Sorted list of date directories belonging to the split
+        Sorted list of training parquet file paths
     """
-    split_start, split_end = SPLIT_RANGES[split_name]
+    # Data is now pre-split into train/val/test folders
+    # Files are named like YYYY-MM-DD_training.parquet
+    training_files = []
+    for f in sorted(data_dir.iterdir()):
+        if f.suffix == '.parquet' and '_training.parquet' in f.name:
+            training_files.append(f)
     
-    date_dirs = []
-    for d in sorted(data_dir.iterdir()):
-        if not d.is_dir():
-            continue
-        
-        try:
-            date = pd.Timestamp(d.name)
-            if split_start <= date <= split_end:
-                date_dirs.append(d)
-        except (ValueError, TypeError):
-            # Skip non-date directories
-            continue
-    
-    return date_dirs
+    return training_files
 
 
 def load_date_chunk(
-    date_dirs: List[Path],
+    date_files: List[Path],
     schema: FrozenFeatureSchema,
     target_col: str = "pm25_t",
     weight_col: str = "target_trust",
 ) -> Tuple[pd.DataFrame, pd.Series, np.ndarray]:
-    """Load a chunk of dates and extract X, y, weights.
+    """Load a chunk of training files and extract X, y, weights.
     
     Args:
-        date_dirs: List of date directories to load
+        date_files: List of training parquet files to load
         schema: Frozen feature schema
         target_col: Name of target column
         weight_col: Name of weight column
@@ -226,15 +527,23 @@ def load_date_chunk(
         Tuple of (X, y, weights)
     """
     dfs = []
+    found_count = 0
     
-    for date_dir in date_dirs:
-        training_path = date_dir / "training.parquet"
-        if training_path.exists():
-            df = pd.read_parquet(training_path)
+    for training_file in date_files:
+        if training_file.exists():
+            df = pd.read_parquet(training_file)
             dfs.append(df)
+            found_count += 1
     
     if not dfs:
-        raise ValueError(f"No training.parquet files found in {len(date_dirs)} directories")
+        logger.warning(f"⚠️  No training files found in {len(date_files)} files")
+        if date_files:
+            logger.warning(f"   File range: {date_files[0].name} to {date_files[-1].name}")
+        logger.warning(f"   This chunk will be skipped")
+        return None, None, None  # Return None to indicate empty chunk
+    
+    if found_count < len(date_files):
+        logger.warning(f"⚠️  Found {found_count}/{len(date_files)} training files in this chunk (skipped {len(date_files) - found_count} missing files)")
     
     combined = pd.concat(dfs, ignore_index=True)
     
@@ -290,7 +599,7 @@ def iter_training_chunks(
     chunk_size_days: int = 30,
     target_col: str = "pm25_t",
     weight_col: str = "target_trust",
-) -> Iterator[Tuple[pd.DataFrame, pd.Series, np.ndarray, int]]:
+) -> Iterator[Tuple[pd.DataFrame, pd.Series, np.ndarray, int, Tuple[str, str], int]]:
     """Iterate over training data in chunks.
     
     Args:
@@ -301,29 +610,39 @@ def iter_training_chunks(
         weight_col: Weight column name
         
     Yields:
-        Tuple of (X, y, weights, chunk_idx)
+        Tuple of (X, y, weights, chunk_idx, date_range, total_chunks)
     """
-    date_dirs = get_date_dirs_for_split(data_dir, "train")
+    date_files = get_date_dirs_for_split(data_dir, "train")
     
-    if not date_dirs:
-        raise ValueError(f"No training date directories found in {data_dir}")
+    if not date_files:
+        raise ValueError(f"No training files found in {data_dir}")
     
-    logger.info(f"Found {len(date_dirs)} training date directories")
-    logger.info(f"Date range: {date_dirs[0].name} to {date_dirs[-1].name}")
+    logger.info(f"Found {len(date_files)} training files")
+    logger.info(f"File range: {date_files[0].stem.split('_')[0]} to {date_files[-1].stem.split('_')[0]}")
     
-    # Chunk the date directories
-    for chunk_idx, start_idx in enumerate(range(0, len(date_dirs), chunk_size_days)):
-        chunk_dirs = date_dirs[start_idx : start_idx + chunk_size_days]
+    # Calculate total chunks
+    total_chunks = (len(date_files) + chunk_size_days - 1) // chunk_size_days
+    logger.info(f"Total chunks: {total_chunks}")
+    
+    # Chunk the training files
+    for chunk_idx, start_idx in enumerate(range(0, len(date_files), chunk_size_days)):
+        chunk_files = date_files[start_idx : start_idx + chunk_size_days]
+        date_range = (chunk_files[0].stem.split('_')[0], chunk_files[-1].stem.split('_')[0])
         
-        logger.info(f"Loading chunk {chunk_idx + 1}: {chunk_dirs[0].name} to {chunk_dirs[-1].name} ({len(chunk_dirs)} days)")
+        logger.info(f"Loading chunk {chunk_idx + 1}/{total_chunks}: {date_range[0]} to {date_range[1]} ({len(chunk_files)} days)")
         
         X, y, weights = load_date_chunk(
-            chunk_dirs, schema, target_col, weight_col
+            chunk_files, schema, target_col, weight_col
         )
+        
+        # Skip empty chunks
+        if X is None:
+            logger.info(f"  ⏭️  Skipping empty chunk {chunk_idx}")
+            continue
         
         logger.info(f"  Chunk size: {len(X):,} rows")
         
-        yield X, y, weights, chunk_idx
+        yield X, y, weights, chunk_idx, date_range, total_chunks
 
 
 def load_validation_data(
@@ -343,15 +662,15 @@ def load_validation_data(
     Returns:
         Tuple of (X, y, weights)
     """
-    date_dirs = get_date_dirs_for_split(data_dir, "validation")
+    date_files = get_date_dirs_for_split(data_dir, "validation")
     
-    if not date_dirs:
-        raise ValueError(f"No validation date directories found in {data_dir}")
+    if not date_files:
+        raise ValueError(f"No validation files found in {data_dir}")
     
-    logger.info(f"Loading validation data: {len(date_dirs)} days")
-    logger.info(f"Date range: {date_dirs[0].name} to {date_dirs[-1].name}")
+    logger.info(f"Loading validation data: {len(date_files)} files")
+    logger.info(f"File range: {date_files[0].stem.split('_')[0]} to {date_files[-1].stem.split('_')[0]}")
     
-    X, y, weights = load_date_chunk(date_dirs, schema, target_col, weight_col)
+    X, y, weights = load_date_chunk(date_files, schema, target_col, weight_col)
     
     logger.info(f"Validation set size: {len(X):,} rows")
     
@@ -377,22 +696,22 @@ def iter_validation_chunks(
     Yields:
         Tuple of (X, y, weights, chunk_idx)
     """
-    date_dirs = get_date_dirs_for_split(data_dir, "validation")
+    date_files = get_date_dirs_for_split(data_dir, "validation")
     
-    if not date_dirs:
-        raise ValueError(f"No validation date directories found in {data_dir}")
+    if not date_files:
+        raise ValueError(f"No validation files found in {data_dir}")
     
-    logger.info(f"Found {len(date_dirs)} validation date directories")
-    logger.info(f"Date range: {date_dirs[0].name} to {date_dirs[-1].name}")
+    logger.info(f"Found {len(date_files)} validation files")
+    logger.info(f"File range: {date_files[0].stem.split('_')[0]} to {date_files[-1].stem.split('_')[0]}")
     
-    # Chunk the date directories
-    for chunk_idx, start_idx in enumerate(range(0, len(date_dirs), chunk_size_days)):
-        chunk_dirs = date_dirs[start_idx : start_idx + chunk_size_days]
+    # Chunk the training files
+    for chunk_idx, start_idx in enumerate(range(0, len(date_files), chunk_size_days)):
+        chunk_files = date_files[start_idx : start_idx + chunk_size_days]
         
-        logger.info(f"Loading validation chunk {chunk_idx + 1}: {chunk_dirs[0].name} to {chunk_dirs[-1].name} ({len(chunk_dirs)} days)")
+        logger.info(f"Loading validation chunk {chunk_idx + 1}: {chunk_files[0].stem.split('_')[0]} to {chunk_files[-1].stem.split('_')[0]} ({len(chunk_files)} files)")
         
         X, y, weights = load_date_chunk(
-            chunk_dirs, schema, target_col, weight_col
+            chunk_files, schema, target_col, weight_col
         )
         
         logger.info(f"  Validation chunk size: {len(X):,} rows")
@@ -491,6 +810,7 @@ def train_chunked(
     val_y: Optional[pd.Series],
     val_weights: Optional[np.ndarray],
     params: Dict[str, Any],
+    output_dir: Path,
     chunk_size_days: int = 30,
     num_iterations_per_chunk: int = 500,
     early_stopping_rounds: int = 100,
@@ -499,14 +819,17 @@ def train_chunked(
     val_dir: Optional[Path] = None,
     use_chunked_val: bool = False,
     val_chunk_size: int = 30,
+    session_id: Optional[str] = None,
+    resume_info: Optional[Dict[str, Any]] = None,
 ) -> Tuple[lgb.Booster, Dict[str, Any]]:
-    """Train LightGBM with chunked data loading.
+    """Train LightGBM with chunked data loading and checkpointing.
     
     Args:
         data_dir: Base directory with date-partitioned training data
         schema: Frozen feature schema
         val_X, val_y, val_weights: Validation data (if use_chunked_val=False)
         params: LightGBM parameters
+        output_dir: Output directory for model and checkpoints
         chunk_size_days: Days per training chunk
         num_iterations_per_chunk: Max iterations per chunk
         early_stopping_rounds: Early stopping patience
@@ -515,10 +838,42 @@ def train_chunked(
         val_dir: Validation directory (if use_chunked_val=True)
         use_chunked_val: Whether to use chunked validation loading
         val_chunk_size: Days per validation chunk (if use_chunked_val=True)
+        session_id: Training session ID (auto-generated if None)
+        resume_info: Resume info from load_checkpoint_for_resume() (if resuming)
         
     Returns:
         Tuple of (trained model, training info)
     """
+    # Handle resuming from checkpoint
+    if resume_info is not None:
+        session_id = resume_info["session_id"]
+        start_chunk_idx = resume_info["next_chunk_idx"]
+        init_model_path = resume_info["init_model_path"]
+        logger.info("=" * 60)
+        logger.info("🔄 RESUMING FROM CHECKPOINT")
+        logger.info("=" * 60)
+        logger.info(f"Session ID: {session_id}")
+        logger.info(f"Completed chunks: {len(resume_info['completed_chunks'])}/{resume_info['total_chunks']}")
+        logger.info(f"Resuming from chunk {start_chunk_idx}")
+        logger.info(f"Loading model from: {init_model_path}")
+        
+        # Load the checkpoint model
+        if lgb is None:
+            raise ImportError("lightgbm required")
+        model = lgb.Booster(model_file=str(init_model_path))
+        logger.info(f"✅ Model loaded successfully (best_iteration: {model.best_iteration})")
+    else:
+        # Fresh training
+        start_chunk_idx = 0
+        model = None
+        
+        # Generate session ID if not provided
+        if session_id is None:
+            session_id = generate_session_id()
+        
+        logger.info(f"Training session ID: {session_id}")
+        logger.info(f"Checkpoints will be saved to: {output_dir / 'checkpoints'}")
+    
     # Create validation dataset (either in-memory or prepare for chunked)
     if use_chunked_val:
         if val_dir is None:
@@ -534,20 +889,29 @@ def train_chunked(
         )
         logger.info("Using in-memory validation evaluation")
     
-    model = None
     total_samples = 0
     n_chunks = 0
+    total_chunks = 0
     
-    for X, y, weights, chunk_idx in iter_training_chunks(
+    for X, y, weights, chunk_idx, date_range, total_chunks in iter_training_chunks(
         data_dir, schema, chunk_size_days, target_col, weight_col
     ):
+        # Skip already-completed chunks when resuming
+        if chunk_idx < start_chunk_idx:
+            logger.info(f"⏭️  Skipping chunk {chunk_idx + 1}/{total_chunks} (already completed)")
+            continue
+        
+        chunk_start_time = time.time()
+        n_features_before = len(schema.feature_list)
+        n_features_after = len(X.columns)
+        
         total_samples += len(X)
         n_chunks += 1
         
         # Create training dataset for this chunk
         train_ds = create_lgb_dataset(
             X, y, weights,
-            feature_names=schema.feature_list,
+            feature_names=list(X.columns),  # Use actual columns after dropping
             reference=val_ds if (model is None and val_ds is not None) else None,
         )
         
@@ -575,7 +939,42 @@ def train_chunked(
             early_stopping_rounds=early_stopping_rounds,
         )
         
-        logger.info(f"Chunk {chunk_idx + 1} complete. Best iteration: {model.best_iteration}")
+        chunk_duration = time.time() - chunk_start_time
+        info["duration_seconds"] = chunk_duration
+        
+        logger.info(f"Chunk {chunk_idx + 1}/{total_chunks} complete. Best iteration: {model.best_iteration}")
+        logger.info(f"  ⏱️  Duration: {chunk_duration:.1f}s")
+        
+        # === CHECKPOINTING ===
+        data_info = {
+            "n_rows": len(y),
+            "n_features_before_drop": n_features_before,
+            "n_features_after_drop": n_features_after,
+            "dropped_non_numeric": [],  # TODO: track these in load_date_chunk
+            "dropped_all_nan": [],
+            "duration_seconds": chunk_duration,
+        }
+        
+        # Save checkpoint
+        save_chunk_checkpoint(
+            model=model,
+            chunk_idx=chunk_idx,
+            chunk_date_range=date_range,
+            output_dir=output_dir,
+            training_info=info,
+            data_info=data_info,
+        )
+        
+        # Update progress
+        update_progress(
+            output_dir=output_dir,
+            chunk_idx=chunk_idx,
+            total_chunks=total_chunks,
+            chunk_date_range=date_range,
+            training_info=info,
+            session_id=session_id,
+            status="completed",
+        )
         
         # Free memory
         del train_ds, X, y, weights
@@ -771,8 +1170,9 @@ def train_baseline(
     use_chunked_val: bool = False,
     val_chunk_size: int = 30,
     notes: str = "",
+    force_restart: bool = False,
 ) -> Dict[str, Any]:
-    """End-to-end training pipeline.
+    """End-to-end training pipeline with automatic checkpoint resume.
     
     Args:
         schema_path: Path to frozen feature schema
@@ -785,6 +1185,7 @@ def train_baseline(
         use_chunked_val: Whether to use chunked validation loading
         val_chunk_size: Days per validation chunk (if use_chunked_val=True)
         notes: Optional notes
+        force_restart: If True, ignore existing checkpoints and restart training
         
     Returns:
         Summary dict with results
@@ -793,6 +1194,20 @@ def train_baseline(
         raise ImportError("lightgbm is required for training. Install with: pip install lightgbm")
     
     start_time = time.time()
+    
+    # 0. Check for resumable checkpoint (unless force_restart)
+    resume_info = None
+    if use_chunked and not force_restart:
+        logger.info("=" * 60)
+        logger.info("STEP 0: Checking for resumable checkpoint")
+        logger.info("=" * 60)
+        resume_info = load_checkpoint_for_resume(output_dir)
+        if resume_info:
+            logger.info("✅ Will resume from previous training session")
+        else:
+            logger.info("Starting fresh training session")
+    elif force_restart:
+        logger.info("🔄 Force restart requested - ignoring any existing checkpoints")
     
     # 1. Load frozen schema
     logger.info("=" * 60)
@@ -828,8 +1243,8 @@ def train_baseline(
         n_val_samples = len(val_X)
     
     # Get validation date range
-    val_dirs = get_date_dirs_for_split(val_dir, "validation")
-    val_date_range = f"{val_dirs[0].name} to {val_dirs[-1].name}" if val_dirs else "unknown"
+    val_files = get_date_dirs_for_split(val_dir, "validation")
+    val_date_range = f"{val_files[0].stem.split('_')[0]} to {val_files[-1].stem.split('_')[0]}" if val_files else "unknown"
     
     # 3. Train model
     logger.info("=" * 60)
@@ -855,6 +1270,7 @@ def train_baseline(
             val_y=val_y,
             val_weights=val_weights,
             params=params,
+            output_dir=output_dir,
             chunk_size_days=chunk_size_days,
             num_iterations_per_chunk=TRAINING_CONFIG.get("iterations_per_chunk", 500),
             early_stopping_rounds=TRAINING_CONFIG["early_stopping_rounds"],
@@ -863,17 +1279,18 @@ def train_baseline(
             val_dir=val_dir if use_chunked_val else None,
             use_chunked_val=use_chunked_val,
             val_chunk_size=val_chunk_size,
+            resume_info=resume_info,
         )
         
-        train_dirs = get_date_dirs_for_split(train_dir, "train")
-        train_date_range = f"{train_dirs[0].name} to {train_dirs[-1].name}" if train_dirs else "unknown"
+        train_files = get_date_dirs_for_split(train_dir, "train")
+        train_date_range = f"{train_files[0].stem.split('_')[0]} to {train_files[-1].stem.split('_')[0]}" if train_files else "unknown"
     else:
         # Load full training data
-        train_dirs = get_date_dirs_for_split(train_dir, "train")
-        train_date_range = f"{train_dirs[0].name} to {train_dirs[-1].name}" if train_dirs else "unknown"
+        train_files = get_date_dirs_for_split(train_dir, "train")
+        train_date_range = f"{train_files[0].stem.split('_')[0]} to {train_files[-1].stem.split('_')[0]}" if train_files else "unknown"
         
         train_X, train_y, train_weights = load_date_chunk(
-            train_dirs,
+            train_files,
             schema,
             target_col=TRAINING_CONFIG["target_col"],
             weight_col=TRAINING_CONFIG["weight_col"],
@@ -949,15 +1366,15 @@ Examples:
     # Train with chunked loading (default)
     python -m dwarka.trainer \\
         --schema artifacts/v1/features/feature_schema.json \\
-        --train-dir artifacts/v1/training \\
-        --val-dir artifacts/v1/training \\
+        --train-dir artifacts/train \\
+        --val-dir artifacts/val \\
         --output-dir dwarka/models/baseline_v1
 
     # Train with full data in memory
     python -m dwarka.trainer \\
         --schema artifacts/v1/features/feature_schema.json \\
-        --train-dir artifacts/v1/training \\
-        --val-dir artifacts/v1/training \\
+        --train-dir artifacts/train \\
+        --val-dir artifacts/val \\
         --output-dir dwarka/models/baseline_v1 \\
         --no-chunked
 """,
@@ -972,13 +1389,13 @@ Examples:
     parser.add_argument(
         "--train-dir",
         type=Path,
-        default=Path("artifacts/v1/training"),
+        default=Path("artifacts/train"),
         help="Directory with training data",
     )
     parser.add_argument(
         "--val-dir",
         type=Path,
-        default=Path("artifacts/v1/training"),
+        default=Path("artifacts/val"),
         help="Directory with validation data",
     )
     parser.add_argument(
@@ -1021,6 +1438,11 @@ Examples:
         default="",
         help="Optional notes to include in metadata",
     )
+    parser.add_argument(
+        "--force-restart",
+        action="store_true",
+        help="Force restart training from scratch, ignoring any existing checkpoints",
+    )
     
     return parser.parse_args()
 
@@ -1041,6 +1463,7 @@ def main() -> int:
             use_chunked_val=not args.no_chunked_val,
             val_chunk_size=args.val_chunk_size,
             notes=args.notes,
+            force_restart=args.force_restart,
         )
         
         print("\n" + "=" * 60)
