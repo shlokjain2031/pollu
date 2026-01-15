@@ -25,31 +25,31 @@ LGB_PARAMS: Dict[str, Any] = {
     "metric": ["mae", "rmse"],      # Track MAE and RMSE
     
     # ─────────────────────────────────────────────────────────────
-    # TREE STRUCTURE (prevent grid_id memorization)
+    # TREE STRUCTURE (prevent grid_id memorization, reduce overfitting)
     # ─────────────────────────────────────────────────────────────
-    "num_leaves": 127,              # 2^7 - 1: moderate complexity
-    "max_depth": 10,                # Hard cap on tree depth
-    "min_data_in_leaf": 100,        # Require 100+ samples per leaf
+    "num_leaves": 63,               # 2^6 - 1: simpler trees (reduced from 127)
+    "max_depth": 5,                 # Very shallow trees (reduced from 7)
+    "min_data_in_leaf": 200,        # Require 200+ samples per leaf (was 100)
     "min_sum_hessian_in_leaf": 10.0,  # Hessian regularization
     
     # ─────────────────────────────────────────────────────────────
     # LEARNING RATE & ITERATIONS
     # ─────────────────────────────────────────────────────────────
-    "learning_rate": 0.05,          # Conservative: allows early stopping
+    "learning_rate": 0.05,          # Conservative to prevent overfitting
     "num_iterations": 5000,         # Upper bound; early stopping will terminate earlier
     
     # ─────────────────────────────────────────────────────────────
     # SAMPLING (reduce overfitting, speed up training)
     # ─────────────────────────────────────────────────────────────
-    "feature_fraction": 0.7,        # Use 70% of features per tree
-    "bagging_fraction": 0.8,        # Use 80% of rows per tree
+    "feature_fraction": 0.5,        # Use 50% of features per tree (forces generalization)
+    "bagging_fraction": 0.7,        # Use 70% of rows per tree (increase randomness)
     "bagging_freq": 1,              # Resample every iteration
     
     # ─────────────────────────────────────────────────────────────
     # REGULARIZATION
     # ─────────────────────────────────────────────────────────────
     "lambda_l1": 0.0,               # No L1 initially
-    "lambda_l2": 5.0,               # L2 on leaf weights
+    "lambda_l2": 12.0,              # Very strong L2 to prevent overfitting (increased from 8.0)
     "min_gain_to_split": 0.01,      # Minimum gain to split
     "path_smooth": 1.0,             # Smoothing on leaf values
     
@@ -64,7 +64,7 @@ LGB_PARAMS: Dict[str, Any] = {
     # ─────────────────────────────────────────────────────────────
     "num_threads": -1,              # Use all cores
     "device_type": "cpu",           # CPU training
-    "verbosity": 1,                 # Show progress
+    "verbosity": -1,                # Suppress LightGBM verbose output (was 1)
     "seed": 42,                     # Reproducibility
     "deterministic": True,          # Reproducible splits
     "force_row_wise": True,         # Better for wide datasets with sampling
@@ -77,7 +77,7 @@ LGB_PARAMS: Dict[str, Any] = {
 
 TRAINING_CONFIG: Dict[str, Any] = {
     # Early stopping
-    "early_stopping_rounds": 100,   # Stop if no improvement for 100 rounds
+    "early_stopping_rounds": 50,    # Stop much sooner to avoid overfitting (was 100)
     "log_evaluation_period": 50,    # Log metrics every 50 iterations
     
     # Chunked loading

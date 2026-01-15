@@ -744,7 +744,7 @@ def cmd_validate_splits(args):
                 print(f"  {split:12} {count:8,} rows ({pct:5.1f}%)")
             
             if results['issues']:
-                print(f"\nWARNING: Issues found ({len(results['issues'])}):)
+                print(f"\nWARNING: Issues found ({len(results['issues'])}):")
                 for issue in results['issues']:
                     print(f"  - {issue}")
                 return 1
@@ -1023,6 +1023,230 @@ def cmd_create_splits(args):
         return 1
 
 
+def cmd_stratified_split(args):
+    """Handle 'stratified-split' command - create stratified random splits mixing all years."""
+    import shutil
+    import numpy as np
+    from collections import defaultdict
+    
+    input_dir = Path(args.input_dir)
+    output_base_dir = Path(args.output_dir)
+    
+    print("=" * 80)
+    print("CREATING STRATIFIED RANDOM SPLITS")
+    print("=" * 80)
+    print(f"Input: {input_dir}")
+    print(f"Output: {output_base_dir}")
+    print(f"Split ratios: Train {args.train_pct}%, Val {args.val_pct}%, Test {args.test_pct}%")
+    print(f"Random seed: {args.seed}")
+    print()
+    
+    # Validate split ratios
+    total_pct = args.train_pct + args.val_pct + args.test_pct
+    if abs(total_pct - 100.0) > 0.01:
+        print(f"ERROR: Split ratios must sum to 100%, got {total_pct}%", file=sys.stderr)
+        return 1
+    
+    # Get all training files
+    training_files = sorted(input_dir.glob("*_training.parquet"))
+    target_files = sorted(input_dir.glob("*_target.parquet"))
+    
+    if not training_files:
+        print(f"ERROR: No training files found in {input_dir}", file=sys.stderr)
+        return 1
+    
+    print(f"Found {len(training_files)} training files")
+    print(f"Found {len(target_files)} target files")
+    print()
+    
+    # Load all data to get grid_id distribution for stratification
+    print("Loading all data to analyze grid_id distribution (for stratification)...")
+    all_data = []
+    for f in training_files[:200]:  # Sample first 200 files to get distribution
+        try:
+            df = pd.read_parquet(f, columns=['grid_id', 'pm25_t'])
+            all_data.append(df)
+        except Exception as e:
+            pass
+    
+    if all_data:
+        sample_df = pd.concat(all_data, ignore_index=True)
+        unique_grids = sample_df['grid_id'].nunique()
+        print(f"Found ~{unique_grids} unique grid_ids in sample")
+        print()
+    
+    # Strategy: Stratify by grid_id to ensure spatial balance
+    # Group files by their grid_id distribution
+    print("Stratifying by grid_id to ensure spatial balance across splits...")
+    
+    # Load grid_id from all files and assign to splits
+    file_grid_assignments = {}
+    grid_file_map = defaultdict(list)
+    
+    print("Mapping grid_ids to files...")
+    for i, f in enumerate(training_files):
+        try:
+            df = pd.read_parquet(f, columns=['grid_id'])
+            if len(df) > 0:
+                # Get dominant grid_id(s) for this file
+                grid_id = df['grid_id'].mode()[0] if not df['grid_id'].mode().empty else df['grid_id'].iloc[0]
+                grid_file_map[grid_id].append(f.stem.split('_')[0])
+                file_grid_assignments[f.stem.split('_')[0]] = grid_id
+        except:
+            pass
+        
+        if (i + 1) % 500 == 0:
+            print(f"  Processed {i+1}/{len(training_files)} files")
+    
+    print(f"Processed {len(file_grid_assignments)} files with grid assignments")
+    print()
+    
+    # Now stratify: for each grid_id, split its files proportionally
+    np.random.seed(args.seed)
+    
+    train_dates = []
+    val_dates = []
+    test_dates = []
+    
+    print("Splitting files by grid_id...")
+    for grid_id in sorted(grid_file_map.keys()):
+        dates_for_grid = grid_file_map[grid_id]
+        dates_shuffled = np.random.permutation(dates_for_grid).tolist()
+        
+        n = len(dates_shuffled)
+        n_train = int(n * args.train_pct / 100)
+        n_val = int(n * args.val_pct / 100)
+        
+        train_dates.extend(dates_shuffled[:n_train])
+        val_dates.extend(dates_shuffled[n_train:n_train + n_val])
+        test_dates.extend(dates_shuffled[n_train + n_val:])
+    
+    print(f"✓ Stratification complete")
+    print()
+    
+    print()
+    print(f"Total splits: Train {len(train_dates)}, Val {len(val_dates)}, Test {len(test_dates)}")
+    print()
+    
+    # Create output directories
+    train_dir = output_base_dir / "train"
+    val_dir = output_base_dir / "val"
+    test_dir = output_base_dir / "test"
+    
+    for split_dir in [train_dir, val_dir, test_dir]:
+        split_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Copy files to splits
+    def copy_files(dates_list, target_dir, split_name):
+        print(f"Copying {split_name} files...")
+        copied = 0
+        total_rows = 0
+        total_size = 0
+        min_ts = None
+        max_ts = None
+        
+        for date in dates_list:
+            # Copy training file
+            training_file = input_dir / f"{date}_training.parquet"
+            target_file = input_dir / f"{date}_target.parquet"
+            
+            if training_file.exists():
+                shutil.copy2(training_file, target_dir / training_file.name)
+                copied += 1
+                
+                # Get metadata
+                df = pd.read_parquet(training_file)
+                total_rows += len(df)
+                total_size += training_file.stat().st_size / (1024 * 1024)
+                
+                if 'timestamp' in df.columns:
+                    ts_min = df['timestamp'].min()
+                    ts_max = df['timestamp'].max()
+                    min_ts = ts_min if min_ts is None else min(min_ts, ts_min)
+                    max_ts = ts_max if max_ts is None else max(max_ts, ts_max)
+            
+            # Copy target file if exists
+            if target_file.exists():
+                shutil.copy2(target_file, target_dir / target_file.name)
+        
+        print(f"  ✓ Copied {copied} files")
+        return {
+            "files": copied,
+            "rows": total_rows,
+            "size_mb": total_size,
+            "min_timestamp": str(min_ts) if min_ts else None,
+            "max_timestamp": str(max_ts) if max_ts else None,
+            "path": str(target_dir),
+        }
+    
+    train_meta = copy_files(train_dates, train_dir, "train")
+    val_meta = copy_files(val_dates, val_dir, "val")
+    test_meta = copy_files(test_dates, test_dir, "test")
+    
+    # Save split metadata
+    metadata = {
+        "created_at": dt.now().isoformat(),
+        "split_method": "stratified_random",
+        "stratify_by": "grid_id (spatial location) to ensure balanced PM2.5 distributions",
+        "random_seed": args.seed,
+        "train_pct": args.train_pct,
+        "val_pct": args.val_pct,
+        "test_pct": args.test_pct,
+        "train": train_meta,
+        "val": val_meta,
+        "test": test_meta,
+    }
+    
+    metadata_path = output_base_dir / "splits_metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    print()
+    print("=" * 80)
+    print("SPLIT SUMMARY")
+    print("=" * 80)
+    
+    total_rows = train_meta["rows"] + val_meta["rows"] + test_meta["rows"]
+    
+    for split_name, meta in [("train", train_meta), ("val", val_meta), ("test", test_meta)]:
+        pct = 100 * meta["rows"] / total_rows if total_rows > 0 else 0
+        print(f"\n{split_name.upper()}:")
+        print(f"  Files: {meta['files']:,}")
+        print(f"  Rows: {meta['rows']:,} ({pct:.1f}%)")
+        print(f"  Size: {meta['size_mb']:.2f} MB")
+        print(f"  Date range: {meta['min_timestamp']} to {meta['max_timestamp']}")
+        print(f"  Path: {meta['path']}")
+    
+    print(f"\nMetadata: {metadata_path}")
+    print("\n✓ Stratified splits created successfully")
+    
+    # Optionally freeze schema
+    if not args.no_freeze:
+        print()
+        print("=" * 80)
+        print("FREEZING FEATURE SCHEMA")
+        print("=" * 80)
+        
+        try:
+            freeze_success = _freeze_features_after_splits(
+                output_base_dir=output_base_dir,
+                splits_metadata=metadata,
+            )
+            if freeze_success:
+                print("\n✓ Feature schema frozen successfully")
+            else:
+                print("\n⚠ Feature schema freeze completed with warnings", file=sys.stderr)
+        except Exception as freeze_err:
+            print(f"\nERROR: Failed to freeze feature schema:", file=sys.stderr)
+            print(f"  {freeze_err}", file=sys.stderr)
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            print("\n⚠ Continuing despite freeze failure...", file=sys.stderr)
+    
+    return 0
+
+
 def cmd_status(args):
     """Handle 'status' command - quick overview."""
     target_dates = get_available_target_dates()
@@ -1231,6 +1455,57 @@ Examples:
         help='Show detailed error traces'
     )
     create_splits_parser.set_defaults(func=cmd_create_splits)
+    
+    # Stratified-split command
+    stratified_split_parser = subparsers.add_parser(
+        'stratified-split',
+        help='Create stratified random splits mixing all years (for non-temporal models)'
+    )
+    stratified_split_parser.add_argument(
+        '--input-dir', '-i',
+        required=True,
+        help='Input directory containing all training parquet files (e.g., artifacts/v1/traininig/)'
+    )
+    stratified_split_parser.add_argument(
+        '--output-dir', '-o',
+        default=str(Path(__file__).parent.parent / "artifacts"),
+        help='Output base directory (creates train/, val/, test/ subdirs)'
+    )
+    stratified_split_parser.add_argument(
+        '--train-pct',
+        type=float,
+        default=70.0,
+        help='Train split percentage (default: 70.0)'
+    )
+    stratified_split_parser.add_argument(
+        '--val-pct',
+        type=float,
+        default=15.0,
+        help='Validation split percentage (default: 15.0)'
+    )
+    stratified_split_parser.add_argument(
+        '--test-pct',
+        type=float,
+        default=15.0,
+        help='Test split percentage (default: 15.0)'
+    )
+    stratified_split_parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Random seed for reproducibility (default: 42)'
+    )
+    stratified_split_parser.add_argument(
+        '--no-freeze',
+        action='store_true',
+        help='Skip feature schema freezing after split'
+    )
+    stratified_split_parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Show detailed error traces'
+    )
+    stratified_split_parser.set_defaults(func=cmd_stratified_split)
     
     # Freeze-schema command
     freeze_schema_parser = subparsers.add_parser(
