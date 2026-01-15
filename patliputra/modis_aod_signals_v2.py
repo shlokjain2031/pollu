@@ -48,6 +48,8 @@ import shutil
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from typing import List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ee
 import numpy as np
@@ -87,6 +89,16 @@ OUTPUT_COLUMNS = {
     "AOD_Uncertainty": "aod_uncertainty",
     "AOD_QA": "aod_qa",
     "Column_WV": "column_wv",
+}
+
+# MODIS MAIAC scale factors (from product documentation)
+# AOD values are stored as integers, need to multiply by 0.001
+# https://lpdaac.usgs.gov/products/mcd19a2v061/
+SCALE_FACTORS = {
+    "aod_047": 0.001,
+    "aod_055": 0.001,
+    "aod_uncertainty": 0.0001,  # Uncertainty scale factor
+    "column_wv": 0.001,  # Column water vapor in cm
 }
 
 
@@ -302,6 +314,11 @@ def fetch_aod_at_pixel_centroids(
     keep_cols = [c for c in expected_cols if c in df.columns]
     df = df[keep_cols]
     
+    # Apply scale factors to AOD bands
+    for col, scale_factor in SCALE_FACTORS.items():
+        if col in df.columns:
+            df[col] = df[col] * scale_factor
+    
     # Convert aod_qa to int32
     if 'aod_qa' in df.columns:
         df['aod_qa'] = df['aod_qa'].astype('Int32')
@@ -351,11 +368,255 @@ def write_artifact_atomic(
         raise
 
 
+def create_date_batches(dates: List[str], batch_size: int = 5) -> List[List[str]]:
+    """
+    Group dates into batches for parallel processing.
+    
+    Parameters
+    ----------
+    dates : List[str]
+        List of dates in YYYY-MM-DD format
+    batch_size : int
+        Number of dates per batch (default: 5)
+    
+    Returns
+    -------
+    List[List[str]]
+        List of date batches
+    """
+    batches = []
+    for i in range(0, len(dates), batch_size):
+        batches.append(dates[i:i + batch_size])
+    return batches
+
+
+def process_date_batch(
+    date_batch: List[str],
+    pixel_grid: pd.DataFrame,
+    bbox: tuple,
+    output_dir: Path,
+    manifest: ModisAodManifest,
+) -> Dict[str, str]:
+    """
+    Process a batch of dates in a single Earth Engine API call.
+    
+    This stacks multiple dates' images into a multi-band image and samples
+    once, significantly reducing API calls.
+    
+    Parameters
+    ----------
+    date_batch : List[str]
+        List of dates to process (e.g., ['2024-01-01', '2024-01-02', ...])
+    pixel_grid : pd.DataFrame
+        MODIS pixel grid with centroids
+    bbox : tuple
+        Bounding box
+    output_dir : Path
+        Output directory for parquet files
+    manifest : ModisAodManifest
+        Manifest for tracking
+    
+    Returns
+    -------
+    Dict[str, str]
+        Status for each date: {date: 'success' | 'skipped' | 'no_data' | 'error: msg'}
+    """
+    results = {}
+    
+    # Check which dates need processing
+    dates_to_process = []
+    for date_str in date_batch:
+        artifact_path = output_dir / f"{date_str}.parquet"
+        if artifact_path.exists():
+            results[date_str] = 'skipped'
+        else:
+            dates_to_process.append(date_str)
+    
+    if not dates_to_process:
+        return results
+    
+    try:
+        # Get images for all dates in batch
+        images_dict = {}
+        for date_str in dates_to_process:
+            try:
+                image = get_modis_aod_image(date_str, bbox)
+                images_dict[date_str] = image
+            except RuntimeError as e:
+                if "No MODIS AOD image" in str(e):
+                    results[date_str] = 'no_data'
+                else:
+                    results[date_str] = f'error: {e}'
+        
+        if not images_dict:
+            return results
+        
+        # Stack all images into multi-band image
+        # Each date's 5 bands become: aod_047_DATE, aod_055_DATE, etc.
+        stacked_bands = []
+        band_to_date = {}  # Maps band name -> (date, original_band)
+        
+        for date_str, image in images_dict.items():
+            for band_name in MODIS_AOD_BANDS:
+                # Rename band to include date
+                new_band_name = f"{band_name}_{date_str.replace('-', '')}"
+                stacked_bands.append(image.select([band_name]).rename([new_band_name]))
+                band_to_date[new_band_name] = (date_str, band_name)
+        
+        # Combine all bands into single image
+        if len(stacked_bands) == 1:
+            stacked_image = stacked_bands[0]
+        else:
+            stacked_image = stacked_bands[0]
+            for band_img in stacked_bands[1:]:
+                stacked_image = stacked_image.addBands(band_img)
+        
+        # Sample at pixel centroids (SINGLE API CALL for all dates!)
+        df_multi = fetch_aod_at_pixel_centroids_multidates(stacked_image, pixel_grid, band_to_date)
+        
+        # Split multi-date dataframe into per-date dataframes and write
+        for date_str in images_dict.keys():
+            date_key = date_str.replace('-', '')
+            
+            # Extract columns for this date
+            date_cols = ['pixel_id', 'pixel_row', 'pixel_col']
+            for orig_band, out_col in OUTPUT_COLUMNS.items():
+                multi_col = f"{orig_band}_{date_key}"
+                if multi_col in df_multi.columns:
+                    date_cols.append(multi_col)
+            
+            df_date = df_multi[date_cols].copy()
+            
+            # Rename columns back to standard names
+            rename_map = {}
+            for orig_band, out_col in OUTPUT_COLUMNS.items():
+                multi_col = f"{orig_band}_{date_key}"
+                if multi_col in df_date.columns:
+                    rename_map[multi_col] = out_col
+            df_date = df_date.rename(columns=rename_map)
+            
+            # Apply scale factors to AOD bands
+            for col, scale_factor in SCALE_FACTORS.items():
+                if col in df_date.columns:
+                    df_date[col] = df_date[col] * scale_factor
+            
+            # Convert aod_qa to Int32
+            if 'aod_qa' in df_date.columns:
+                df_date['aod_qa'] = df_date['aod_qa'].astype('Int32')
+            
+            # Count valid values
+            valid_count = df_date['aod_055'].notna().sum() if 'aod_055' in df_date.columns else 0
+            
+            # Metadata
+            metadata = {
+                "date": date_str,
+                "city": manifest.city,
+                "source": "MODIS/061/MCD19A2_GRANULES",
+                "satellite": "Terra",
+                "resolution_m": 1000,
+                "bands": list(OUTPUT_COLUMNS.values()),
+                "total_pixels": len(df_date),
+                "valid_pixels": int(valid_count),
+                "null_fraction": round(1 - valid_count / len(df_date), 3) if len(df_date) > 0 else 1.0,
+                "bbox": bbox,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "batch_processing": True,
+            }
+            
+            # Write artifact
+            artifact_path = output_dir / f"{date_str}.parquet"
+            try:
+                write_artifact_atomic(df_date, artifact_path, metadata, manifest, date_str)
+                results[date_str] = 'success'
+            except Exception as e:
+                results[date_str] = f'error: {e}'
+        
+        return results
+    
+    except Exception as e:
+        # Batch failed entirely
+        for date_str in dates_to_process:
+            if date_str not in results:
+                results[date_str] = f'batch_error: {e}'
+        return results
+
+
+def fetch_aod_at_pixel_centroids_multidates(
+    stacked_image: ee.Image,
+    pixel_grid: pd.DataFrame,
+    band_to_date: Dict[str, tuple],
+) -> pd.DataFrame:
+    """
+    Fetch multi-date AOD values from stacked image.
+    
+    Similar to fetch_aod_at_pixel_centroids but handles multi-band image
+    where bands are named like 'Optical_Depth_055_20240101'.
+    
+    Parameters
+    ----------
+    stacked_image : ee.Image
+        Multi-band image with bands for multiple dates
+    pixel_grid : pd.DataFrame
+        MODIS pixel grid
+    band_to_date : Dict[str, tuple]
+        Maps band name to (date_str, original_band_name)
+    
+    Returns
+    -------
+    pd.DataFrame
+        All columns from all dates, pivot format
+    """
+    # Convert pixel grid to EE FeatureCollection
+    features = []
+    for _, row in pixel_grid.iterrows():
+        feat = ee.Feature(
+            ee.Geometry.Point([row['pixel_lon'], row['pixel_lat']])
+        )
+        feat = feat.set({
+            'pixel_id': row['pixel_id'],
+            'pixel_row': row['pixel_row'],
+            'pixel_col': row['pixel_col'],
+        })
+        features.append(feat)
+    
+    fc = ee.FeatureCollection(features)
+    
+    # Sample all bands at once
+    reduced = stacked_image.reduceRegions(
+        collection=fc,
+        reducer=ee.Reducer.first(),
+        scale=1000,
+        tileScale=1,
+    )
+    
+    # Fetch with retry
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            result_list = reduced.getInfo()["features"]
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise RuntimeError(f"EE getInfo failed after {max_retries} attempts: {e}")
+            wait_time = 2 ** attempt
+            time.sleep(wait_time)
+    
+    # Extract properties
+    data = []
+    for feat in result_list:
+        props = feat["properties"]
+        data.append(props)
+    
+    df = pd.DataFrame(data)
+    
+    return df
+
+
 def main():
     setup_logging("modis_aod_v2")
     
     parser = argparse.ArgumentParser(
-        description="Fetch MODIS MAIAC AOD at native 1km resolution"
+        description="Fetch MODIS MAIAC AOD at native 1km resolution (batched & parallel)"
     )
     parser.add_argument(
         "--city",
@@ -392,6 +653,18 @@ def main():
         type=str,
         default=None,
         help="Google Earth Engine project ID",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=5,
+        help="Number of dates per batch (default: 5, reduces API calls)",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Number of concurrent batch workers (default: 4)",
     )
     
     args = parser.parse_args()
@@ -438,80 +711,82 @@ def main():
     output_dir = args.artifacts_root / "v1" / "modis_aod" / args.city
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Create date batches
+    date_batches = create_date_batches(dates, batch_size=args.batch_size)
+    print(f"\nCreated {len(date_batches)} batches ({args.batch_size} dates per batch)")
+    print(f"Parallel workers: {args.max_workers}")
+    
     # Track progress
     new_count = 0
     skipped_count = 0
+    no_data_count = 0
     failed_count = 0
     failed_dates = []
     
     start_time = time.time()
+    processed_batches = 0
     
-    for idx, date_str in enumerate(dates, start=1):
-        artifact_path = output_dir / f"{date_str}.parquet"
+    # Process batches in parallel
+    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        # Submit all batch jobs
+        futures = {
+            executor.submit(
+                process_date_batch,
+                batch,
+                pixel_grid,
+                bbox,
+                output_dir,
+                manifest
+            ): batch
+            for batch in date_batches
+        }
         
-        # Skip if exists
-        if artifact_path.exists():
-            skipped_count += 1
-            if idx % 100 == 0:
-                print(f"[{idx}/{len(dates)}] Skipped {skipped_count} existing, processed {new_count} new")
-            continue
-        
-        try:
-            # Get MODIS image for date
-            image = get_modis_aod_image(date_str, bbox)
+        # Process results as they complete
+        for future in as_completed(futures):
+            batch = futures[future]
+            processed_batches += 1
             
-            # Fetch AOD at pixel centroids (SINGLE API CALL)
-            df = fetch_aod_at_pixel_centroids(image, pixel_grid)
+            try:
+                batch_results = future.result()
+                
+                # Aggregate stats
+                for date_str, status in batch_results.items():
+                    if status == 'success':
+                        new_count += 1
+                    elif status == 'skipped':
+                        skipped_count += 1
+                    elif status == 'no_data':
+                        no_data_count += 1
+                    elif status.startswith('error') or status.startswith('batch_error'):
+                        failed_count += 1
+                        failed_dates.append((date_str, status))
+                
+                # Progress update
+                if processed_batches % 10 == 0 or processed_batches == len(date_batches):
+                    elapsed = time.time() - start_time
+                    total_processed = new_count + skipped_count + no_data_count + failed_count
+                    rate = total_processed / elapsed if elapsed > 0 else 0
+                    remaining_dates = len(dates) - total_processed
+                    eta_sec = remaining_dates / rate if rate > 0 else 0
+                    
+                    print(f"[Batch {processed_batches}/{len(date_batches)}] "
+                          f"New: {new_count}, Skipped: {skipped_count}, "
+                          f"No data: {no_data_count}, Failed: {failed_count} | "
+                          f"Rate: {rate:.1f} dates/sec | ETA: {eta_sec/60:.1f} min")
             
-            # Count valid values
-            valid_count = df['aod_055'].notna().sum() if 'aod_055' in df.columns else 0
-            
-            # Prepare metadata
-            metadata = {
-                "date": date_str,
-                "city": args.city,
-                "source": "MODIS/061/MCD19A2_GRANULES",
-                "satellite": "Terra",
-                "resolution_m": 1000,
-                "bands": list(OUTPUT_COLUMNS.values()),
-                "total_pixels": len(df),
-                "valid_pixels": int(valid_count),
-                "null_fraction": round(1 - valid_count / len(df), 3) if len(df) > 0 else 1.0,
-                "bbox": bbox,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            
-            # Write artifact
-            write_artifact_atomic(df, artifact_path, metadata, manifest, date_str)
-            
-            new_count += 1
-            
-            # Progress update
-            if idx % 50 == 0 or idx == len(dates):
-                elapsed = time.time() - start_time
-                rate = new_count / elapsed if elapsed > 0 else 0
-                remaining = (len(dates) - idx) / rate if rate > 0 else 0
-                print(f"[{idx}/{len(dates)}] New: {new_count}, Skipped: {skipped_count}, "
-                      f"Failed: {failed_count} | Rate: {rate:.1f} dates/sec | "
-                      f"ETA: {remaining/60:.1f} min")
-        
-        except RuntimeError as e:
-            # No image for this date (expected for some dates)
-            if "No MODIS AOD image" in str(e):
-                skipped_count += 1
-            else:
-                failed_count += 1
-                failed_dates.append((date_str, str(e)))
-        except Exception as e:
-            failed_count += 1
-            failed_dates.append((date_str, str(e)))
+            except Exception as e:
+                # Entire batch failed
+                for date_str in batch:
+                    failed_count += 1
+                    failed_dates.append((date_str, f"batch exception: {e}"))
     
     # Summary
     elapsed_total = time.time() - start_time
     print(f"\n{'='*60}")
     print(f"Completed in {elapsed_total/60:.1f} minutes")
     print(f"  - New: {new_count}")
-    print(f"  - Skipped (existing or no data): {skipped_count}")
+    print(f"  - Skipped (existing): {skipped_count}")
+    print(f"  - No data: {no_data_count}")
     print(f"  - Failed: {failed_count}")
     print(f"Output: {output_dir}")
     
@@ -525,7 +800,7 @@ def main():
         # Write failed log
         failed_log = output_dir / "failed_dates.log"
         with open(failed_log, "w") as f:
-            f.write(f"# Failed MODIS AOD fetches\n")
+            f.write(f"# Failed MODIS AOD fetches (batched processing)\n")
             f.write(f"# Generated: {datetime.now(timezone.utc).isoformat()}\n\n")
             for date_str, error in failed_dates:
                 f.write(f"{date_str} | {error}\n")
