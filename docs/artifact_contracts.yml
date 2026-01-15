@@ -166,3 +166,51 @@ atomic_write: tmp -> rename -> mark_ok
 frequency: daily
 atomic_write: tmp -> rename -> mark_ok
 frequency: static or per-year
+
+---
+artifact_type: modis_aod_signals
+description: |
+  MODIS MAIAC Aerosol Optical Depth (AOD) values sampled to the canonical 30m grid.
+  Data from Terra satellite only. Raw values stored as-is; downstream handles QA filtering.
+  Native resolution 1000m, distributed to 30m grid cells via nearest-pixel assignment.
+identity_fields:
+  - artifact_type: modis_aod_signals
+  - spatial_id       # city code (string)
+  - timestamp        # ISO date (YYYY-MM-DD)
+  - version          # processing version (git-sha or semantic)
+path_template: artifacts/v1/modis_aod/{spatial_id}/{timestamp}.parquet
+format: parquet (one file per date per city)
+schema_notes:
+  required_columns:
+    - grid_id (int64)
+    - aod_047 (float64)       # AOD at 470nm, scale 0.001, range 0-5.0
+    - aod_055 (float64)       # AOD at 550nm, scale 0.001, range 0-5.0
+    - aod_uncertainty (float64)  # Uncertainty estimate, scale 0.0001
+    - aod_qa (Int32)          # Quality assurance flags (bitmask)
+    - column_wv (float64)     # Column water vapor (cm), scale 0.001
+producer_metadata:
+  - source: MODIS/061/MCD19A2_GRANULES
+  - satellite: Terra
+  - native_resolution_m: 1000
+  - sampling_scale_m: 1000
+  - created_at: ISO timestamp
+  - bbox: [west, south, east, north]
+atomic_write:
+  - write to temporary file in same directory (e.g. <name>.parquet.tmp)
+  - use atomic rename (shutil.move) to final path
+  - call manifest.mark_ok only after successful rename
+manifest_rules:
+  - primary_key: (city, date, version)
+  - lifecycle: missing -> producing -> ok | error
+  - manifest_path: artifacts/v1/modis_aod/{city}/manifest/modis_aod_manifest.db
+frequency: daily (depends on Terra overpass availability)
+provenance_and_qc:
+  - include source collection/date and granule counts in artifact_meta
+  - QA filtering deferred to downstream processing
+example:
+  identity:
+    artifact_type: modis_aod_signals
+    spatial_id: mumbai
+    timestamp: 2024-01-15
+    version: v1
+  path: artifacts/v1/modis_aod/mumbai/2024-01-15.parquet
