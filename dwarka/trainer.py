@@ -37,6 +37,8 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+import gc
 
 import numpy as np
 import pandas as pd
@@ -66,6 +68,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Suppress LightGBM's verbose leaf split warnings
+logging.getLogger("lightgbm").setLevel(logging.WARNING)
 
 
 # =============================================================================
@@ -509,11 +514,22 @@ def get_date_dirs_for_split(
     return training_files
 
 
+def _load_parquet_file(path: Path) -> Optional[pd.DataFrame]:
+    """Load a single parquet file (helper for parallel loading)."""
+    try:
+        if path.exists():
+            return pd.read_parquet(path)
+    except Exception:
+        pass
+    return None
+
+
 def load_date_chunk(
     date_files: List[Path],
     schema: FrozenFeatureSchema,
     target_col: str = "pm25_t",
     weight_col: str = "target_trust",
+    n_workers: int = 4,
 ) -> Tuple[pd.DataFrame, pd.Series, np.ndarray]:
     """Load a chunk of training files and extract X, y, weights.
     
@@ -522,18 +538,17 @@ def load_date_chunk(
         schema: Frozen feature schema
         target_col: Name of target column
         weight_col: Name of weight column
+        n_workers: Number of parallel workers for file loading
         
     Returns:
         Tuple of (X, y, weights)
     """
-    dfs = []
-    found_count = 0
+    # Parallel file loading for better I/O performance
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        results = list(executor.map(_load_parquet_file, date_files))
     
-    for training_file in date_files:
-        if training_file.exists():
-            df = pd.read_parquet(training_file)
-            dfs.append(df)
-            found_count += 1
+    dfs = [df for df in results if df is not None]
+    found_count = len(dfs)
     
     if not dfs:
         logger.warning(f"WARNING: No training files found in {len(date_files)} files")
@@ -554,15 +569,9 @@ def load_date_chunk(
     # Extract features using frozen schema
     X = schema.extract_X(combined)
     
-    # Validate and convert feature dtypes to numeric (edge case handling)
-    non_numeric_cols = []
-    all_nan_cols = []
-    
-    for col in X.columns:
-        if X[col].dtype == object or X[col].dtype.name.startswith('string'):
-            non_numeric_cols.append(col)
-        elif X[col].isna().all():
-            all_nan_cols.append(col)
+    # Validate and convert feature dtypes to numeric (vectorized for performance)
+    non_numeric_cols = X.select_dtypes(include=['object', 'string']).columns.tolist()
+    all_nan_cols = X.columns[X.isna().all()].tolist()
     
     if non_numeric_cols:
         logger.warning(f"Found {len(non_numeric_cols)} non-numeric feature columns: {non_numeric_cols}")
@@ -915,19 +924,19 @@ def train_chunked(
             reference=val_ds if (model is None and val_ds is not None) else None,
         )
         
-        # If using chunked validation, load first validation chunk for this iteration
+        # If using chunked validation and val_ds not yet created, load first chunk ONCE
+        # (This block only executes on the first training chunk iteration)
         if use_chunked_val and val_ds is None:
-            # Load first validation chunk for early stopping
-            val_chunks = list(iter_validation_chunks(
+            # Load first validation chunk for early stopping (single iteration, not full list)
+            for val_X_chunk, val_y_chunk, val_weights_chunk, _ in iter_validation_chunks(
                 val_dir, schema, val_chunk_size, target_col, weight_col
-            ))
-            if val_chunks:
-                val_X_chunk, val_y_chunk, val_weights_chunk, _ = val_chunks[0]
+            ):
                 val_ds = create_lgb_dataset(
                     val_X_chunk, val_y_chunk, val_weights_chunk,
                     feature_names=schema.feature_list,
                 )
                 logger.info(f"Using validation chunk with {len(val_X_chunk):,} samples for early stopping")
+                break  # Only need first chunk
         
         # Train (continue from previous model if exists)
         model, info = train_single_chunk(
@@ -976,8 +985,9 @@ def train_chunked(
             status="completed",
         )
         
-        # Free memory
+        # Free memory explicitly
         del train_ds, X, y, weights
+        gc.collect()  # Force garbage collection to prevent memory fragmentation
     
     training_info = {
         "n_train_samples": total_samples,
@@ -1223,15 +1233,13 @@ def train_baseline(
     if use_chunked_val:
         logger.info("Using chunked validation (memory-efficient)")
         val_X, val_y, val_weights = None, None, None
-        n_val_samples = 0
-        # Count validation samples
-        for _, val_y_chunk, _, _ in iter_validation_chunks(
-            val_dir, schema, val_chunk_size,
-            TRAINING_CONFIG["target_col"],
-            TRAINING_CONFIG["weight_col"],
-        ):
-            n_val_samples += len(val_y_chunk)
-        logger.info(f"Total validation samples (across chunks): {n_val_samples:,}")
+        # Count validation samples efficiently from parquet metadata
+        val_files = get_date_dirs_for_split(val_dir, "validation")
+        n_val_samples = sum(
+            pd.read_parquet(f, columns=[]).shape[0]
+            for f in val_files if f.exists() and '_training.parquet' in f.name
+        )
+        logger.info(f"Total validation samples (from metadata): {n_val_samples:,}")
     else:
         logger.info("Loading full validation set into memory")
         val_X, val_y, val_weights = load_validation_data(

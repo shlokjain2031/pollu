@@ -162,14 +162,25 @@ def _satellite_staleness_features() -> List[str]:
     ]
 
 
+def _spatial_features() -> List[str]:
+    """Group D: Spatial location identifier.
+    
+    grid_id is a categorical feature representing the 30m grid cell.
+    LightGBM handles this natively and learns location-specific baselines.
+    This is critical for PM2.5 which has strong spatial patterns.
+    """
+    return ["grid_id"]
+
+
 # =============================================================================
 # EXCLUDED COLUMNS (explicit, not implicit)
 # =============================================================================
 
-# Group E: Spatial identifiers — EXPLICITLY EXCLUDED
-# Rationale: prevent LightGBM from learning a hash map
+# Group E: Spatial identifiers — grid_id is NOW INCLUDED as categorical feature
+# Other spatial identifiers are EXPLICITLY EXCLUDED
+# Rationale: grid_id captures location-specific baseline pollution levels
+#            other spatial coords prevent LightGBM from learning a hash map
 SPATIAL_IDENTIFIERS: Tuple[str, ...] = (
-    "grid_id",
     "row_idx",
     "x_m",
     "y_m",
@@ -192,6 +203,8 @@ TIMESTAMP_COLUMNS: Tuple[str, ...] = (
     "timestamp",
     "datetime",
     "date",
+    "landsat_date",
+    "sentinel_date",
 )
 
 # All columns that must never be features
@@ -267,6 +280,9 @@ def get_feature_list(
     if include_landsat or include_sentinel:
         features.extend(_satellite_staleness_features())
     
+    # 10. Spatial location (categorical)
+    features.extend(_spatial_features())
+    
     return features
 
 
@@ -288,6 +304,7 @@ def get_feature_groups() -> dict:
         "landsat": _landsat_features(),
         "sentinel": _sentinel_features(),
         "staleness": _satellite_staleness_features(),
+        "spatial": _spatial_features(),
     }
 
 

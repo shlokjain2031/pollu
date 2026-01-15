@@ -137,9 +137,41 @@ def process_single_file(
         # Load training file
         df_train = pd.read_parquet(file_path)
         
-        # Check if features already exist
-        if 'aod_055' in df_train.columns:
-            return (filename, False, "MODIS features already present")
+        # Check if features already exist (including presence flags)
+        has_aod = 'aod_055' in df_train.columns
+        has_flags = 'has_aod_055' in df_train.columns
+        has_x_y_suffixes = any(c.endswith('_x') or c.endswith('_y') for c in df_train.columns)
+        
+        if has_aod and has_flags and not has_x_y_suffixes:
+            # Fully processed with flags - skip
+            return (filename, False, "MODIS features already present with flags")
+        elif has_x_y_suffixes:
+            # Corrupted from double merge - skip and report
+            return (filename, False, "AOD features corrupted (_x/_y suffixes found)")
+        
+        # If has_aod but no has_flags: add flags only (don't re-merge)
+        if has_aod and not has_flags:
+            # Add presence flags without re-merging
+            if 'aod_047' in df_train.columns and 'has_aod_047' not in df_train.columns:
+                df_train['has_aod_047'] = df_train['aod_047'].notna().astype(int)
+            
+            if 'aod_055' in df_train.columns and 'has_aod_055' not in df_train.columns:
+                df_train['has_aod_055'] = df_train['aod_055'].notna().astype(int)
+            
+            # Write to temp file
+            temp_file = file_path.parent / f".temp_{filename}"
+            df_train.to_parquet(temp_file, index=False)
+            
+            # Verify temp file
+            df_verify = pd.read_parquet(temp_file)
+            if len(df_verify) != len(df_train):
+                temp_file.unlink()
+                return (filename, False, "Temp file verification failed")
+            
+            # Atomic rename
+            temp_file.replace(file_path)
+            
+            return (filename, True, f"Added 2 presence flags to existing AOD features")
         
         # Find nearest MODIS date
         modis_date = find_nearest_modis_date(date_str, modis_dir, max_days=1)
@@ -171,6 +203,14 @@ def process_single_file(
         # Drop pixel_id (we only wanted it for joining)
         df_merged = df_merged.drop(columns=['pixel_id'])
         
+        # Add presence flags for AOD features (per-feature granular flags)
+        # Only add if they don't already exist (avoid duplicates on re-runs)
+        if 'has_aod_047' not in df_merged.columns and 'aod_047' in df_merged.columns:
+            df_merged['has_aod_047'] = df_merged['aod_047'].notna().astype(int)
+        
+        if 'has_aod_055' not in df_merged.columns and 'aod_055' in df_merged.columns:
+            df_merged['has_aod_055'] = df_merged['aod_055'].notna().astype(int)
+        
         # Verify integrity
         if len(df_merged) != len(df_train):
             return (filename, False, f"Row count mismatch: {len(df_train)} → {len(df_merged)}")
@@ -182,8 +222,11 @@ def process_single_file(
         aod_valid = df_merged['aod_055'].notna().sum() if 'aod_055' in df_merged.columns else 0
         aod_pct = (aod_valid / len(df_merged)) * 100 if len(df_merged) > 0 else 0
         
+        # Count total columns added (4 MODIS features + 2 presence flags)
+        n_cols_added = len(MODIS_FEATURES) + 2
+        
         if dry_run:
-            return (filename, True, f"DRY RUN: Would add {len(MODIS_FEATURES)} cols, {aod_pct:.1f}% valid AOD")
+            return (filename, True, f"DRY RUN: Would add {n_cols_added} cols ({len(MODIS_FEATURES)} features + 2 flags), {aod_pct:.1f}% valid AOD")
         
         # Write to temp file
         temp_file = file_path.parent / f".temp_{filename}"
@@ -199,7 +242,7 @@ def process_single_file(
         temp_file.replace(file_path)
         
         offset_msg = f" (used {modis_date})" if modis_date != date_str else ""
-        return (filename, True, f"Added {len(MODIS_FEATURES)} cols, {aod_pct:.1f}% valid AOD{offset_msg}")
+        return (filename, True, f"Added {n_cols_added} cols ({len(MODIS_FEATURES)} features + 2 flags), {aod_pct:.1f}% valid AOD{offset_msg}")
     
     except Exception as e:
         # Clean up temp file if exists
