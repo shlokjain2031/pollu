@@ -402,3 +402,191 @@ def check_success_gate(
         "mae_threshold": mae_threshold,
         "baseline_r2": baseline_r2,
     }
+
+
+# =============================================================================
+# CLI Interface
+# =============================================================================
+
+def main():
+    """CLI entry point for model evaluation."""
+    import argparse
+    import json
+    from pathlib import Path
+    import lightgbm as lgb
+    
+    parser = argparse.ArgumentParser(
+        description="Evaluate PM2.5 model on test data"
+    )
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=Path("dwarka/models/baseline_v1"),
+        help="Directory containing model checkpoint (default: dwarka/models/baseline_v1)"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("artifacts/test"),
+        help="Directory with test parquet files (default: artifacts/test)"
+    )
+    parser.add_argument(
+        "--limit-files",
+        type=int,
+        default=100,
+        help="Max test files to load (default: 100 for memory efficiency)"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Save results to JSON file (default: {model_dir}/evaluation_results.json)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup paths
+    model_path = args.model_dir / "checkpoints/latest_model/model.txt"
+    metadata_path = args.model_dir / "checkpoints/latest_model/metadata.json"
+    
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    
+    print("=" * 80)
+    print("EVALUATE PM2.5 MODEL")
+    print("=" * 80)
+    
+    # Load metadata
+    print(f"\nLoading metadata from {metadata_path}...")
+    with open(metadata_path) as f:
+        checkpoint_metadata = json.load(f)
+    
+    # Load model
+    print(f"Loading model from {model_path}...")
+    booster = lgb.Booster(model_file=str(model_path))
+    print(f"  ✓ Model loaded: {booster.num_feature()} features")
+    
+    # Load test data
+    print(f"\nLoading test data from {args.data_dir}...")
+    test_files = sorted(args.data_dir.glob("*.parquet"))
+    
+    if not test_files:
+        raise FileNotFoundError(f"No parquet files in {args.data_dir}")
+    
+    # Load subset of files for memory efficiency
+    test_files = test_files[:args.limit_files]
+    print(f"Loading first {len(test_files)}/{len(sorted(args.data_dir.glob('*.parquet')))} files...")
+    
+    dfs = []
+    for i, f in enumerate(test_files, 1):
+        df = pd.read_parquet(f)
+        dfs.append(df)
+        if i % 50 == 0:
+            print(f"  Loaded {i} files...")
+    
+    dfs = [df for df in dfs if not df.empty]
+    df_test = pd.concat(dfs, ignore_index=True)
+    print(f"  ✓ Total: {len(df_test):,} samples")
+    
+    # Extract features
+    feature_list = checkpoint_metadata.get("feature_list")
+    if not feature_list:
+        # Fallback: get from model
+        feature_list = booster.feature_name() or [f"feature_{i}" for i in range(booster.num_feature())]
+    
+    print(f"\nPreparing features ({len(feature_list)} total)...")
+    X_test = df_test[feature_list].copy()
+    
+    # Encode categorical (grid_id)
+    if "grid_id" in X_test.columns:
+        X_test["grid_id"] = pd.factorize(X_test["grid_id"])[0]
+    
+    # Extract target
+    if "pm25_t" not in df_test.columns:
+        raise ValueError("Test data missing target column 'pm25_t'")
+    
+    y_test = df_test["pm25_t"].values
+    print(f"  ✓ Target: min={y_test.min():.2f}, max={y_test.max():.2f}, mean={y_test.mean():.2f}")
+    
+    # Predict
+    print(f"\nGenerating predictions...")
+    y_pred = booster.predict(X_test)
+    print(f"  ✓ Predictions computed")
+    
+    # Compute metrics
+    print(f"\nComputing metrics...")
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+    
+    # Huber loss (delta=10)
+    delta = 10.0
+    errors = np.abs(y_test - y_pred)
+    huber = np.mean(np.where(errors <= delta, errors**2 / 2, delta * (errors - delta / 2)))
+    
+    print("\n" + "=" * 80)
+    print("EVALUATION RESULTS")
+    print("=" * 80)
+    print(f"R² Score:       {r2:.4f}")
+    print(f"MAE:            {mae:.4f} µg/m³")
+    print(f"RMSE:           {rmse:.4f} µg/m³")
+    print(f"Huber Loss:     {huber:.4f}")
+    print(f"Test Samples:   {len(y_test):,}")
+    print("=" * 80)
+    
+    # Check success gate
+    gate = check_success_gate(
+        EvaluationResults(
+            model_name="baseline_v1",
+            overall=StratifiedMetrics(
+                mae=mae,
+                rmse=rmse,
+                r2=r2,
+                huber_loss=huber,
+                n_samples=len(y_test),
+            ),
+            by_pm_regime={},
+            by_trust_quartile={},
+            by_season={},
+            by_hour={},
+            created_at=pd.Timestamp.now().isoformat(),
+        ),
+        r2_threshold=0.65,
+        mae_threshold=18.0,
+    )
+    
+    print(f"\nSuccess Gate Check:")
+    print(f"  R² > 0.65:      {gate['checks']['r2_pass']} (got {gate['r2']:.4f})")
+    print(f"  MAE < 18:       {gate['checks']['mae_pass']} (got {gate['mae']:.4f})")
+    print(f"  Overall Pass:   {gate['passed']}")
+    
+    # Save results
+    output_file = args.output or (args.model_dir / "evaluation_results.json")
+    results_dict = {
+        "model_version": checkpoint_metadata.get("model_version", "baseline_v1"),
+        "model_hash": checkpoint_metadata.get("model_hash", "unknown"),
+        "schema_hash": checkpoint_metadata.get("schema_hash", "unknown"),
+        "test_metrics": {
+            "r2": float(r2),
+            "mae": float(mae),
+            "rmse": float(rmse),
+            "huber_loss": float(huber),
+            "n_samples": int(len(y_test)),
+        },
+        "training_metrics": {
+            "train_mae": checkpoint_metadata["metrics"]["train"]["l1"],
+            "train_rmse": checkpoint_metadata["metrics"]["train"]["rmse"],
+            "val_mae": checkpoint_metadata["metrics"]["val"]["l1"],
+            "val_rmse": checkpoint_metadata["metrics"]["val"]["rmse"],
+        },
+        "success_gate": gate,
+        "evaluation_date": pd.Timestamp.now().isoformat(),
+    }
+    
+    with open(output_file, "w") as f:
+        json.dump(results_dict, f, indent=2)
+    
+    print(f"\n✓ Results saved to: {output_file}")
+
+
+if __name__ == "__main__":
+    main()
