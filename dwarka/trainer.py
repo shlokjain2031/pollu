@@ -560,6 +560,8 @@ def load_date_chunk(
     if found_count < len(date_files):
         logger.warning(f"WARNING: Found {found_count}/{len(date_files)} training files in this chunk (skipped {len(date_files) - found_count} missing files)")
     
+    # Filter out empty/all-NA DataFrames before concat to avoid FutureWarning
+    dfs = [df for df in dfs if not df.empty]
     combined = pd.concat(dfs, ignore_index=True)
     
     # Sort for reproducibility
@@ -573,17 +575,34 @@ def load_date_chunk(
     non_numeric_cols = X.select_dtypes(include=['object', 'string']).columns.tolist()
     all_nan_cols = X.columns[X.isna().all()].tolist()
     
+    # Keep grid_id as categorical feature (encode as hash), convert other non-numeric to float
+    categorical_cols = []
+    cols_to_convert = []
     if non_numeric_cols:
-        logger.warning(f"Found {len(non_numeric_cols)} non-numeric feature columns: {non_numeric_cols}")
-        logger.warning("Dropping non-numeric columns as LightGBM requires numeric features only")
-        X = X.drop(columns=non_numeric_cols)
+        # Make a copy to avoid SettingWithCopyWarning
+        X = X.copy()
+        for col in non_numeric_cols:
+            if col == 'grid_id':
+                # Convert grid_id to numeric hash for LightGBM
+                categorical_cols.append(col)
+                X[col] = pd.factorize(X[col])[0]
+                logger.info(f"Encoded grid_id as categorical feature ({X[col].nunique()} unique values)")
+            else:
+                # Try to convert to numeric (pd.to_numeric handles strings, errors='coerce' converts non-convertible to NaN)
+                cols_to_convert.append(col)
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+        
+        if cols_to_convert:
+            logger.info(f"Converted {len(cols_to_convert)} non-numeric columns to float: {cols_to_convert}")
     
-    if all_nan_cols:
-        logger.warning(f"Found {len(all_nan_cols)} all-NaN feature columns: {all_nan_cols}")
-        logger.warning("Dropping all-NaN columns")
-        X = X.drop(columns=all_nan_cols)
+    # Check for all-NaN columns but DON'T drop them - LightGBM can handle NaN
+    # (Schema features must be present even if all-NaN to maintain feature count consistency)
+    all_nan_cols_present = [col for col in all_nan_cols if col in X.columns]
+    if all_nan_cols_present:
+        logger.warning(f"Found {len(all_nan_cols_present)} all-NaN feature columns: {all_nan_cols_present}")
+        logger.warning("Keeping all-NaN columns (LightGBM handles NaN natively)")
     
-    logger.info(f"Using {len(X.columns)} features after validation (dropped {len(non_numeric_cols) + len(all_nan_cols)})")
+    logger.info(f"Using {len(X.columns)} features after validation")
     
     # Extract target
     if target_col not in combined.columns:
