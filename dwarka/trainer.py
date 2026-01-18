@@ -575,25 +575,24 @@ def load_date_chunk(
     non_numeric_cols = X.select_dtypes(include=['object', 'string']).columns.tolist()
     all_nan_cols = X.columns[X.isna().all()].tolist()
     
-    # Keep grid_id as categorical feature (encode as hash), convert other non-numeric to float
-    categorical_cols = []
-    cols_to_convert = []
+    # Exclude grid_id from features (for spatial generalization testing)
+    # grid_id leaks information about location, breaking spatial holdout test
+    # PM2.5 lags are kept - they're IDW-interpolated from neighbors, providing legitimate temporal signal
+    cols_to_drop = ['grid_id']
+    X = X.drop(columns=[col for col in cols_to_drop if col in X.columns], errors='ignore')
+    logger.info(f"Dropped columns for spatial generalization: {cols_to_drop}")
+    
+    # Convert non-numeric columns (except grid_id which is already dropped) to float
+    non_numeric_cols = [col for col in non_numeric_cols if col not in cols_to_drop]
     if non_numeric_cols:
         # Make a copy to avoid SettingWithCopyWarning
         X = X.copy()
         for col in non_numeric_cols:
-            if col == 'grid_id':
-                # Convert grid_id to numeric hash for LightGBM
-                categorical_cols.append(col)
-                X[col] = pd.factorize(X[col])[0]
-                logger.info(f"Encoded grid_id as categorical feature ({X[col].nunique()} unique values)")
-            else:
-                # Try to convert to numeric (pd.to_numeric handles strings, errors='coerce' converts non-convertible to NaN)
-                cols_to_convert.append(col)
-                X[col] = pd.to_numeric(X[col], errors='coerce')
+            # Try to convert to numeric (pd.to_numeric handles strings, errors='coerce' converts non-convertible to NaN)
+            X[col] = pd.to_numeric(X[col], errors='coerce')
         
-        if cols_to_convert:
-            logger.info(f"Converted {len(cols_to_convert)} non-numeric columns to float: {cols_to_convert}")
+        if non_numeric_cols:
+            logger.info(f"Converted {len(non_numeric_cols)} non-numeric columns to float: {non_numeric_cols}")
     
     # Check for all-NaN columns but DON'T drop them - LightGBM can handle NaN
     # (Schema features must be present even if all-NaN to maintain feature count consistency)

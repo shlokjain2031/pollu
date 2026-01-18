@@ -855,9 +855,10 @@ def _freeze_features_after_splits(
             split_name: {
                 "path": str(meta["path"]),
                 "rows": meta["rows"],
-                "date_range": f"{meta['min_timestamp']} to {meta['max_timestamp']}",
+                "date_range": f"{meta.get('min_timestamp', 'N/A')} to {meta.get('max_timestamp', 'N/A')}",
             }
             for split_name, meta in splits_metadata.items()
+            if split_name in ["train", "val", "test"]  # Only include actual split dictionaries
         },
     }
     
