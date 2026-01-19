@@ -1,0 +1,32 @@
+{
+  "chunk_idx": 47,
+  "date_range": {
+    "start": "2024-12-16",
+    "end": "2024-12-31"
+  },
+  "data_info": {
+    "n_rows": 1106623,
+    "n_features_before_drop": 64,
+    "n_features_after_drop": 64,
+    "dropped_non_numeric": [],
+    "dropped_all_nan": []
+  },
+  "training_info": {
+    "best_iteration": 6122,
+    "early_stopped": false
+  },
+  "metrics": {
+    "train": {
+      "l1": 6.194305410854243,
+      "rmse": 9.805489541062531
+    },
+    "val": {
+      "l1": 8.050459047649335,
+      "rmse": 21.44950122168227
+    }
+  },
+  "timing": {
+    "saved_at": "2026-01-18T18:09:04.953756Z",
+    "duration_seconds": 91.72206711769104
+  }
+}

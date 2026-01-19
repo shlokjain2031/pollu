@@ -20,7 +20,7 @@ artifacts/
 manifest/grid/
 test_output/
 logs/
-dwarka/models
+dwarka/models/baseline_v*
 
 # Testing
 fake/

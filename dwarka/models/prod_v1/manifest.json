@@ -1,0 +1,18 @@
+{
+  "manifest_version": "1.0",
+  "model_version": "prod_v1",
+  "model_hash": "ecf51a6d14a239f1",
+  "model_file": "model.txt",
+  "schema_file": "feature_schema.json",
+  "metadata_file": "training_metadata.json",
+  "schema_hash": "7431b6510f6f686a",
+  "n_features": 64,
+  "target_col": "pm25_t",
+  "weight_col": "target_trust",
+  "created_at": "2026-01-18T18:09:05.139924Z",
+  "checksums": {
+    "model": "ecf51a6d14a239f1",
+    "schema": "cf41a78cc85743b7",
+    "metadata": "e91f04398568a810"
+  }
+}
