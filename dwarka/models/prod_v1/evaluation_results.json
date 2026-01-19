@@ -1,0 +1,33 @@
+{
+  "model_version": "baseline_v1",
+  "model_hash": "unknown",
+  "schema_hash": "unknown",
+  "test_metrics": {
+    "r2": 0.612520045335355,
+    "mae": 13.009824545415478,
+    "rmse": 25.588912137044325,
+    "huber_loss": 91.15448787670196,
+    "n_samples": 45062800
+  },
+  "training_metrics": {
+    "train_mae": 6.194305410854243,
+    "train_rmse": 9.805489541062531,
+    "val_mae": 8.050459047649335,
+    "val_rmse": 21.44950122168227
+  },
+  "success_gate": {
+    "model_name": "prod_v1",
+    "passed": false,
+    "checks": {
+      "r2_pass": false,
+      "mae_pass": true,
+      "beats_baseline": true
+    },
+    "r2": 0.612520045335355,
+    "mae": 13.009824545415478,
+    "r2_threshold": 0.65,
+    "mae_threshold": 18.0,
+    "baseline_r2": null
+  },
+  "evaluation_date": "2026-01-19T05:05:24.761744"
+}
