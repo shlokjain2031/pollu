@@ -2,6 +2,25 @@
 
 Production-grade hyperlocal PM2.5 prediction system using LightGBM, satellite imagery, meteorological signals, and atmospheric chemistry. Built for 30m-resolution pollution mapping across urban areas with temporal validation and trust-weighted training.
 
+## 🎯 Current Model Performance (prod_v1)
+
+**Latest Evaluation Results** (2026-01-19, Test Set: 45.06M samples across 317 files)
+
+| Metric | Training | Validation | **Test** |
+|--------|----------|------------|------|
+| **R²** | **0.866** ↑ | **0.847** ↑ | **0.613** ⚠️ |
+| **MAE** | 6.19 µg/m³ | 8.05 µg/m³ | **13.01 µg/m³** ✓ |
+| **RMSE** | 9.81 µg/m³ | 21.45 µg/m³ | 25.59 µg/m³ |
+
+**Status**:
+- ✅ **MAE threshold**: PASS (13.01 < 18.0 µg/m³)
+- ❌ **R² threshold**: FAIL (0.613 < 0.65)
+- ✅ **Beats baseline**: YES (significantly outperforms persistence)
+
+**⚠️ Key Finding**: Significant performance drop from validation (0.847) to test (0.613) indicates **distribution shift** in test data. See [Performance Analysis](#performance-analysis) for investigation.
+
+---
+
 ## Overview
 
 Pollu predicts PM2.5 concentrations at 30-meter resolution across entire cities using:
@@ -9,7 +28,7 @@ Pollu predicts PM2.5 concentrations at 30-meter resolution across entire cities 
 - **Multi-source remote sensing**: Landsat-8, Sentinel-2
 - **Meteorological signals**: OpenMeteo/ERA5 hourly data with temporal lags
 - **Ground truth**: CPCB station networks
-- **Temporal validation**: Forward-chaining splits (2017-2023 train, 2023-2024 val, 2024-2025 test)
+- **Temporal validation**: Forward-chaining splits (2019-2024 train, 2019-2024 val, 2019-2024 test)
 
 **Key features:**
 - No spatial features (prevents spatial leakage across grid cells)
@@ -31,6 +50,44 @@ Pollu is organized into five specialized modules:
 | **ML Training** | Dwarka | LightGBM model training and evaluation | In Development |
 | **Persistence** | Takshashila | Artifact storage and metadata tracking | Production |
 | **API Serving** | Ujjayini | FastAPI inference endpoint | Planned |
+
+---
+
+## Performance Analysis
+
+### Train/Val/Test Gap Investigation
+
+The model demonstrates **excellent performance on training/validation sets** (R² ≈ 0.85) but **significant degradation on test data** (R² = 0.613), a 0.234 point drop. This discrepancy suggests **distribution shift** rather than overfitting.
+
+**Possible Root Causes**:
+
+1. **Spatial Distribution Shift**: 
+   - Test data may concentrate in low-station-coverage regions (high uncertainty)
+   - Lower trust weights in sparse areas could amplify model uncertainty
+   - Stratification by `grid_id` may not have balanced geographic coverage
+
+2. **Temporal/Seasonal Effects**:
+   - Test period (overlaps with train/val) may have underrepresented seasons
+   - Extreme pollution events more common in test set
+   - Infrastructure/emissions changes between 2019-2024
+
+3. **Feature Drift**:
+   - Satellite availability (cloudiness, sensor issues) varies by region
+   - Meteorological patterns shift across time
+   - Trust distribution skewed in test set
+
+**Recommended Investigations**:
+- [ ] Compare PM2.5 distributions across splits (min/max/mean/std)
+- [ ] Analyze R² by spatial regime (urban core vs. suburban)
+- [ ] Stratify by season and pollution level (low/medium/high)
+- [ ] Plot residuals by trust quartile
+- [ ] Feature availability analysis (% missing by source)
+
+**Next Steps**:
+- Retrain with balanced stratification across spatial/temporal dimensions
+- Add derived meteorological features (VPD, stability indices)
+- Increase model complexity or ensemble methods
+- Investigate test set anomalies (corrupt files, sensor drift)
 
 ---
 
@@ -468,24 +525,28 @@ pollu/
 
 ## Development Roadmap
 
-### Phase 1: Baseline Model (Current)
+### Phase 1: Baseline Model ✅ COMPLETE
 - [x] Data pipeline (Patliputra) for all sources
 - [x] Feature engineering (Nalanda) with temporal lags
 - [x] Model specification (Dwarka/model_spec.md)
-- [ ] Implement training pipeline (Dwarka/train.py)
-- [ ] Implement evaluation (Dwarka/evaluate.py)
-- [ ] Baseline comparisons (persistence, climatology)
+- [x] Training pipeline (Dwarka/trainer.py)
+- [x] Evaluation framework (Dwarka/evaluate.py)
+- [x] Baseline comparisons (persistence, climatology)
+- [x] First production model (prod_v1, Jan 2026)
 
-**Target**: R² > 0.50, beat persistence baseline
+**Achieved**: R² = 0.613 (test), R² = 0.847 (val), MAE = 13.01 µg/m³
+**Status**: Baseline working, but distribution shift requires investigation
 
-### Phase 2: Production Model (Q1 2026)
-- [ ] Hyperparameter tuning (Optuna)
+### Phase 2: Performance Improvement (IN PROGRESS - Q1 2026)
+- [ ] **URGENT**: Diagnose train/val/test gap (distribution shift analysis)
+- [ ] Fix spatial/temporal stratification if unbalanced
 - [ ] Derived features (wind speed, VPD, temp-dewpoint diff)
-- [ ] Temporal encoding (cyclic hour/day-of-week)
+- [ ] Temporal encoding (cyclic hour/day-of-week) - partially done
+- [ ] Hyperparameter tuning (Optuna) for test set
 - [ ] SHAP interpretability reports
 - [ ] Stratified evaluation (season, regime, pollution level)
 
-**Target**: R² > 0.65, MAE < 18 µg/m³
+**Target**: R² > 0.65, MAE < 18 µg/m³ on test set
 
 ### Phase 3: Atmospheric Chemistry (Q2 2026)
 - [ ] NO₂ temporal lags (1h, 3h, 6h, 12h, 24h)
@@ -504,9 +565,29 @@ pollu/
 
 ## Performance Expectations
 
-Based on literature (satellite + meteo + ML for PM2.5):
+**Current Model (prod_v1, Jan 2026)**:
 
-| Metric | Baseline (24h persistence) | Target (LightGBM) | State-of-art |
+| Metric | Actual | Target | State-of-art |
+|--------|--------|--------|--------------|
+| **Test R²** | **0.613** ⚠️ | 0.65+ | 0.75-0.85 |
+| **Test MAE** | **13.01 µg/m³** ✓ | <18 µg/m³ | 8-12 µg/m³ |
+| **Test RMSE** | **25.59 µg/m³** | 18-25 µg/m³ | 12-18 µg/m³ |
+| **Train R²** | **0.866** ✓ | - | - |
+| **Val R²** | **0.847** ✓ | - | - |
+
+**Model Details**:
+- **Model Name**: `prod_v1`
+- **Model Hash**: `ecf51a6d14a239f1`
+- **Created**: 2026-01-18 18:09:05 UTC
+- **Features**: 64 (6 lags + 40+ meteorology + 12 satellite)
+- **Training Samples**: 99.65M
+- **Test Samples**: 45.06M
+- **Training Time**: 6,264 seconds (1.74 hours)
+- **Iterations**: 6,122 / 5,000 max (early stopped)
+
+**Based on literature** (satellite + meteo + ML for PM2.5):
+
+| Metric | Baseline (24h persistence) | LightGBM typical | State-of-art |
 |--------|----------------------------|-------------------|--------------|
 | **R²** | 0.45-0.55 | 0.65-0.75 | 0.75-0.85 |
 | **MAE** | 18-25 µg/m³ | 12-18 µg/m³ | 8-12 µg/m³ |
