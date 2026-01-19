@@ -421,8 +421,8 @@ def main():
     parser.add_argument(
         "--model-dir",
         type=Path,
-        default=Path("dwarka/models/baseline_v1"),
-        help="Directory containing model checkpoint (default: dwarka/models/baseline_v1)"
+        required=True,
+        help="Directory containing model checkpoint (e.g., dwarka/models/prod_v1)"
     )
     parser.add_argument(
         "--data-dir",
@@ -472,20 +472,8 @@ def main():
     if not test_files:
         raise FileNotFoundError(f"No parquet files in {args.data_dir}")
     
-    # Load subset of files for memory efficiency
-    test_files = test_files[:args.limit_files]
-    print(f"Loading first {len(test_files)}/{len(sorted(args.data_dir.glob('*.parquet')))} files...")
-    
-    dfs = []
-    for i, f in enumerate(test_files, 1):
-        df = pd.read_parquet(f)
-        dfs.append(df)
-        if i % 50 == 0:
-            print(f"  Loaded {i} files...")
-    
-    dfs = [df for df in dfs if not df.empty]
-    df_test = pd.concat(dfs, ignore_index=True)
-    print(f"  ✓ Total: {len(df_test):,} samples")
+    total_files = len(test_files)
+    print(f"Found {total_files} files (processing all in batches)")
     
     # Extract features
     feature_list = checkpoint_metadata.get("feature_list")
@@ -493,24 +481,57 @@ def main():
         # Fallback: get from model
         feature_list = booster.feature_name() or [f"feature_{i}" for i in range(booster.num_feature())]
     
-    print(f"\nPreparing features ({len(feature_list)} total)...")
-    X_test = df_test[feature_list].copy()
+    print(f"\nProcessing features ({len(feature_list)} total) in batches...")
     
-    # Encode categorical (grid_id)
-    if "grid_id" in X_test.columns:
-        X_test["grid_id"] = pd.factorize(X_test["grid_id"])[0]
+    # Process files in batches to avoid memory explosion
+    batch_size = 50
+    all_y_true = []
+    all_y_pred = []
+    total_samples = 0
     
-    # Extract target
-    if "pm25_t" not in df_test.columns:
-        raise ValueError("Test data missing target column 'pm25_t'")
+    for batch_start in range(0, len(test_files), batch_size):
+        batch_end = min(batch_start + batch_size, len(test_files))
+        batch_files = test_files[batch_start:batch_end]
+        
+        # Load batch
+        dfs = []
+        for f in batch_files:
+            df = pd.read_parquet(f)
+            if not df.empty:
+                dfs.append(df)
+        
+        if not dfs:
+            continue
+        
+        df_batch = pd.concat(dfs, ignore_index=True)
+        batch_samples = len(df_batch)
+        total_samples += batch_samples
+        
+        # Extract features
+        X_batch = df_batch[feature_list].copy()
+        
+        # Encode categorical (grid_id)
+        if "grid_id" in X_batch.columns:
+            X_batch["grid_id"] = pd.factorize(X_batch["grid_id"])[0]
+        
+        # Extract target
+        if "pm25_t" not in df_batch.columns:
+            raise ValueError("Test data missing target column 'pm25_t'")
+        
+        y_batch = df_batch["pm25_t"].values
+        all_y_true.extend(y_batch)
+        
+        # Predict on batch
+        y_pred_batch = booster.predict(X_batch)
+        all_y_pred.extend(y_pred_batch)
+        
+        print(f"  Processed batch {batch_start // batch_size + 1}: {batch_samples:,} samples (total: {total_samples:,})")
     
-    y_test = df_test["pm25_t"].values
+    y_test = np.array(all_y_true)
+    y_pred = np.array(all_y_pred)
+    
+    print(f"  ✓ Total: {len(y_test):,} samples processed")
     print(f"  ✓ Target: min={y_test.min():.2f}, max={y_test.max():.2f}, mean={y_test.mean():.2f}")
-    
-    # Predict
-    print(f"\nGenerating predictions...")
-    y_pred = booster.predict(X_test)
-    print(f"  ✓ Predictions computed")
     
     # Compute metrics
     print(f"\nComputing metrics...")
@@ -534,9 +555,10 @@ def main():
     print("=" * 80)
     
     # Check success gate
+    model_version = checkpoint_metadata.get("model_version", args.model_dir.name)
     gate = check_success_gate(
         EvaluationResults(
-            model_name="baseline_v1",
+            model_name=model_version,
             overall=StratifiedMetrics(
                 mae=mae,
                 rmse=rmse,
