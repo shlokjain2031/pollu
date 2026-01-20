@@ -17,6 +17,7 @@ scipy>=1.10.0
 # Machine learning
 scikit-learn>=1.2.0
 mgwr>=2.2.0
+lightgbm>=4.0.0
 
 # Earth Engine
 earthengine-api>=0.1.350
@@ -35,3 +36,7 @@ uvicorn[standard]>=0.23.0
 
 # Progress bars
 tqdm>=4.65.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
