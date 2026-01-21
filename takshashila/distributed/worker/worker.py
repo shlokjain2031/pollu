@@ -103,12 +103,44 @@ class Worker:
         except Exception as e:
             logger.error(f"Job {request_id} failed: {e}")
             
+            # Classify error type
+            error_type, error_msg = self._classify_error(e, grid_id, timestamp_hour_str)
+            
             return {
                 "request_id": request_id,
                 "pm25": 0.0,
-                "error": str(e),
+                "error": error_msg,
+                "error_type": error_type,
                 "worker_id": WORKER_ID
             }
+    
+    def _classify_error(self, exc, grid_id, timestamp_hour):
+        """
+        Classify an exception into one of 6 error types.
+        
+        Returns:
+            Tuple of (error_type: str, error_message: str)
+        """
+        error_str = str(exc).lower()
+        
+        # InvalidRequest: malformed input
+        if "invalid" in error_str or "malformed" in error_str or "parse" in error_str:
+            return ("InvalidRequest", f"Invalid request parameters: {exc}")
+        
+        # GridNotFound: grid doesn't exist in database
+        if "grid" in error_str and ("not found" in error_str or "does not exist" in error_str):
+            return ("GridNotFound", f"Grid {grid_id} not found")
+        
+        # DataMissing: data missing for grid/timestamp (PM2.5, meteo, satellite)
+        if any(keyword in error_str for keyword in ["no data", "missing", "insufficient", "empty result"]):
+            return ("DataMissing", f"Insufficient data for grid {grid_id} at {timestamp_hour}")
+        
+        # WorkerError: database errors, file I/O, etc.
+        if any(keyword in error_str for keyword in ["database", "connection", "file", "i/o", "disk"]):
+            return ("WorkerError", f"Worker internal error: {exc}")
+        
+        # Unknown: anything else
+        return ("Unknown", f"Unknown error: {exc}")
     
     def run(self):
         """Main loop: read jobs from stdin, process, write results to stdout."""
@@ -138,6 +170,7 @@ class Worker:
                         "request_id": "unknown",
                         "pm25": 0.0,
                         "error": f"Invalid job JSON: {e}",
+                        "error_type": "InvalidRequest",
                         "worker_id": WORKER_ID
                     }
                     print(json.dumps(error_result), flush=True)
@@ -148,6 +181,7 @@ class Worker:
                         "request_id": "unknown",
                         "pm25": 0.0,
                         "error": f"Worker error: {e}",
+                        "error_type": "WorkerError",
                         "worker_id": WORKER_ID
                     }
                     print(json.dumps(error_result), flush=True)
