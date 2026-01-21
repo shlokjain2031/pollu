@@ -19,6 +19,8 @@ type Coordinator struct {
 	config *Config
 	queue  *JobQueue
 	pool   *WorkerPool
+	dedup  *Deduplicator
+	cache  *ResultCache
 }
 
 // PredictRequest is the HTTP request payload
@@ -29,9 +31,9 @@ type PredictRequest struct {
 
 // PredictResponse is the HTTP response payload
 type PredictResponse struct {
-	RequestID string  `json:"request_id"`
-	PM25      float64 `json:"pm25,omitempty"`
-	Error     string  `json:"error,omitempty"`
+	RequestID     string         `json:"request_id"`
+	PM25          float64        `json:"pm25,omitempty"`
+	Error         *ErrorResponse `json:"error,omitempty"`
 }
 
 // NewCoordinator creates a new coordinator instance
@@ -45,14 +47,23 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 		return nil, fmt.Errorf("failed to create worker pool: %w", err)
 	}
 
+	// Create deduplicator
+	dedup := NewDeduplicator()
+
+	// Create result cache with 5-minute TTL (Part 1)
+	cache := NewResultCache(5 * time.Minute)
+
 	return &Coordinator{
 		config: config,
 		queue:  queue,
 		pool:   pool,
+		dedup:  dedup,
+		cache:  cache,
 	}, nil
 }
 
 // handlePredict handles POST /predict requests
+// Orchestrates: Cache Check → Dedup → Compute → Cache Store
 func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -75,13 +86,128 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	// Generate request ID
 	requestID := uuid.New().String()
 
-	log.Printf("Received prediction request: %s (grid_id=%s, timestamp=%s)",
+	log.Printf("[%s] Received prediction request (grid_id=%s, timestamp=%s)",
 		requestID, req.GridID, req.TimestampHour)
 
+	// Create context with 1-second timeout (Part 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// Execute prediction with dedup + cache
+	pm25, err := c.executePrediction(ctx, req.GridID, req.TimestampHour, requestID)
+
+	// Build response
+	resp := PredictResponse{
+		RequestID: requestID,
+	}
+
+	if err != nil {
+		// Classify error and build structured response
+		predErr := ClassifyError(err)
+		errorResp := NewErrorResponse(predErr)
+		resp.Error = &errorResp
+
+		// Set HTTP status from error
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(predErr.HTTPStatus())
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// Success
+	resp.PM25 = pm25
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
+
+// executePrediction orchestrates cache check, dedup, and computation
+func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
+	// Construct dedup/cache key (model_version and feature_version hardcoded for now)
+	key := DedupKey{
+		GridID:         gridID,
+		TimestampHour:  timestampHour,
+		ModelVersion:   "prod_v1",
+		FeatureVersion: "v1",
+	}
+
+	// Step 1: Check cache (both success and cacheable errors)
+	cacheKey := CacheKey{
+		GridID:         key.GridID,
+		TimestampHour:  key.TimestampHour,
+		ModelVersion:   key.ModelVersion,
+		FeatureVersion: key.FeatureVersion,
+	}
+
+	if pm25, cachedErr, hit := c.cache.Get(cacheKey); hit {
+		if cachedErr != nil {
+			log.Printf("[%s] Cache HIT (error) for %s: %v", requestID, key.String(), cachedErr)
+			return 0, cachedErr
+		}
+		log.Printf("[%s] Cache HIT for %s", requestID, key.String())
+		return pm25, nil
+	}
+
+	log.Printf("[%s] Cache MISS for %s", requestID, key.String())
+
+	// Step 2: Attempt to acquire leader
+	entry, isLeader := c.dedup.AcquireLeader(ctx, key, requestID)
+
+	if !isLeader {
+		// We're a follower - wait for leader to finish
+		log.Printf("[%s] FOLLOWER: waiting for leader %s", requestID, entry.LeaderRequestID)
+
+		result, err := c.dedup.WaitForResult(ctx, entry)
+		if err != nil {
+			log.Printf("[%s] FOLLOWER: wait failed: %v", requestID, err)
+			return 0, err
+		}
+
+		log.Printf("[%s] FOLLOWER: received result from leader (pm25=%.2f)", requestID, result.PM25)
+		return result.PM25, result.Error
+	}
+
+	// We're the leader - execute computation
+	log.Printf("[%s] LEADER: executing computation for %s", requestID, key.String())
+
+	pm25, err := c.executeComputation(ctx, gridID, timestampHour, requestID)
+
+	// Classify error if present
+	var predErr PredictionError
+	if err != nil {
+		predErr = ClassifyError(err)
+	}
+
+	// Complete dedup (wakes followers)
+	dedupResult := &DedupResult{
+		PM25:  pm25,
+		Error: predErr,
+	}
+	c.dedup.Complete(key, dedupResult)
+
+	// Cache result based on error type
+	if predErr == nil {
+		// Success - cache with default TTL
+		c.cache.Set(cacheKey, pm25)
+		log.Printf("[%s] LEADER: cached result (pm25=%.2f)", requestID, pm25)
+	} else if predErr.Cacheable() {
+		// Cacheable error - cache with error-specific TTL
+		c.cache.SetError(cacheKey, predErr)
+		log.Printf("[%s] LEADER: cached error %s (ttl=%v)", requestID, predErr.Type(), predErr.CacheTTL())
+	} else {
+		// Non-cacheable error - don't cache
+		log.Printf("[%s] LEADER: error not cached: %s", requestID, predErr.Type())
+	}
+
+	return pm25, predErr
+}
+
+// executeComputation submits job to worker pool and waits for result
+func (c *Coordinator) executeComputation(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
 	// Create job
 	job := Job{
-		GridID:        req.GridID,
-		TimestampHour: req.TimestampHour,
+		GridID:        gridID,
+		TimestampHour: timestampHour,
 		RequestID:     requestID,
 	}
 
@@ -91,61 +217,65 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 
 	// Enqueue job
 	if err := c.queue.Enqueue(job); err != nil {
-		log.Printf("Failed to enqueue job %s: %v", requestID, err)
-
-		resp := PredictResponse{
-			RequestID: requestID,
-			Error:     "Queue is full (server overloaded)",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(resp)
-		return
+		log.Printf("[%s] Failed to enqueue job: %v", requestID, err)
+		return 0, fmt.Errorf("queue full")
 	}
 
-	log.Printf("Enqueued job %s (queue length: %d)", requestID, c.queue.Len())
+	log.Printf("[%s] Enqueued job (queue length: %d)", requestID, c.queue.Len())
 
-	// Wait for result with timeout
+	// Wait for result or timeout
 	select {
 	case result := <-resultChan:
-		log.Printf("Received result for request %s: pm25=%.2f, error=%s",
-			requestID, result.PM25, result.Error)
-
-		resp := PredictResponse{
-			RequestID: requestID,
-			PM25:      result.PM25,
-			Error:     result.Error,
-		}
-
-		w.Header().Set("Content-Type", "application/json")
 		if result.Error != "" {
-			w.WriteHeader(http.StatusInternalServerError)
-		} else {
-			w.WriteHeader(http.StatusOK)
+			// Convert worker error to typed error based on error_type
+			return 0, c.convertWorkerError(result)
 		}
-		json.NewEncoder(w).Encode(resp)
+		return result.PM25, nil
 
-	case <-time.After(c.config.RequestTimeout):
-		log.Printf("Request %s timed out after %v", requestID, c.config.RequestTimeout)
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
 
-		resp := PredictResponse{
-			RequestID: requestID,
-			Error:     "Request timed out",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusGatewayTimeout)
-		json.NewEncoder(w).Encode(resp)
+// convertWorkerError converts a WorkerResult error to a PredictionError
+func (c *Coordinator) convertWorkerError(result WorkerResult) error {
+	switch result.ErrorType {
+	case "InvalidRequest":
+		return NewInvalidRequestError(result.Error)
+	case "GridNotFound":
+		// Extract grid ID from error message if possible
+		return NewGridNotFoundError(result.Error)
+	case "DataMissing":
+		return NewDataMissingError(result.Error)
+	case "WorkerError":
+		return NewWorkerError(result.Error)
+	case "Unknown":
+		return NewUnknownError(result.Error)
+	default:
+		// Fallback for errors without type
+		return NewUnknownError(result.Error)
 	}
 }
 
 // handleHealth handles GET /health requests
 func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
+	dedupStats := c.dedup.Stats()
+	cacheStats := c.cache.Stats()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":       "healthy",
 		"queue_length": c.queue.Len(),
 		"num_workers":  c.config.NumWorkers,
+		"dedup": map[string]int{
+			"active_computations": dedupStats.ActiveComputations,
+			"total_followers":     dedupStats.TotalFollowers,
+		},
+		"cache": map[string]int{
+			"total_entries":   cacheStats.TotalEntries,
+			"expired_entries": cacheStats.ExpiredEntries,
+		},
 	})
 }
 

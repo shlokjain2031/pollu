@@ -16,6 +16,7 @@ type WorkerResult struct {
 	RequestID string  `json:"request_id"`
 	PM25      float64 `json:"pm25"`
 	Error     string  `json:"error"`
+	ErrorType string  `json:"error_type"` // Part 2: error classification
 	WorkerID  string  `json:"worker_id"`
 }
 
