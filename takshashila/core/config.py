@@ -40,12 +40,12 @@ GRID_ID = "mumbai"
 GRID_VERSION = "v1"
 N_GRID_CELLS = 509209  # Expected grid count
 
-# Feature table names
-TABLE_GRIDS = "grids"
-TABLE_FEATURES_PM25 = "features_pm25"
-TABLE_FEATURES_METEO = "features_meteo"
-TABLE_FEATURES_SATELLITE = "features_satellite"
-TABLE_FEATURES_SPATIAL = "features_spatial"
+# Feature table names (raw data)
+TABLE_GRID = "grid"
+TABLE_PM25_OBSERVATION = "pm25_observation"
+TABLE_METEO = "meteo"
+TABLE_LANDSAT8 = "landsat8"
+TABLE_SENTINEL2 = "sentinel2"
 TABLE_PREDICTIONS = "predictions"
 
 # Logging

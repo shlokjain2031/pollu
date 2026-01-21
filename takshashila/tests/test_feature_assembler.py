@@ -51,7 +51,7 @@ class TestFeatureAssembler:
         
         assert exc_info.value.grid_id == missing_pm25_grid_id
         assert exc_info.value.timestamp_hour == test_timestamp
-        assert "features_pm25" in str(exc_info.value)
+        assert "pm25_observation" in str(exc_info.value)
     
     def test_fetch_features_missing_meteo_raises_error(self, assembler, missing_meteo_grid_id, test_timestamp):
         """Test missing meteorological features raises FeatureAssemblyError."""
@@ -59,7 +59,7 @@ class TestFeatureAssembler:
             assembler.fetch_features(missing_meteo_grid_id, test_timestamp)
         
         assert exc_info.value.grid_id == missing_meteo_grid_id
-        assert "features_meteo" in str(exc_info.value)
+        assert "meteo" in str(exc_info.value)
     
     def test_fetch_features_missing_satellite_raises_error(self, assembler, missing_sat_grid_id, test_timestamp):
         """Test missing satellite features raises FeatureAssemblyError."""
@@ -67,7 +67,7 @@ class TestFeatureAssembler:
             assembler.fetch_features(missing_sat_grid_id, test_timestamp)
         
         assert exc_info.value.grid_id == missing_sat_grid_id
-        assert "features_satellite" in str(exc_info.value)
+        assert "landsat8" in str(exc_info.value) or "sentinel2" in str(exc_info.value)
     
     def test_feature_count_matches_schema(self, assembler):
         """Test assembler knows correct number of features."""
