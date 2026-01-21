@@ -196,7 +196,7 @@ class PersistenceLayer:
         return abs(actual_value - expected_value) < 1e-6
     
     def grid_exists(self, grid_id: str) -> bool:
-        """Check if grid_id exists in grids table.
+        """Check if grid_id exists in grid table.
         
         Args:
             grid_id: Grid cell identifier
@@ -213,7 +213,7 @@ class PersistenceLayer:
             try:
                 result = conn.execute("""
                     SELECT COUNT(*) 
-                    FROM grids 
+                    FROM grid 
                     WHERE grid_id = ?
                 """, [grid_id]).fetchone()
                 

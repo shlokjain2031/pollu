@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Populate DuckDB with adversarial mock feature data for testing.
+"""Populate DuckDB with mock raw observational data for testing.
 
-Creates ~30 grid cells with:
-- Valid complete features (15 grids)
-- Missing PM2.5 features (3 grids)
-- Missing meteo features (3 grids)
-- Missing satellite features (3 grids)
-- Edge timestamp cases (3 grids)
-- Invalid grid_ids (not inserted, for testing only)
+Populates 1000 unique grid IDs with:
+- pm25_observations: hourly values for past 7 days (168 readings per grid)
+- meteo: hourly values for past 7 days with 8 raw meteorological variables (168 readings per grid)
+- landsat8: single date 5 days ago with raw spectral bands B1-B11
+- sentinel2: single date 2 days ago with spectral bands B2, B4, B8, AOT, QA10
 
 Usage:
     python3 Takshashila/scripts/populate_mock_features.py
@@ -16,7 +14,7 @@ Usage:
 import sys
 import logging
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import random
 import duckdb
 
@@ -30,359 +28,204 @@ from Takshashila.phase1_minimal_inference.utils import setup_logging
 setup_logging()
 logger = logging.getLogger(__name__)
 
+# Base timestamp for mock data (now)
+BASE_TIMESTAMP = datetime(2026, 1, 21, 12, 0, 0, tzinfo=timezone.utc)
 
-# Test grids (adversarial selection)
-VALID_GRIDS = [
-    "g00000001", "g00000042", "g00001337", "g00002000", "g00005000",
-    "g00010000", "g00020000", "g00050000", "g00100000", "g00150000",
-    "g00200000", "g00250000", "g00300000", "g00400000", "g00500000"
-]
+# Number of unique grid IDs to populate
+NUM_GRIDS = 1000
 
-MISSING_PM25_GRIDS = ["g00000100", "g00000101", "g00000102"]
-MISSING_METEO_GRIDS = ["g00000200", "g00000201", "g00000202"]
-MISSING_SAT_GRIDS = ["g00000300", "g00000301", "g00000302"]
-EDGE_TIMESTAMP_GRIDS = ["g00000500", "g00000501", "g00000502"]
-
-# Test timestamp
-TEST_TIMESTAMP = datetime(2026, 1, 19, 16, 0, 0, tzinfo=timezone.utc)
+# Generate 1000 unique grid IDs
+GRID_IDS = [f"g{i:08d}" for i in range(1, NUM_GRIDS + 1)]
 
 
-def generate_pm25_features(grid_id: str, timestamp: datetime) -> dict:
-    """Generate realistic PM2.5 lag features."""
-    base_pm25 = random.uniform(30, 120)  # Typical Mumbai range
+def generate_pm25_observation(grid_id: str, timestamp: datetime) -> dict:
+    """Generate realistic PM2.5 raw observation."""
+    # Typical Mumbai PM2.5 range: 30-120 µg/m³
+    pm25_value = random.uniform(30, 120)
     return {
         "grid_id": grid_id,
-        "timestamp_hour": timestamp,
-        "pm25_t_minus_1h": base_pm25 * random.uniform(0.9, 1.1),
-        "pm25_t_minus_2h": base_pm25 * random.uniform(0.85, 1.15),
-        "pm25_t_minus_3h": base_pm25 * random.uniform(0.8, 1.2),
-        "pm25_t_minus_6h": base_pm25 * random.uniform(0.7, 1.3),
-        "pm25_t_minus_12h": base_pm25 * random.uniform(0.6, 1.4),
-        "pm25_t_minus_24h": base_pm25 * random.uniform(0.5, 1.5)
+        "timestamp": timestamp,
+        "pm25": pm25_value
     }
 
 
-def generate_meteo_features(grid_id: str, timestamp: datetime) -> dict:
-    """Generate realistic meteorological features."""
+def generate_meteo_observation(grid_id: str, timestamp: datetime) -> dict:
+    """Generate realistic meteorological raw observation (8 variables)."""
     temp = random.uniform(20, 35)
     humidity = random.uniform(40, 90)
+    dewpoint = temp - random.uniform(2, 8)
     pressure = random.uniform(1000, 1020)
-    wind_u = random.uniform(-5, 5)
-    wind_v = random.uniform(-5, 5)
+    wind_speed = random.uniform(0, 15)
+    wind_direction = random.uniform(0, 360)
+    precip = random.uniform(0, 2)
+    cloud_cover = random.uniform(0, 100)
     
     return {
         "grid_id": grid_id,
-        "timestamp_hour": timestamp,
+        "timestamp": timestamp,
         "temperature_2m": temp,
-        "temperature_2m_lag1h": temp * random.uniform(0.98, 1.02),
-        "temperature_2m_lag3h": temp * random.uniform(0.95, 1.05),
-        "temperature_2m_lag12h": temp * random.uniform(0.9, 1.1),
-        "temperature_2m_lag24h": temp * random.uniform(0.85, 1.15),
         "relative_humidity_2m": humidity,
-        "relative_humidity_2m_lag1h": humidity * random.uniform(0.98, 1.02),
-        "relative_humidity_2m_lag3h": humidity * random.uniform(0.95, 1.05),
-        "relative_humidity_2m_lag6h": humidity * random.uniform(0.9, 1.1),
-        "relative_humidity_2m_lag12h": humidity * random.uniform(0.85, 1.15),
-        "relative_humidity_2m_lag24h": humidity * random.uniform(0.8, 1.2),
-        "dewpoint_2m": temp - 5,
-        "dewpoint_2m_lag1h": temp - 5.2,
-        "dewpoint_2m_lag3h": temp - 5.5,
-        "dewpoint_2m_lag6h": temp - 6.0,
-        "dewpoint_2m_lag12h": temp - 6.5,
-        "dewpoint_2m_lag24h": temp - 7.0,
+        "dewpoint_2m": dewpoint,
         "surface_pressure": pressure,
-        "surface_pressure_lag1h": pressure + random.uniform(-1, 1),
-        "surface_pressure_lag3h": pressure + random.uniform(-2, 2),
-        "surface_pressure_lag6h": pressure + random.uniform(-3, 3),
-        "surface_pressure_lag12h": pressure + random.uniform(-4, 4),
-        "surface_pressure_lag24h": pressure + random.uniform(-5, 5),
-        "wind_u_10m": wind_u,
-        "wind_u_10m_lag1h": wind_u * random.uniform(0.9, 1.1),
-        "wind_u_10m_lag3h": wind_u * random.uniform(0.8, 1.2),
-        "wind_u_10m_lag6h": wind_u * random.uniform(0.7, 1.3),
-        "wind_u_10m_lag12h": wind_u * random.uniform(0.6, 1.4),
-        "wind_u_10m_lag24h": wind_u * random.uniform(0.5, 1.5),
-        "wind_v_10m": wind_v,
-        "wind_v_10m_lag1h": wind_v * random.uniform(0.9, 1.1),
-        "wind_v_10m_lag3h": wind_v * random.uniform(0.8, 1.2),
-        "wind_v_10m_lag6h": wind_v * random.uniform(0.7, 1.3),
-        "wind_v_10m_lag12h": wind_v * random.uniform(0.6, 1.4),
-        "wind_v_10m_lag24h": wind_v * random.uniform(0.5, 1.5),
-        "cloud_cover": random.uniform(0, 100),
-        "cloud_cover_lag6h": random.uniform(0, 100),
-        "cloud_cover_lag24h": random.uniform(0, 100),
-        "vpd": random.uniform(0.5, 3.0),
-        "temp_dewpoint_diff": random.uniform(2, 10),
-        "precip_last_1h": random.uniform(0, 5),
-        "precip_last_6h": random.uniform(0, 20),
-        "precip_last_24h": random.uniform(0, 50)
+        "wind_speed_10m": wind_speed,
+        "wind_direction_10m": wind_direction,
+        "precipitation": precip,
+        "cloud_cover": cloud_cover
     }
 
 
-def generate_satellite_features(grid_id: str, timestamp: datetime) -> dict:
-    """Generate realistic satellite imagery features."""
+def generate_landsat8_observation(grid_id: str, timestamp: datetime) -> dict:
+    """Generate Landsat8 raw spectral bands (B1-B11)."""
+    # Landsat8 bands are digital numbers (0-65535 for 16-bit)
+    # Normalized to 0-1 for easier visualization
     return {
         "grid_id": grid_id,
-        "timestamp_hour": timestamp,
-        "ndvi": random.uniform(0.1, 0.6),
-        "mndwi": random.uniform(-0.5, 0.5),
-        "ndbi": random.uniform(-0.3, 0.5),
-        "bsi": random.uniform(0.0, 0.5),
-        "ibi": random.uniform(0.0, 0.5),
-        "scene_cloud_cover": random.uniform(0, 30),
-        "evi": random.uniform(0.1, 0.6),
-        "ui_light": random.uniform(0.0, 1.0),
-        "si": random.uniform(0.0, 0.5),
-        "local_ndvi_std": random.uniform(0.01, 0.15),
-        "ndvi_s2": random.uniform(0.1, 0.6),
-        "days_since_landsat": random.uniform(0, 16),
-        "days_since_sentinel": random.uniform(0, 5)
+        "timestamp": timestamp,
+        "B1": random.uniform(0.01, 0.1),      # Coastal/Aerosol
+        "B2": random.uniform(0.02, 0.15),     # Blue
+        "B3": random.uniform(0.03, 0.2),      # Green
+        "B4": random.uniform(0.02, 0.25),     # Red
+        "B5": random.uniform(0.05, 0.4),      # NIR
+        "B6": random.uniform(0.1, 0.5),       # SWIR1
+        "B7": random.uniform(0.05, 0.3),      # SWIR2
+        "B8": random.uniform(0.02, 0.35),     # Panchromatic
+        "B9": random.uniform(0.0, 0.05),      # Cirrus
+        "B10": random.uniform(0.0, 0.1),      # TIRS1
+        "B11": random.uniform(0.0, 0.08)      # TIRS2
     }
 
 
-def populate_features(db_path: Path):
-    """Populate all feature tables with mock data."""
+def generate_sentinel2_observation(grid_id: str, timestamp: datetime) -> dict:
+    """Generate Sentinel2 spectral bands (B2, B4, B8, AOT, QA10)."""
+    return {
+        "grid_id": grid_id,
+        "timestamp": timestamp,
+        "B2": random.uniform(0.02, 0.15),     # Blue
+        "B4": random.uniform(0.02, 0.25),     # Red
+        "B8": random.uniform(0.05, 0.4),      # NIR
+        "AOT": random.uniform(0.0, 0.5),      # Aerosol Optical Thickness
+        "QA10": random.randint(0, 3000)       # Quality Assessment band
+    }
+
+
+def populate_raw_observations(db_path: Path):
+    """Populate all raw observation tables with mock data."""
     conn = duckdb.connect(str(db_path))
     
     try:
         # Clear existing mock data
-        logger.info("Clearing existing feature data...")
-        conn.execute("DELETE FROM features_pm25")
-        conn.execute("DELETE FROM features_meteo")
-        conn.execute("DELETE FROM features_satellite")
+        logger.info("Clearing existing observation data...")
+        conn.execute("DELETE FROM pm25_observation")
+        conn.execute("DELETE FROM meteo")
+        conn.execute("DELETE FROM landsat8")
+        conn.execute("DELETE FROM sentinel2")
         
-        # Populate valid grids (complete features)
-        logger.info(f"Populating {len(VALID_GRIDS)} valid grids...")
-        for grid_id in VALID_GRIDS:
-            pm25_data = generate_pm25_features(grid_id, TEST_TIMESTAMP)
-            meteo_data = generate_meteo_features(grid_id, TEST_TIMESTAMP)
-            sat_data = generate_satellite_features(grid_id, TEST_TIMESTAMP)
-            
-            conn.execute("""
-                INSERT INTO features_pm25 
-                (grid_id, timestamp_hour, pm25_t_minus_1h, pm25_t_minus_2h, 
-                 pm25_t_minus_3h, pm25_t_minus_6h, pm25_t_minus_12h, pm25_t_minus_24h)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, [pm25_data["grid_id"], pm25_data["timestamp_hour"],
-                  pm25_data["pm25_t_minus_1h"], pm25_data["pm25_t_minus_2h"],
-                  pm25_data["pm25_t_minus_3h"], pm25_data["pm25_t_minus_6h"],
-                  pm25_data["pm25_t_minus_12h"], pm25_data["pm25_t_minus_24h"]])
-            
-            conn.execute(f"""
-                INSERT INTO features_meteo VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [meteo_data["grid_id"], meteo_data["timestamp_hour"]] + [
-                meteo_data[k] for k in [
-                    "temperature_2m", "temperature_2m_lag1h", "temperature_2m_lag3h",
-                    "temperature_2m_lag12h", "temperature_2m_lag24h",
-                    "relative_humidity_2m", "relative_humidity_2m_lag1h", "relative_humidity_2m_lag3h",
-                    "relative_humidity_2m_lag6h", "relative_humidity_2m_lag12h", "relative_humidity_2m_lag24h",
-                    "dewpoint_2m", "dewpoint_2m_lag1h", "dewpoint_2m_lag3h",
-                    "dewpoint_2m_lag6h", "dewpoint_2m_lag12h", "dewpoint_2m_lag24h",
-                    "surface_pressure", "surface_pressure_lag1h", "surface_pressure_lag3h",
-                    "surface_pressure_lag6h", "surface_pressure_lag12h", "surface_pressure_lag24h",
-                    "wind_u_10m", "wind_u_10m_lag1h", "wind_u_10m_lag3h",
-                    "wind_u_10m_lag6h", "wind_u_10m_lag12h", "wind_u_10m_lag24h",
-                    "wind_v_10m", "wind_v_10m_lag1h", "wind_v_10m_lag3h",
-                    "wind_v_10m_lag6h", "wind_v_10m_lag12h", "wind_v_10m_lag24h",
-                    "cloud_cover", "cloud_cover_lag6h", "cloud_cover_lag24h",
-                    "vpd", "temp_dewpoint_diff",
-                    "precip_last_1h", "precip_last_6h", "precip_last_24h"
-                ]
-            ])
-            
-            conn.execute("""
-                INSERT INTO features_satellite VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [sat_data["grid_id"], sat_data["timestamp_hour"],
-                  sat_data["ndvi"], sat_data["mndwi"], sat_data["ndbi"],
-                  sat_data["bsi"], sat_data["ibi"], sat_data["scene_cloud_cover"],
-                  sat_data["evi"], sat_data["ui_light"], sat_data["si"],
-                  sat_data["local_ndvi_std"], sat_data["ndvi_s2"],
-                  sat_data["days_since_landsat"], sat_data["days_since_sentinel"]])
+        # === POPULATE PM2.5 OBSERVATIONS ===
+        # Hourly values for past 7 days (168 readings per grid)
+        logger.info(f"Populating pm25_observation: {NUM_GRIDS} grids × 168 hourly readings...")
+        pm25_batch = []
+        for grid_id in GRID_IDS:
+            for hour_offset in range(168):  # 7 days × 24 hours
+                timestamp = BASE_TIMESTAMP - timedelta(hours=hour_offset)
+                obs = generate_pm25_observation(grid_id, timestamp)
+                pm25_batch.append((obs["grid_id"], obs["timestamp"], obs["pm25"]))
         
-        # Populate grids with missing PM2.5 features (only meteo + sat)
-        logger.info(f"Populating {len(MISSING_PM25_GRIDS)} grids with missing PM2.5...")
-        for grid_id in MISSING_PM25_GRIDS:
-            meteo_data = generate_meteo_features(grid_id, TEST_TIMESTAMP)
-            sat_data = generate_satellite_features(grid_id, TEST_TIMESTAMP)
-            
-            conn.execute(f"""
-                INSERT INTO features_meteo VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [meteo_data["grid_id"], meteo_data["timestamp_hour"]] + [
-                meteo_data[k] for k in [
-                    "temperature_2m", "temperature_2m_lag1h", "temperature_2m_lag3h",
-                    "temperature_2m_lag12h", "temperature_2m_lag24h",
-                    "relative_humidity_2m", "relative_humidity_2m_lag1h", "relative_humidity_2m_lag3h",
-                    "relative_humidity_2m_lag6h", "relative_humidity_2m_lag12h", "relative_humidity_2m_lag24h",
-                    "dewpoint_2m", "dewpoint_2m_lag1h", "dewpoint_2m_lag3h",
-                    "dewpoint_2m_lag6h", "dewpoint_2m_lag12h", "dewpoint_2m_lag24h",
-                    "surface_pressure", "surface_pressure_lag1h", "surface_pressure_lag3h",
-                    "surface_pressure_lag6h", "surface_pressure_lag12h", "surface_pressure_lag24h",
-                    "wind_u_10m", "wind_u_10m_lag1h", "wind_u_10m_lag3h",
-                    "wind_u_10m_lag6h", "wind_u_10m_lag12h", "wind_u_10m_lag24h",
-                    "wind_v_10m", "wind_v_10m_lag1h", "wind_v_10m_lag3h",
-                    "wind_v_10m_lag6h", "wind_v_10m_lag12h", "wind_v_10m_lag24h",
-                    "cloud_cover", "cloud_cover_lag6h", "cloud_cover_lag24h",
-                    "vpd", "temp_dewpoint_diff",
-                    "precip_last_1h", "precip_last_6h", "precip_last_24h"
-                ]
-            ])
-            
-            conn.execute("""
-                INSERT INTO features_satellite VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [sat_data["grid_id"], sat_data["timestamp_hour"],
-                  sat_data["ndvi"], sat_data["mndwi"], sat_data["ndbi"],
-                  sat_data["bsi"], sat_data["ibi"], sat_data["scene_cloud_cover"],
-                  sat_data["evi"], sat_data["ui_light"], sat_data["si"],
-                  sat_data["local_ndvi_std"], sat_data["ndvi_s2"],
-                  sat_data["days_since_landsat"], sat_data["days_since_sentinel"]])
-        
-        # Populate grids with missing meteo features (only PM2.5 + sat)
-        logger.info(f"Populating {len(MISSING_METEO_GRIDS)} grids with missing meteo...")
-        for grid_id in MISSING_METEO_GRIDS:
-            pm25_data = generate_pm25_features(grid_id, TEST_TIMESTAMP)
-            sat_data = generate_satellite_features(grid_id, TEST_TIMESTAMP)
-            
-            conn.execute("""
-                INSERT INTO features_pm25 
-                (grid_id, timestamp_hour, pm25_t_minus_1h, pm25_t_minus_2h, 
-                 pm25_t_minus_3h, pm25_t_minus_6h, pm25_t_minus_12h, pm25_t_minus_24h)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, [pm25_data["grid_id"], pm25_data["timestamp_hour"],
-                  pm25_data["pm25_t_minus_1h"], pm25_data["pm25_t_minus_2h"],
-                  pm25_data["pm25_t_minus_3h"], pm25_data["pm25_t_minus_6h"],
-                  pm25_data["pm25_t_minus_12h"], pm25_data["pm25_t_minus_24h"]])
-            
-            conn.execute("""
-                INSERT INTO features_satellite VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [sat_data["grid_id"], sat_data["timestamp_hour"],
-                  sat_data["ndvi"], sat_data["mndwi"], sat_data["ndbi"],
-                  sat_data["bsi"], sat_data["ibi"], sat_data["scene_cloud_cover"],
-                  sat_data["evi"], sat_data["ui_light"], sat_data["si"],
-                  sat_data["local_ndvi_std"], sat_data["ndvi_s2"],
-                  sat_data["days_since_landsat"], sat_data["days_since_sentinel"]])
-        
-        # Populate grids with missing satellite features (only PM2.5 + meteo)
-        logger.info(f"Populating {len(MISSING_SAT_GRIDS)} grids with missing satellite...")
-        for grid_id in MISSING_SAT_GRIDS:
-            pm25_data = generate_pm25_features(grid_id, TEST_TIMESTAMP)
-            meteo_data = generate_meteo_features(grid_id, TEST_TIMESTAMP)
-            
-            conn.execute("""
-                INSERT INTO features_pm25 
-                (grid_id, timestamp_hour, pm25_t_minus_1h, pm25_t_minus_2h, 
-                 pm25_t_minus_3h, pm25_t_minus_6h, pm25_t_minus_12h, pm25_t_minus_24h)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, [pm25_data["grid_id"], pm25_data["timestamp_hour"],
-                  pm25_data["pm25_t_minus_1h"], pm25_data["pm25_t_minus_2h"],
-                  pm25_data["pm25_t_minus_3h"], pm25_data["pm25_t_minus_6h"],
-                  pm25_data["pm25_t_minus_12h"], pm25_data["pm25_t_minus_24h"]])
-            
-            conn.execute(f"""
-                INSERT INTO features_meteo VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [meteo_data["grid_id"], meteo_data["timestamp_hour"]] + [
-                meteo_data[k] for k in [
-                    "temperature_2m", "temperature_2m_lag1h", "temperature_2m_lag3h",
-                    "temperature_2m_lag12h", "temperature_2m_lag24h",
-                    "relative_humidity_2m", "relative_humidity_2m_lag1h", "relative_humidity_2m_lag3h",
-                    "relative_humidity_2m_lag6h", "relative_humidity_2m_lag12h", "relative_humidity_2m_lag24h",
-                    "dewpoint_2m", "dewpoint_2m_lag1h", "dewpoint_2m_lag3h",
-                    "dewpoint_2m_lag6h", "dewpoint_2m_lag12h", "dewpoint_2m_lag24h",
-                    "surface_pressure", "surface_pressure_lag1h", "surface_pressure_lag3h",
-                    "surface_pressure_lag6h", "surface_pressure_lag12h", "surface_pressure_lag24h",
-                    "wind_u_10m", "wind_u_10m_lag1h", "wind_u_10m_lag3h",
-                    "wind_u_10m_lag6h", "wind_u_10m_lag12h", "wind_u_10m_lag24h",
-                    "wind_v_10m", "wind_v_10m_lag1h", "wind_v_10m_lag3h",
-                    "wind_v_10m_lag6h", "wind_v_10m_lag12h", "wind_v_10m_lag24h",
-                    "cloud_cover", "cloud_cover_lag6h", "cloud_cover_lag24h",
-                    "vpd", "temp_dewpoint_diff",
-                    "precip_last_1h", "precip_last_6h", "precip_last_24h"
-                ]
-            ])
-        
-        # Populate edge timestamp grids (complete features)
-        logger.info(f"Populating {len(EDGE_TIMESTAMP_GRIDS)} edge timestamp grids...")
-        for grid_id in EDGE_TIMESTAMP_GRIDS:
-            pm25_data = generate_pm25_features(grid_id, TEST_TIMESTAMP)
-            meteo_data = generate_meteo_features(grid_id, TEST_TIMESTAMP)
-            sat_data = generate_satellite_features(grid_id, TEST_TIMESTAMP)
-            
-            conn.execute("""
-                INSERT INTO features_pm25 
-                (grid_id, timestamp_hour, pm25_t_minus_1h, pm25_t_minus_2h, 
-                 pm25_t_minus_3h, pm25_t_minus_6h, pm25_t_minus_12h, pm25_t_minus_24h)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, [pm25_data["grid_id"], pm25_data["timestamp_hour"],
-                  pm25_data["pm25_t_minus_1h"], pm25_data["pm25_t_minus_2h"],
-                  pm25_data["pm25_t_minus_3h"], pm25_data["pm25_t_minus_6h"],
-                  pm25_data["pm25_t_minus_12h"], pm25_data["pm25_t_minus_24h"]])
-            
-            conn.execute(f"""
-                INSERT INTO features_meteo VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [meteo_data["grid_id"], meteo_data["timestamp_hour"]] + [
-                meteo_data[k] for k in [
-                    "temperature_2m", "temperature_2m_lag1h", "temperature_2m_lag3h",
-                    "temperature_2m_lag12h", "temperature_2m_lag24h",
-                    "relative_humidity_2m", "relative_humidity_2m_lag1h", "relative_humidity_2m_lag3h",
-                    "relative_humidity_2m_lag6h", "relative_humidity_2m_lag12h", "relative_humidity_2m_lag24h",
-                    "dewpoint_2m", "dewpoint_2m_lag1h", "dewpoint_2m_lag3h",
-                    "dewpoint_2m_lag6h", "dewpoint_2m_lag12h", "dewpoint_2m_lag24h",
-                    "surface_pressure", "surface_pressure_lag1h", "surface_pressure_lag3h",
-                    "surface_pressure_lag6h", "surface_pressure_lag12h", "surface_pressure_lag24h",
-                    "wind_u_10m", "wind_u_10m_lag1h", "wind_u_10m_lag3h",
-                    "wind_u_10m_lag6h", "wind_u_10m_lag12h", "wind_u_10m_lag24h",
-                    "wind_v_10m", "wind_v_10m_lag1h", "wind_v_10m_lag3h",
-                    "wind_v_10m_lag6h", "wind_v_10m_lag12h", "wind_v_10m_lag24h",
-                    "cloud_cover", "cloud_cover_lag6h", "cloud_cover_lag24h",
-                    "vpd", "temp_dewpoint_diff",
-                    "precip_last_1h", "precip_last_6h", "precip_last_24h"
-                ]
-            ])
-            
-            conn.execute("""
-                INSERT INTO features_satellite VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-                )
-            """, [sat_data["grid_id"], sat_data["timestamp_hour"],
-                  sat_data["ndvi"], sat_data["mndwi"], sat_data["ndbi"],
-                  sat_data["bsi"], sat_data["ibi"], sat_data["scene_cloud_cover"],
-                  sat_data["evi"], sat_data["ui_light"], sat_data["si"],
-                  sat_data["local_ndvi_std"], sat_data["ndvi_s2"],
-                  sat_data["days_since_landsat"], sat_data["days_since_sentinel"]])
-        
+        conn.executemany(
+            "INSERT INTO pm25_observation (grid_id, timestamp, pm25) VALUES (?, ?, ?)",
+            pm25_batch
+        )
         conn.commit()
+        pm25_count = conn.execute("SELECT COUNT(*) FROM pm25_observation").fetchone()[0]
+        logger.info(f"  pm25_observation: {pm25_count} rows")
+        
+        # === POPULATE METEOROLOGICAL DATA ===
+        # Hourly values for past 7 days (168 readings per grid)
+        logger.info(f"Populating meteo: {NUM_GRIDS} grids × 168 hourly readings...")
+        meteo_batch = []
+        for grid_id in GRID_IDS:
+            for hour_offset in range(168):  # 7 days × 24 hours
+                timestamp = BASE_TIMESTAMP - timedelta(hours=hour_offset)
+                obs = generate_meteo_observation(grid_id, timestamp)
+                meteo_batch.append((
+                    obs["grid_id"],
+                    obs["timestamp"],
+                    obs["temperature_2m"],
+                    obs["relative_humidity_2m"],
+                    obs["dewpoint_2m"],
+                    obs["surface_pressure"],
+                    obs["wind_speed_10m"],
+                    obs["wind_direction_10m"],
+                    obs["precipitation"],
+                    obs["cloud_cover"]
+                ))
+        
+        conn.executemany(
+            """INSERT INTO meteo (grid_id, timestamp, temperature_2m, relative_humidity_2m, 
+                                   dewpoint_2m, surface_pressure, wind_speed_10m, wind_direction_10m, 
+                                   precipitation, cloud_cover) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            meteo_batch
+        )
+        conn.commit()
+        meteo_count = conn.execute("SELECT COUNT(*) FROM meteo").fetchone()[0]
+        logger.info(f"  meteo: {meteo_count} rows")
+        
+        # === POPULATE LANDSAT8 DATA ===
+        # Single date: 5 days ago
+        logger.info(f"Populating landsat8: {NUM_GRIDS} grids × 1 date (5 days ago)...")
+        landsat_timestamp = BASE_TIMESTAMP - timedelta(days=5)
+        landsat_batch = []
+        for grid_id in GRID_IDS:
+            obs = generate_landsat8_observation(grid_id, landsat_timestamp)
+            landsat_batch.append((
+                obs["grid_id"],
+                obs["timestamp"],
+                obs["B1"], obs["B2"], obs["B3"], obs["B4"], obs["B5"],
+                obs["B6"], obs["B7"], obs["B8"], obs["B9"], obs["B10"], obs["B11"]
+            ))
+        
+        conn.executemany(
+            """INSERT INTO landsat8 (grid_id, timestamp, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            landsat_batch
+        )
+        conn.commit()
+        landsat_count = conn.execute("SELECT COUNT(*) FROM landsat8").fetchone()[0]
+        logger.info(f"  landsat8: {landsat_count} rows")
+        
+        # === POPULATE SENTINEL2 DATA ===
+        # Single date: 2 days ago
+        logger.info(f"Populating sentinel2: {NUM_GRIDS} grids × 1 date (2 days ago)...")
+        sentinel_timestamp = BASE_TIMESTAMP - timedelta(days=2)
+        sentinel_batch = []
+        for grid_id in GRID_IDS:
+            obs = generate_sentinel2_observation(grid_id, sentinel_timestamp)
+            sentinel_batch.append((
+                obs["grid_id"],
+                obs["timestamp"],
+                obs["B2"],
+                obs["B4"],
+                obs["B8"],
+                obs["AOT"],
+                obs["QA10"]
+            ))
+        
+        conn.executemany(
+            """INSERT INTO sentinel2 (grid_id, timestamp, B2, B4, B8, AOT, QA10)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            sentinel_batch
+        )
+        conn.commit()
+        sentinel_count = conn.execute("SELECT COUNT(*) FROM sentinel2").fetchone()[0]
+        logger.info(f"  sentinel2: {sentinel_count} rows")
         
         # Print summary
-        pm25_count = conn.execute("SELECT COUNT(*) FROM features_pm25").fetchone()[0]
-        meteo_count = conn.execute("SELECT COUNT(*) FROM features_meteo").fetchone()[0]
-        sat_count = conn.execute("SELECT COUNT(*) FROM features_satellite").fetchone()[0]
-        
         logger.info("=" * 80)
-        logger.info("Mock feature data populated successfully!")
-        logger.info(f"  features_pm25: {pm25_count} rows")
-        logger.info(f"  features_meteo: {meteo_count} rows")
-        logger.info(f"  features_satellite: {sat_count} rows")
+        logger.info("Raw observation data populated successfully!")
+        logger.info(f"  pm25_observation: {pm25_count:,} rows ({NUM_GRIDS} grids × 168 hours)")
+        logger.info(f"  meteo: {meteo_count:,} rows ({NUM_GRIDS} grids × 168 hours)")
+        logger.info(f"  landsat8: {landsat_count:,} rows ({NUM_GRIDS} grids × 1 date [5 days ago])")
+        logger.info(f"  sentinel2: {sentinel_count:,} rows ({NUM_GRIDS} grids × 1 date [2 days ago])")
         logger.info("=" * 80)
     
     finally:
@@ -392,18 +235,18 @@ def populate_features(db_path: Path):
 def main():
     """Main entry point."""
     logger.info("=" * 80)
-    logger.info("Populating mock features for Phase 1 testing")
+    logger.info("Populating mock raw observations for Phase 1 testing")
     logger.info("=" * 80)
     
     if not DUCKDB_PATH.exists():
         logger.error(f"DuckDB file not found: {DUCKDB_PATH}")
-        logger.error("Run init_duckdb.py first!")
+        logger.error("Run reinitialize_duckdb.py first!")
         return 1
     
-    populate_features(DUCKDB_PATH)
+    populate_raw_observations(DUCKDB_PATH)
     
     logger.info("")
-    logger.info("Next step: Run tests with pytest Takshashila/tests/")
+    logger.info("Next step: Run tests with pytest Takshashila/tests/ -v")
     logger.info("")
     
     return 0
