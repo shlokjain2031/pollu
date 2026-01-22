@@ -216,4 +216,3 @@ func TestPathSpecificMetrics(t *testing.T) {
 	globalMetrics.RequestsTotal.WithLabelValues("compute", "success").Add(3)
 	globalMetrics.RequestsTotal.WithLabelValues("compute", "error").Add(2)
 }
-

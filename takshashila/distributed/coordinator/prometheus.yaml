@@ -1,19 +1,27 @@
-# Prometheus configuration for Takshashila Coordinator
+# Prometheus Configuration for Takshashila Coordinator
+# Item 33: Scrape configuration specification
 
+# Global settings
 global:
-  scrape_interval: 15s
+  scrape_interval: 15s       # Default scrape interval
+  scrape_timeout: 10s
   evaluation_interval: 15s
   external_labels:
     cluster: "takshashila"
     service: "coordinator"
 
+# Rule files
+rule_files:
+  - "slo_recording_rules.yaml"
+  - "coordinator_alerts.yaml"
+
+# Scrape configurations
 scrape_configs:
-  - job_name: "coordinator"
-    static_configs:
-      - targets: ["localhost:8080"]
+  - job_name: "takshashila-coordinator"
+    metrics_path: "/metrics"
     scrape_interval: 15s
     scrape_timeout: 10s
-    metrics_path: "/metrics"
-
-rule_files:
-  - "coordinator_alerts.yaml"
+    static_configs:
+      - targets: ["coordinator:8080"]
+        labels:
+          environment: "production"

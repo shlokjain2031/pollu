@@ -28,11 +28,11 @@ type Metrics struct {
 	CacheEntriesGauge  prometheus.Gauge
 
 	// Dedup Metrics
-	DedupLeadersTotal            prometheus.Counter
-	DedupFollowersTotal          prometheus.Counter
-	DedupCleanupTotal            prometheus.Counter
-	DedupActiveEntriesGauge      prometheus.Gauge
-	InflightLeaderComputations   prometheus.Gauge // Current leaders executing
+	DedupLeadersTotal          prometheus.Counter
+	DedupFollowersTotal        prometheus.Counter
+	DedupCleanupTotal          prometheus.Counter
+	DedupActiveEntriesGauge    prometheus.Gauge
+	InflightLeaderComputations prometheus.Gauge // Current leaders executing
 
 	// Deduped Requests Counter (followers only)
 	DedupedRequestsTotal prometheus.Counter
@@ -41,15 +41,15 @@ type Metrics struct {
 	ErrorsTotal *prometheus.CounterVec // Labels: error_type
 
 	// Worker Pool & Queue Metrics
-	QueueDepthGauge             prometheus.Gauge
-	QueueWaitLatencySeconds     prometheus.Histogram
-	JobsQueuedTotal             prometheus.Counter
-	JobsCompletedTotal          prometheus.Counter
-	JobsTimedOutTotal           prometheus.Counter
-	WorkersActiveGauge          prometheus.Gauge
-	WorkerRestartsTotal         prometheus.Counter
-	WorkerErrorsTotal           prometheus.Counter
-	WorkerJobDurationSeconds    prometheus.Histogram
+	QueueDepthGauge          prometheus.Gauge
+	QueueWaitLatencySeconds  prometheus.Histogram
+	JobsQueuedTotal          prometheus.Counter
+	JobsCompletedTotal       prometheus.Counter
+	JobsTimedOutTotal        prometheus.Counter
+	WorkersActiveGauge       prometheus.Gauge
+	WorkerRestartsTotal      prometheus.Counter
+	WorkerErrorsTotal        prometheus.Counter
+	WorkerJobDurationSeconds prometheus.Histogram
 }
 
 // NewMetrics creates and registers all Prometheus metrics
@@ -272,7 +272,7 @@ const (
 
 // EvictionReason enum for label values
 const (
-	EvictionReasonTTLExpired      = "ttl_expired"
+	EvictionReasonTTLExpired       = "ttl_expired"
 	EvictionReasonManualInvalidate = "manual_invalidate"
 )
 
