@@ -50,18 +50,20 @@ func TestRequestLatencyAllOutcomes(t *testing.T) {
 	globalMetrics.RequestLatencySeconds.Observe(1.0)
 }
 
-// TestRequestsTotal_PathStatus verifies requests_total has correct labels
+// TestRequestsTotal_PathStatus verifies requests_total has correct labels including model/feature versions
+// Item 26: Verify model_version and feature_version labels are recorded
 func TestRequestsTotal_PathStatus(t *testing.T) {
 	if globalMetrics == nil {
 		globalMetrics = NewMetricsWithLabels()
 	}
 
-	globalMetrics.RequestsTotal.WithLabelValues("cache", "success").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("cache", "error").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "success").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "error").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "success").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "error").Inc()
+	// Item 26: Record with all labels (path, status, model_version, feature_version)
+	globalMetrics.RequestsTotal.WithLabelValues("cache", "success", "prod_v1", "v1").Inc()
+	globalMetrics.RequestsTotal.WithLabelValues("cache", "error", "prod_v1", "v1").Inc()
+	globalMetrics.RequestsTotal.WithLabelValues("dedup", "success", "prod_v1", "v1").Inc()
+	globalMetrics.RequestsTotal.WithLabelValues("dedup", "error", "prod_v1", "v1").Inc()
+	globalMetrics.RequestsTotal.WithLabelValues("compute", "success", "prod_v1", "v1").Inc()
+	globalMetrics.RequestsTotal.WithLabelValues("compute", "error", "prod_v1", "v1").Inc()
 }
 
 // TestDedupedRequestsTotal verifies deduped requests are tracked
@@ -115,18 +117,20 @@ func TestQueueWaitLatency(t *testing.T) {
 	globalMetrics.QueueWaitLatencySeconds.Observe(0.1)
 }
 
-// TestErrorMetricsTotal verifies error type classification
+// TestErrorMetricsTotal verifies error type classification with model/feature versions
+// Item 26: Verify model_version and feature_version labels on errors_total
 func TestErrorMetricsTotal(t *testing.T) {
 	if globalMetrics == nil {
 		globalMetrics = NewMetricsWithLabels()
 	}
 
-	globalMetrics.ErrorsTotal.WithLabelValues("InvalidRequest").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("GridNotFound").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("DataMissing").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("ComputationTimeout").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("WorkerError").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("Unknown").Inc()
+	// Item 26: Record with all labels (error_type, model_version, feature_version)
+	globalMetrics.ErrorsTotal.WithLabelValues("InvalidRequest", "prod_v1", "v1").Inc()
+	globalMetrics.ErrorsTotal.WithLabelValues("GridNotFound", "prod_v1", "v1").Inc()
+	globalMetrics.ErrorsTotal.WithLabelValues("DataMissing", "prod_v1", "v1").Inc()
+	globalMetrics.ErrorsTotal.WithLabelValues("ComputationTimeout", "prod_v1", "v1").Inc()
+	globalMetrics.ErrorsTotal.WithLabelValues("WorkerError", "prod_v1", "v1").Inc()
+	globalMetrics.ErrorsTotal.WithLabelValues("Unknown", "prod_v1", "v1").Inc()
 }
 
 // TestCacheMetricsVectorized verifies cache result labels
@@ -155,7 +159,8 @@ func TestDedupMetricsNew(t *testing.T) {
 	globalMetrics.DedupWaitLatencySeconds.Observe(0.05)
 }
 
-// TestThreadSafety verifies metrics can be used concurrently
+// TestThreadSafety verifies metrics can be used concurrently with model/feature version labels
+// Item 26: Verify thread safety with model_version and feature_version labels
 func TestThreadSafety(t *testing.T) {
 	if globalMetrics == nil {
 		globalMetrics = NewMetricsWithLabels()
@@ -165,7 +170,7 @@ func TestThreadSafety(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 50; i++ {
-			globalMetrics.RequestsTotal.WithLabelValues("cache", "success").Inc()
+			globalMetrics.RequestsTotal.WithLabelValues("cache", "success", "prod_v1", "v1").Inc()
 			globalMetrics.RequestLatencySeconds.Observe(0.01)
 		}
 		done <- true
@@ -204,15 +209,16 @@ func TestLeaderComputeLatency(t *testing.T) {
 	}
 }
 
-// TestPathSpecificMetrics verifies path label tracking
+// TestPathSpecificMetrics verifies path label tracking with model/feature versions
+// Item 26: Verify path tracking includes model_version and feature_version
 func TestPathSpecificMetrics(t *testing.T) {
 	if globalMetrics == nil {
 		globalMetrics = NewMetricsWithLabels()
 	}
 
-	globalMetrics.RequestsTotal.WithLabelValues("cache", "success").Add(10)
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "success").Add(5)
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "error").Add(1)
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "success").Add(3)
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "error").Add(2)
+	globalMetrics.RequestsTotal.WithLabelValues("cache", "success", "prod_v1", "v1").Add(10)
+	globalMetrics.RequestsTotal.WithLabelValues("dedup", "success", "prod_v1", "v1").Add(5)
+	globalMetrics.RequestsTotal.WithLabelValues("dedup", "error", "prod_v1", "v1").Add(1)
+	globalMetrics.RequestsTotal.WithLabelValues("compute", "success", "prod_v1", "v1").Add(3)
+	globalMetrics.RequestsTotal.WithLabelValues("compute", "error", "prod_v1", "v1").Add(2)
 }

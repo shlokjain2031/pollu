@@ -148,6 +148,28 @@ groups:
           slo: "error_rate"
           window: "30d"
 
+      # ===== Operational Metrics (Not SLOs) =====
+      # These are derived metrics for operational visibility (not SLO targets)
+      
+      # Recording Rule: Max concurrent leaders over 5m window
+      # Use case: Identify peak concurrency for capacity planning
+      # Note: Do NOT compute in application code (must use PromQL recording rules, per Item 25)
+      - record: ops:max_concurrent_leaders:5m
+        expr: |
+          max_over_time(inflight_leader_computations[5m])
+        labels:
+          metric_type: "operational"
+          window: "5m"
+      
+      # Recording Rule: Max concurrent leaders over 1h window
+      # Use case: Daily/weekly capacity trends
+      - record: ops:max_concurrent_leaders:1h
+        expr: |
+          max_over_time(inflight_leader_computations[1h])
+        labels:
+          metric_type: "operational"
+          window: "1h"
+
 # ===== Example Alert Rules (Optional) =====
 # Add these to coordinator_alerts.yaml if using Alertmanager
 #
