@@ -2,9 +2,9 @@
 import pytest
 from datetime import datetime, timezone
 
-from Takshashila.phase1_minimal_inference.feature_assembler import FeatureAssembler
-from Takshashila.phase1_minimal_inference.errors import FeatureAssemblyError, InvalidRequestError
-from Takshashila.phase1_minimal_inference.config import FEATURE_SCHEMA_PATH
+from takshashika.core.feature_assembler import FeatureAssembler
+from takshashika.core.errors import FeatureAssemblyError, InvalidRequestError
+from takshashika.core.config import FEATURE_SCHEMA_PATH
 import json
 
 

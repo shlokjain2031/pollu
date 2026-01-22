@@ -2,10 +2,10 @@
 import pytest
 from datetime import datetime, timezone
 
-from Takshashila.phase1_minimal_inference.errors import (
+from takshashika.core.errors import (
     InvalidRequestError, FeatureAssemblyError
 )
-from Takshashila.phase1_minimal_inference.utils import round_to_hour
+from takshashika.core.utils import round_to_hour
 
 
 class TestInferenceEngine:

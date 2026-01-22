@@ -15,14 +15,14 @@ from datetime import datetime
 # Set up paths - Phase 1 is a package, we need to add parent directory
 # Use absolute path based on this file's location
 WORKER_SCRIPT = Path(__file__).resolve()
-PHASE2_WORKER_DIR = WORKER_SCRIPT.parent
-TAKSHASHILA_ROOT = PHASE2_WORKER_DIR.parent
+WORKER_DIR = WORKER_SCRIPT.parent
+TAKSHASHILA_ROOT = WORKER_DIR.parent
 POLLU_ROOT = TAKSHASHILA_ROOT.parent
 
 sys.path.insert(0, str(TAKSHASHILA_ROOT))
 
 # Now import Phase 1 as a package
-from phase1_minimal_inference.inference import InferenceEngine
+from core.inference import InferenceEngine
 
 # Get worker ID from environment
 WORKER_ID = os.environ.get("WORKER_ID", "worker-unknown")

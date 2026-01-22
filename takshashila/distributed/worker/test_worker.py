@@ -12,9 +12,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import worker module separately to handle Phase 1 dependencies
+# Import worker module separately to handle core dependencies
 try:
-    from phase2_worker.worker import Worker
+    from worker import Worker
     WORKER_AVAILABLE = True
 except ImportError:
     WORKER_AVAILABLE = False

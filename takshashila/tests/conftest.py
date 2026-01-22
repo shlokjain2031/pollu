@@ -11,13 +11,13 @@ import logging
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from Takshashila.phase1_minimal_inference.schema import initialize_schema
-from Takshashila.phase1_minimal_inference.config import (
+from takshashika.core.schema import initialize_schema
+from takshashika.core.config import (
     MODEL_PATH, FEATURE_SCHEMA_PATH, GRID_PARQUET_PATH
 )
-from Takshashila.phase1_minimal_inference.inference import InferenceEngine
-from Takshashila.phase1_minimal_inference.utils import setup_logging
-from Takshashila.scripts.populate_mock_features import populate_features
+from takshashika.core.inference import InferenceEngine
+from takshashika.core.utils import setup_logging
+from takshashika.scripts.populate_mock_features import populate_features
 import duckdb
 
 # Setup logging for tests
@@ -103,7 +103,7 @@ def assembler(inference_engine):
 @pytest.fixture
 def persistence(test_db_path):
     """Provide PersistenceLayer instance."""
-    from Takshashila.phase1_minimal_inference.persistence import PersistenceLayer
+    from takshashika.core.persistence import PersistenceLayer
     return PersistenceLayer(test_db_path)
 
 

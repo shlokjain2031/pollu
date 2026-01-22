@@ -23,7 +23,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		ServerPort:       "8080",
 		NumWorkers:       2,
-		PythonWorkerPath: "../phase2_worker/worker.py",
+		PythonWorkerPath: "../worker/worker.py",
 		QueueCapacity:    100,
 		RequestTimeout:   1 * time.Second,
 	}
