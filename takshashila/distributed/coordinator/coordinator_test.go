@@ -14,9 +14,9 @@ type MockComputeFunc func(ctx context.Context, gridID, timestampHour string) (fl
 
 // MockCoordinator wraps coordinator logic for testing without HTTP/worker pool
 type MockCoordinator struct {
-	dedup       *Deduplicator
-	cache       *ResultCache
-	computeFunc MockComputeFunc
+	dedup        *Deduplicator
+	cache        *ResultCache
+	computeFunc  MockComputeFunc
 	computeCount int32 // Track number of actual computations
 }
 

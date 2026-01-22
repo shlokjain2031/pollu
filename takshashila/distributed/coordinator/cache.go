@@ -10,10 +10,10 @@ var globalMetrics *MetricsWithLabels
 // CacheKey uniquely identifies a cached prediction
 // MUST match DedupKey exactly (no request_id)
 type CacheKey struct {
-	GridID          string
-	TimestampHour   string
-	ModelVersion    string
-	FeatureVersion  string
+	GridID         string
+	TimestampHour  string
+	ModelVersion   string
+	FeatureVersion string
 }
 
 // String returns a stable string representation for map keys
@@ -65,7 +65,7 @@ func (rc *ResultCache) Get(key CacheKey) (float64, PredictionError, bool) {
 
 	keyStr := key.String()
 	entry, exists := rc.entries[keyStr]
-	
+
 	if !exists {
 		// Cache miss - record in counters only (not in latency histograms)
 		if globalMetrics != nil {

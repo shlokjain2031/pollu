@@ -10,10 +10,10 @@ import (
 // DedupKey uniquely identifies a prediction computation
 // Does NOT include request_id (many requests can map to same computation)
 type DedupKey struct {
-	GridID          string
-	TimestampHour   string
-	ModelVersion    string
-	FeatureVersion  string
+	GridID         string
+	TimestampHour  string
+	ModelVersion   string
+	FeatureVersion string
 }
 
 // String returns a stable string representation for map keys
@@ -24,13 +24,13 @@ func (dk DedupKey) String() string {
 // DedupEntry tracks a single in-flight computation
 // Leader creates this entry; followers join and wait on done_chan
 type DedupEntry struct {
-	Key              DedupKey
-	LeaderRequestID  string
-	CreatedAt        time.Time
-	FollowerCount    int
-	Done             chan struct{} // Closed when computation finishes
-	Result           *DedupResult  // Set when computation finishes
-	mu               sync.Mutex    // Protects FollowerCount and Result
+	Key             DedupKey
+	LeaderRequestID string
+	CreatedAt       time.Time
+	FollowerCount   int
+	Done            chan struct{} // Closed when computation finishes
+	Result          *DedupResult  // Set when computation finishes
+	mu              sync.Mutex    // Protects FollowerCount and Result
 }
 
 // DedupResult holds the outcome of a computation
@@ -61,7 +61,7 @@ func (d *Deduplicator) AcquireLeader(ctx context.Context, key DedupKey, requestI
 	defer d.mu.Unlock()
 
 	keyStr := key.String()
-	
+
 	// Check if entry already exists
 	if entry, exists := d.entries[keyStr]; exists {
 		// Another request is already the leader - we're a follower
@@ -125,7 +125,7 @@ func (d *Deduplicator) Complete(key DedupKey, result *DedupResult) {
 
 	// Immediate cleanup to avoid leaks
 	delete(d.entries, keyStr)
-	
+
 	// Record cleanup and update active entries gauge
 	if globalMetrics != nil {
 		globalMetrics.DedupCleanupTotal.Inc()
@@ -146,20 +146,20 @@ func (d *Deduplicator) WaitForResult(ctx context.Context, entry *DedupEntry) (*D
 		entry.mu.Lock()
 		result := entry.Result
 		entry.mu.Unlock()
-		
+
 		if result == nil {
 			// This should never happen if Complete() was called correctly
 			return nil, fmt.Errorf("dedup: entry completed without result")
 		}
-		
+
 		// Record wait latency for follower
 		if globalMetrics != nil {
 			waitLatency := time.Since(startTime).Seconds()
 			globalMetrics.DedupWaitLatencySeconds.Observe(waitLatency)
 		}
-		
+
 		return result, result.Error
-		
+
 	case <-ctx.Done():
 		// Timeout - follower gives up
 		return nil, ctx.Err()

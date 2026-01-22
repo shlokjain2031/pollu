@@ -32,9 +32,9 @@ type PredictRequest struct {
 
 // PredictResponse is the HTTP response payload
 type PredictResponse struct {
-	RequestID     string         `json:"request_id"`
-	PM25          float64        `json:"pm25,omitempty"`
-	Error         *ErrorResponse `json:"error,omitempty"`
+	RequestID string         `json:"request_id"`
+	PM25      float64        `json:"pm25,omitempty"`
+	Error     *ErrorResponse `json:"error,omitempty"`
 }
 
 // NewCoordinator creates a new coordinator instance
@@ -245,7 +245,7 @@ func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHo
 // Instruments leader_compute_latency_seconds (execution time from queue to completion)
 func (c *Coordinator) executeComputation(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
 	startTime := time.Now()
-	
+
 	// Create job
 	job := Job{
 		GridID:        gridID,

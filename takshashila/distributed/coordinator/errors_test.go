@@ -432,7 +432,7 @@ func TestDataMissingCacheTTL(t *testing.T) {
 
 	// Wait for expiry
 	time.Sleep(100 * time.Millisecond) // Longer than 45s would be too slow for tests
-	
+
 	// For this test, we just verify the TTL property
 	// Full expiry testing is covered in cache_test.go
 }
@@ -536,10 +536,10 @@ func TestConvertWorkerError(t *testing.T) {
 	c := &Coordinator{}
 
 	testCases := []struct {
-		name          string
-		result        WorkerResult
-		expectedType  ErrorType
-		expectedHTTP  int
+		name         string
+		result       WorkerResult
+		expectedType ErrorType
+		expectedHTTP int
 	}{
 		{
 			name:         "InvalidRequest",

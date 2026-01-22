@@ -1,0 +1,196 @@
+# SLO Recording Rules for Takshashila Coordinator
+# Items 34-35: SLO definitions with PromQL recording rules
+# 
+# These rules define explicit SLOs (observed, not enforced in code)
+# and track compliance via burn rate analysis
+
+groups:
+  - name: takshashila_slo
+    interval: 30s
+    rules:
+      # ===== Cache Hit Rate SLO (Target: ≥90%) =====
+      # Item 34-35: Cache hit rate ≥90%
+      
+      - record: slo:cache_hit_rate:ratio_5m
+        expr: |
+          sum(rate(cache_hits_total{cache_result="hit"}[5m])) /
+          (sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])))
+        labels:
+          slo: "cache_hit_rate"
+          target: "0.90"
+      
+      - record: slo:cache_hit_rate:ratio_1h
+        expr: |
+          sum(rate(cache_hits_total{cache_result="hit"}[1h])) /
+          (sum(rate(cache_hits_total[1h])) + sum(rate(cache_misses_total[1h])))
+        labels:
+          slo: "cache_hit_rate"
+          target: "0.90"
+
+      # ===== Deduplication Rate SLO (Target: ≥80%) =====
+      # Item 34-35: Dedup rate ≥80%
+      
+      - record: slo:dedup_rate:ratio_5m
+        expr: |
+          sum(rate(deduped_requests_total[5m])) /
+          sum(rate(requests_total{path="dedup"}[5m]))
+        labels:
+          slo: "dedup_rate"
+          target: "0.80"
+      
+      - record: slo:dedup_rate:ratio_1h
+        expr: |
+          sum(rate(deduped_requests_total[1h])) /
+          sum(rate(requests_total{path="dedup"}[1h]))
+        labels:
+          slo: "dedup_rate"
+          target: "0.80"
+
+      # ===== P99 Latency SLO (Target: <500ms) =====
+      # Item 34-35: p99 latency <500ms
+      
+      - record: slo:request_latency:p99_5m
+        expr: |
+          histogram_quantile(0.99, sum(rate(request_latency_seconds_bucket[5m])) by (le))
+        labels:
+          slo: "p99_latency"
+          target_seconds: "0.5"
+      
+      - record: slo:request_latency:p95_5m
+        expr: |
+          histogram_quantile(0.95, sum(rate(request_latency_seconds_bucket[5m])) by (le))
+        labels:
+          slo: "p95_latency"
+          target_seconds: "0.5"
+
+      # ===== Error Rate SLO (Target: <1%) =====
+      # Item 34-35: Error rate <1%
+      
+      - record: slo:error_rate:ratio_5m
+        expr: |
+          sum(rate(requests_total{status="error"}[5m])) /
+          sum(rate(requests_total[5m]))
+        labels:
+          slo: "error_rate"
+          target: "0.01"
+      
+      - record: slo:error_rate:ratio_1h
+        expr: |
+          sum(rate(requests_total{status="error"}[1h])) /
+          sum(rate(requests_total[1h]))
+        labels:
+          slo: "error_rate"
+          target: "0.01"
+
+      # ===== Availability SLO (Target: ≥99.9%) =====
+      # Item 34-35: Availability ≥99.9%
+      # Measured as: successful requests / total requests
+      
+      - record: slo:availability:ratio_5m
+        expr: |
+          sum(rate(requests_total{status="success"}[5m])) /
+          sum(rate(requests_total[5m]))
+        labels:
+          slo: "availability"
+          target: "0.999"
+      
+      - record: slo:availability:ratio_1h
+        expr: |
+          sum(rate(requests_total{status="success"}[1h])) /
+          sum(rate(requests_total[1h]))
+        labels:
+          slo: "availability"
+          target: "0.999"
+
+      # ===== Burn Rate Tracking (Item 34-35: Alert on burn rate, not raw thresholds) =====
+      # Burn rate = (1 - SLO achievement) / (time window / error budget period)
+      # Examples:
+      # - Cache hit target 90%, window 5m, budget period 30d
+      #   If hitting 80% (10% error), burn rate = 0.10 / (5m / 30d) = 8640x
+      
+      - record: slo:cache_hit_rate:burn_rate_1h
+        expr: |
+          (1 - slo:cache_hit_rate:ratio_5m) / (1 - 0.90)
+        labels:
+          slo: "cache_hit_rate"
+          window: "1h"
+      
+      - record: slo:dedup_rate:burn_rate_1h
+        expr: |
+          (1 - slo:dedup_rate:ratio_5m) / (1 - 0.80)
+        labels:
+          slo: "dedup_rate"
+          window: "1h"
+      
+      - record: slo:error_rate:burn_rate_1h
+        expr: |
+          slo:error_rate:ratio_5m / 0.01
+        labels:
+          slo: "error_rate"
+          window: "1h"
+
+      # ===== Burn Rate Alert Thresholds =====
+      # Item 34-35: Alert on burn rate, not raw thresholds
+      # - Burn rate > 10x: Critical (1-2 hour error budget consumed in 5-10m)
+      # - Burn rate > 5x: Warning (several hours budget consumed in 1h)
+      
+      - record: slo:cache_hit_rate:burn_rate_30d
+        expr: |
+          (1 - slo:cache_hit_rate:ratio_1h) / (1 - 0.90)
+        labels:
+          slo: "cache_hit_rate"
+          window: "30d"
+      
+      - record: slo:error_rate:burn_rate_30d
+        expr: |
+          slo:error_rate:ratio_1h / 0.01
+        labels:
+          slo: "error_rate"
+          window: "30d"
+
+# ===== Example Alert Rules (Optional) =====
+# Add these to coordinator_alerts.yaml if using Alertmanager
+#
+# alert: SLO_CacheHitRateBurnRateCritical
+# expr: slo:cache_hit_rate:burn_rate_1h > 10
+# for: 5m
+# labels:
+#   severity: "critical"
+#   slo: "cache_hit_rate"
+# annotations:
+#   summary: "Cache hit rate SLO violation (burn rate {{ $value }}x)"
+#
+# alert: SLO_DeduplicationRateBurnRateWarning
+# expr: slo:dedup_rate:burn_rate_1h > 5
+# for: 15m
+# labels:
+#   severity: "warning"
+#   slo: "dedup_rate"
+#
+# alert: SLO_ErrorRateBurnRateCritical
+# expr: slo:error_rate:burn_rate_1h > 10
+# for: 5m
+# labels:
+#   severity: "critical"
+#   slo: "error_rate"
+#
+# ===== SLO Reference =====
+#
+# Recommended SLOs (Item 34-35):
+# - Cache hit rate: ≥90%     (10% miss tolerance)
+# - Dedup rate: ≥80%         (20% no-dedup tolerance)
+# - P99 latency: <500ms      (99th percentile)
+# - Error rate: <1%          (99% success rate)
+# - Availability: ≥99.9%     (99.9% successful requests)
+#
+# Error Budget Calculation:
+# - 30-day period with 90% target = 2.88 days of errors allowed
+# - If burning 10x, error budget exhausted in ~7 hours
+# - If burning 5x, error budget exhausted in ~14 hours
+#
+# Monitoring Strategy (Item 34-35):
+# 1. Define SLOs with specific percentiles and time windows
+# 2. Calculate burn rate for each SLO
+# 3. Alert when burn rate exceeds threshold (e.g., 10x)
+# 4. Investigate root cause when SLO at risk
+# 5. Track SLO compliance over longer periods (weeks/months)
