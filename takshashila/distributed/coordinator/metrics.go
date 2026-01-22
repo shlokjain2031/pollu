@@ -55,13 +55,15 @@ type Metrics struct {
 // NewMetrics creates and registers all Prometheus metrics
 func NewMetrics() *Metrics {
 	m := &Metrics{
-		// Request metrics with path and status labels
+		// Request metrics with path, status, model_version, feature_version labels
+		// Item 26: model_version and feature_version allow tracking model/feature rollouts
+		// Note: Low-cardinality labels only (typically 2-3 active model versions)
 		RequestsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "requests_total",
-				Help: "Total prediction requests by path (cache|dedup|compute) and status (success|error)",
+				Help: "Total prediction requests by path (cache|dedup|compute), status (success|error), model_version, and feature_version",
 			},
-			[]string{"path", "status"},
+			[]string{"path", "status", "model_version", "feature_version"},
 		),
 
 		// Latency histograms - separate per path, success-only
@@ -173,13 +175,14 @@ func NewMetrics() *Metrics {
 			},
 		),
 
-		// Error metrics
+		// Error metrics with error_type, model_version, feature_version labels
+		// Item 26: model_version and feature_version for debugging model/feature issues
 		ErrorsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "errors_total",
-				Help: "Total errors by type",
+				Help: "Total errors by type, model_version, and feature_version",
 			},
-			[]string{"error_type"},
+			[]string{"error_type", "model_version", "feature_version"},
 		),
 
 		// Worker pool & queue metrics
@@ -215,28 +218,32 @@ func NewMetrics() *Metrics {
 		JobsTimedOutTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
 				Name: "jobs_timed_out_total",
-				Help: "Total jobs that timed out",
+				Help: "Total jobs that exceeded execution deadline (Item 25, distinct from worker_restarts_total)",
 			},
 		),
 
 		WorkersActiveGauge: promauto.NewGauge(
 			prometheus.GaugeOpts{
 				Name: "workers_active",
-				Help: "Current number of active workers",
+				Help: "Current number of active workers (Item 25)",
 			},
 		),
 
+		// Item 25: worker_restarts_total increments ONLY on crash/health-check failure,
+		// NOT on job-level timeouts (those are tracked in jobs_timed_out_total)
 		WorkerRestartsTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
 				Name: "worker_restarts_total",
-				Help: "Total worker process restarts",
+				Help: "Total worker process restarts due to crash or health-check failure (Item 25)",
 			},
 		),
 
+		// Item 25: worker_errors_total counts errors returned by worker (inference exceptions, etc.)
+		// Does NOT count crashes (those are worker_restarts_total)
 		WorkerErrorsTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
 				Name: "worker_errors_total",
-				Help: "Total worker errors encountered",
+				Help: "Total worker errors (non-crash exceptions) (Item 25)",
 			},
 		),
 

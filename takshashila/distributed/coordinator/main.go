@@ -16,12 +16,15 @@ import (
 )
 
 // Coordinator is the main coordinator service
+// Item 26: Stores model/feature versions read at startup from environment
 type Coordinator struct {
-	config *Config
-	queue  *JobQueue
-	pool   *WorkerPool
-	dedup  *Deduplicator
-	cache  *ResultCache
+	config           *Config
+	queue            *JobQueue
+	pool             *WorkerPool
+	dedup            *Deduplicator
+	cache            *ResultCache
+	modelVersion     string // Read from MODEL_VERSION env var (Item 26)
+	featureVersion   string // Read from FEATURE_VERSION env var (Item 26)
 }
 
 // PredictRequest is the HTTP request payload
@@ -38,7 +41,18 @@ type PredictResponse struct {
 }
 
 // NewCoordinator creates a new coordinator instance
+// Item 26: Reads ModelVersion and FeatureVersion from environment at startup
 func NewCoordinator(config *Config) (*Coordinator, error) {
+	// Item 26: Read versions from environment (not request-scoped)
+	modelVersion := os.Getenv("MODEL_VERSION")
+	if modelVersion == "" {
+		modelVersion = "unknown" // Default if not set
+	}
+	featureVersion := os.Getenv("FEATURE_VERSION")
+	if featureVersion == "" {
+		featureVersion = "unknown" // Default if not set
+	}
+
 	// Create queue
 	queue := NewJobQueue(config.QueueCapacity)
 
@@ -55,11 +69,13 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 	cache := NewResultCache(5 * time.Minute)
 
 	return &Coordinator{
-		config: config,
-		queue:  queue,
-		pool:   pool,
-		dedup:  dedup,
-		cache:  cache,
+		config:         config,
+		queue:          queue,
+		pool:           pool,
+		dedup:          dedup,
+		cache:          cache,
+		modelVersion:   modelVersion,   // Item 26: Stored at startup
+		featureVersion: featureVersion, // Item 26: Stored at startup
 	}, nil
 }
 
@@ -91,8 +107,9 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	// Generate request ID
 	requestID := uuid.New().String()
 
-	log.Printf("[%s] Received prediction request (grid_id=%s, timestamp=%s)",
-		requestID, req.GridID, req.TimestampHour)
+	// Item 27: Log request_id in structured logs (not in metrics)
+	log.Printf("[%s] Received prediction request (grid_id=%s, timestamp=%s, model=%s, feature=%s)",
+		requestID, req.GridID, req.TimestampHour, c.modelVersion, c.featureVersion)
 
 	// Create context with 1-second timeout (Part 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
@@ -118,10 +135,11 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		errorResp := NewErrorResponse(predErr)
 		resp.Error = &errorResp
 
-		// Record metrics with path/status labels
+		// Item 26: Record metrics with path, status, model_version, feature_version labels
+		// request_id is NOT included (forbidden by Item 27, but logged above for structured logs)
 		if globalMetrics != nil {
-			globalMetrics.RequestsTotal.WithLabelValues(path, "error").Inc()
-			globalMetrics.ErrorsTotal.WithLabelValues(predErr.Type().String()).Inc()
+			globalMetrics.RequestsTotal.WithLabelValues(path, "error", c.modelVersion, c.featureVersion).Inc()
+			globalMetrics.ErrorsTotal.WithLabelValues(predErr.Type().String(), c.modelVersion, c.featureVersion).Inc()
 		}
 
 		// Set HTTP status from error
@@ -131,10 +149,10 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Success - record with path/status labels
+	// Success - record with path, status, model_version, feature_version labels
 	resp.PM25 = pm25
 	if globalMetrics != nil {
-		globalMetrics.RequestsTotal.WithLabelValues(path, "success").Inc()
+		globalMetrics.RequestsTotal.WithLabelValues(path, "success", c.modelVersion, c.featureVersion).Inc()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
