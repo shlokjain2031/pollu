@@ -68,6 +68,10 @@ func (d *Deduplicator) AcquireLeader(ctx context.Context, key DedupKey, requestI
 		entry.mu.Lock()
 		entry.FollowerCount++
 		entry.mu.Unlock()
+		// Record follower acquisition
+		if globalMetrics != nil {
+			globalMetrics.DedupFollowersTotal.Inc()
+		}
 		return entry, false
 	}
 
@@ -82,6 +86,11 @@ func (d *Deduplicator) AcquireLeader(ctx context.Context, key DedupKey, requestI
 	}
 
 	d.entries[keyStr] = entry
+	// Record leader acquisition
+	if globalMetrics != nil {
+		globalMetrics.DedupLeadersTotal.Inc()
+		globalMetrics.DedupActiveEntriesGauge.Set(float64(len(d.entries)))
+	}
 	return entry, true
 }
 
@@ -104,11 +113,24 @@ func (d *Deduplicator) Complete(key DedupKey, result *DedupResult) {
 	entry.Result = result
 	entry.mu.Unlock()
 
+	// Record metrics before cleanup
+	if globalMetrics != nil {
+		// Record wait latency for all followers
+		waitLatency := time.Since(entry.CreatedAt).Seconds()
+		globalMetrics.DedupWaitLatencySeconds.Observe(waitLatency)
+	}
+
 	// Wake all followers
 	close(entry.Done)
 
 	// Immediate cleanup to avoid leaks
 	delete(d.entries, keyStr)
+	
+	// Record cleanup and update active entries gauge
+	if globalMetrics != nil {
+		globalMetrics.DedupCleanupTotal.Inc()
+		globalMetrics.DedupActiveEntriesGauge.Set(float64(len(d.entries)))
+	}
 }
 
 // WaitForResult blocks until the leader completes or context times out
@@ -117,6 +139,7 @@ func (d *Deduplicator) Complete(key DedupKey, result *DedupResult) {
 // - result.Error if computation failed
 // - nil if computation succeeded
 func (d *Deduplicator) WaitForResult(ctx context.Context, entry *DedupEntry) (*DedupResult, error) {
+	startTime := time.Now()
 	select {
 	case <-entry.Done:
 		// Leader finished - return result
@@ -127,6 +150,12 @@ func (d *Deduplicator) WaitForResult(ctx context.Context, entry *DedupEntry) (*D
 		if result == nil {
 			// This should never happen if Complete() was called correctly
 			return nil, fmt.Errorf("dedup: entry completed without result")
+		}
+		
+		// Record wait latency for follower
+		if globalMetrics != nil {
+			waitLatency := time.Since(startTime).Seconds()
+			globalMetrics.DedupWaitLatencySeconds.Observe(waitLatency)
 		}
 		
 		return result, result.Error

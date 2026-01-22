@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+var globalMetrics *MetricsWithLabels
+
 // CacheKey uniquely identifies a cached prediction
 // MUST match DedupKey exactly (no request_id)
 type CacheKey struct {
@@ -57,6 +59,7 @@ func NewResultCache(ttl time.Duration) *ResultCache {
 // Returns (pm25, error, true) if cache hit (error may be nil for success)
 // Returns (0, nil, false) if cache miss or expired
 func (rc *ResultCache) Get(key CacheKey) (float64, PredictionError, bool) {
+	start := time.Now()
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
 
@@ -64,6 +67,10 @@ func (rc *ResultCache) Get(key CacheKey) (float64, PredictionError, bool) {
 	entry, exists := rc.entries[keyStr]
 	
 	if !exists {
+		// Cache miss - record in counters only (not in latency histograms)
+		if globalMetrics != nil {
+			globalMetrics.CacheMissesTotal.WithLabelValues(CacheResultMiss).Inc()
+		}
 		return 0, nil, false
 	}
 
@@ -72,7 +79,19 @@ func (rc *ResultCache) Get(key CacheKey) (float64, PredictionError, bool) {
 		// Expired - treat as miss
 		// Note: We don't delete here to avoid write lock
 		// Cleanup happens lazily in Set() or via periodic sweep
+		if globalMetrics != nil {
+			globalMetrics.CacheMissesTotal.WithLabelValues(CacheResultMiss).Inc()
+		}
 		return 0, nil, false
+	}
+
+	// Cache hit - record metrics
+	if globalMetrics != nil {
+		elapsed := time.Since(start).Seconds()
+		// Record in cache_hit_latency_seconds histogram (success-only)
+		globalMetrics.CacheHitLatencySeconds.Observe(elapsed)
+		// Record in cache_hits_total counter
+		globalMetrics.CacheHitsTotal.WithLabelValues(CacheResultHit).Inc()
 	}
 
 	return entry.PM25, entry.Error, true
@@ -118,7 +137,13 @@ func (rc *ResultCache) Invalidate(key CacheKey) {
 	defer rc.mu.Unlock()
 
 	keyStr := key.String()
-	delete(rc.entries, keyStr)
+	if _, exists := rc.entries[keyStr]; exists {
+		delete(rc.entries, keyStr)
+		// Record eviction
+		if globalMetrics != nil {
+			globalMetrics.CacheEvictionTotal.WithLabelValues(EvictionReasonManualInvalidate).Inc()
+		}
+	}
 }
 
 // EvictExpired removes all expired entries (for periodic cleanup)
@@ -134,6 +159,10 @@ func (rc *ResultCache) EvictExpired() int {
 		if entry.IsExpired(now) {
 			delete(rc.entries, keyStr)
 			evicted++
+			// Record eviction
+			if globalMetrics != nil {
+				globalMetrics.CacheEvictionTotal.WithLabelValues(EvictionReasonTTLExpired).Inc()
+			}
 		}
 	}
 
@@ -163,6 +192,11 @@ func (rc *ResultCache) Stats() CacheStats {
 		if entry.IsExpired(now) {
 			stats.ExpiredEntries++
 		}
+	}
+
+	// Update gauge metric
+	if globalMetrics != nil {
+		globalMetrics.CacheEntriesGauge.Set(float64(stats.TotalEntries))
 	}
 
 	return stats

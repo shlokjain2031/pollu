@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Coordinator is the main coordinator service
@@ -64,11 +65,15 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 
 // handlePredict handles POST /predict requests
 // Orchestrates: Cache Check → Dedup → Compute → Cache Store
+// Part 3b: Instruments with request_latency_seconds and path/status labels
 func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Record request entry time for end-to-end latency
+	startTime := time.Now()
 
 	// Parse request
 	var req PredictRequest
@@ -94,7 +99,13 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Execute prediction with dedup + cache
-	pm25, err := c.executePrediction(ctx, req.GridID, req.TimestampHour, requestID)
+	pm25, path, err := c.executePredictionWithPath(ctx, req.GridID, req.TimestampHour, requestID)
+
+	// Record end-to-end latency
+	if globalMetrics != nil {
+		elapsed := time.Since(startTime).Seconds()
+		globalMetrics.RequestLatencySeconds.Observe(elapsed)
+	}
 
 	// Build response
 	resp := PredictResponse{
@@ -107,6 +118,12 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		errorResp := NewErrorResponse(predErr)
 		resp.Error = &errorResp
 
+		// Record metrics with path/status labels
+		if globalMetrics != nil {
+			globalMetrics.RequestsTotal.WithLabelValues(path, "error").Inc()
+			globalMetrics.ErrorsTotal.WithLabelValues(predErr.Type().String()).Inc()
+		}
+
 		// Set HTTP status from error
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(predErr.HTTPStatus())
@@ -114,15 +131,20 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Success
+	// Success - record with path/status labels
 	resp.PM25 = pm25
+	if globalMetrics != nil {
+		globalMetrics.RequestsTotal.WithLabelValues(path, "success").Inc()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
 }
 
-// executePrediction orchestrates cache check, dedup, and computation
-func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
+// executePredictionWithPath orchestrates cache check, dedup, and computation
+// Returns: (pm25, path, error) where path is "cache", "dedup", or "compute"
+func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, timestampHour, requestID string) (float64, string, error) {
 	// Construct dedup/cache key (model_version and feature_version hardcoded for now)
 	key := DedupKey{
 		GridID:         gridID,
@@ -142,10 +164,10 @@ func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHo
 	if pm25, cachedErr, hit := c.cache.Get(cacheKey); hit {
 		if cachedErr != nil {
 			log.Printf("[%s] Cache HIT (error) for %s: %v", requestID, key.String(), cachedErr)
-			return 0, cachedErr
+			return 0, "cache", cachedErr
 		}
 		log.Printf("[%s] Cache HIT for %s", requestID, key.String())
-		return pm25, nil
+		return pm25, "cache", nil
 	}
 
 	log.Printf("[%s] Cache MISS for %s", requestID, key.String())
@@ -157,18 +179,29 @@ func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHo
 		// We're a follower - wait for leader to finish
 		log.Printf("[%s] FOLLOWER: waiting for leader %s", requestID, entry.LeaderRequestID)
 
+		// Track deduped request
+		if globalMetrics != nil {
+			globalMetrics.DedupedRequestsTotal.Inc()
+		}
+
 		result, err := c.dedup.WaitForResult(ctx, entry)
 		if err != nil {
 			log.Printf("[%s] FOLLOWER: wait failed: %v", requestID, err)
-			return 0, err
+			return 0, "dedup", err
 		}
 
 		log.Printf("[%s] FOLLOWER: received result from leader (pm25=%.2f)", requestID, result.PM25)
-		return result.PM25, result.Error
+		return result.PM25, "dedup", result.Error
 	}
 
 	// We're the leader - execute computation
 	log.Printf("[%s] LEADER: executing computation for %s", requestID, key.String())
+
+	// Track inflight leader computation
+	if globalMetrics != nil {
+		globalMetrics.InflightLeaderComputations.Inc()
+		defer globalMetrics.InflightLeaderComputations.Dec()
+	}
 
 	pm25, err := c.executeComputation(ctx, gridID, timestampHour, requestID)
 
@@ -199,11 +232,20 @@ func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHo
 		log.Printf("[%s] LEADER: error not cached: %s", requestID, predErr.Type())
 	}
 
-	return pm25, predErr
+	return pm25, "compute", predErr
+}
+
+// executePrediction orchestrates cache check, dedup, and computation (legacy)
+func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
+	pm25, _, err := c.executePredictionWithPath(ctx, gridID, timestampHour, requestID)
+	return pm25, err
 }
 
 // executeComputation submits job to worker pool and waits for result
+// Instruments leader_compute_latency_seconds (execution time from queue to completion)
 func (c *Coordinator) executeComputation(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
+	startTime := time.Now()
+	
 	// Create job
 	job := Job{
 		GridID:        gridID,
@@ -226,6 +268,12 @@ func (c *Coordinator) executeComputation(ctx context.Context, gridID, timestampH
 	// Wait for result or timeout
 	select {
 	case result := <-resultChan:
+		// Record leader computation latency
+		if globalMetrics != nil {
+			elapsed := time.Since(startTime).Seconds()
+			globalMetrics.LeaderComputeLatencySeconds.Observe(elapsed)
+		}
+
 		if result.Error != "" {
 			// Convert worker error to typed error based on error_type
 			return 0, c.convertWorkerError(result)
@@ -233,6 +281,7 @@ func (c *Coordinator) executeComputation(ctx context.Context, gridID, timestampH
 		return result.PM25, nil
 
 	case <-ctx.Done():
+		// Request timeout (context deadline exceeded)
 		return 0, ctx.Err()
 	}
 }
@@ -279,6 +328,11 @@ func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMetrics exposes Prometheus metrics at /metrics
+func (c *Coordinator) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	promhttp.Handler().ServeHTTP(w, r)
+}
+
 // Shutdown gracefully shuts down the coordinator
 func (c *Coordinator) Shutdown() {
 	log.Println("Shutting down coordinator...")
@@ -287,6 +341,9 @@ func (c *Coordinator) Shutdown() {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	// Initialize metrics globally
+	globalMetrics = NewMetricsWithLabels()
 
 	// Load config
 	config := DefaultConfig()
@@ -302,6 +359,7 @@ func main() {
 	// Setup HTTP handlers
 	http.HandleFunc("/predict", coordinator.handlePredict)
 	http.HandleFunc("/health", coordinator.handleHealth)
+	http.HandleFunc("/metrics", coordinator.handleMetrics)
 
 	// Create HTTP server
 	server := &http.Server{

@@ -1,0 +1,137 @@
+# Prometheus alerting rules for Takshashila Coordinator
+
+groups:
+  - name: coordinator_alerts
+    interval: 30s
+    rules:
+      # Request timeouts exceeded 5%
+      - alert: HighRequestTimeoutRate
+        expr: |
+          (rate(request_timeout_total[5m]) / rate(requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          component: coordinator
+        annotations:
+          summary: "High request timeout rate (>5%)"
+          description: "{{ $value | humanizePercentage }} of requests are timing out"
+
+      # Cache hit rate below 50%
+      - alert: LowCacheHitRate
+        expr: |
+          (rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))) < 0.5
+        for: 3m
+        labels:
+          severity: info
+          component: cache
+        annotations:
+          summary: "Low cache hit rate"
+          description: "Cache hit rate is {{ $value | humanizePercentage }} (threshold 50%)"
+
+      # Error rate exceeds 1%
+      - alert: HighErrorRate
+        expr: |
+          (rate(errors_total[5m]) / rate(requests_total[5m])) > 0.01
+        for: 2m
+        labels:
+          severity: warning
+          component: coordinator
+        annotations:
+          summary: "High error rate"
+          description: "{{ $value | humanizePercentage }} of requests are failing"
+
+      # Dedup effectiveness below 70%
+      - alert: LowDedupEffectiveness
+        expr: |
+          (rate(dedup_followers_total[5m]) / (rate(dedup_leaders_total[5m]) + rate(dedup_followers_total[5m]))) < 0.7
+        for: 5m
+        labels:
+          severity: info
+          component: dedup
+        annotations:
+          summary: "Low deduplication effectiveness"
+          description: "Only {{ $value | humanizePercentage }} of requests are deduplicated (threshold 70%)"
+
+      # P95 request latency exceeds 500ms
+      - alert: HighRequestLatency
+        expr: |
+          histogram_quantile(0.95, rate(worker_compute_latency_seconds_bucket[5m])) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+          component: worker
+        annotations:
+          summary: "High P95 request latency"
+          description: "P95 latency is {{ $value | humanizeDuration }} (threshold 500ms)"
+
+      # Active dedup entries accumulating (potential leak)
+      - alert: DedupLeakDetected
+        expr: |
+          dedup_active_entries > 100
+        for: 1m
+        labels:
+          severity: critical
+          component: dedup
+        annotations:
+          summary: "Potential dedup memory leak detected"
+          description: "{{ $value }} active entries, expected ~0 after completion"
+
+      # Worker timeouts increasing
+      - alert: WorkerTimeoutsIncreasing
+        expr: |
+          rate(worker_timeout_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: worker
+        annotations:
+          summary: "Worker timeouts detected"
+          description: "{{ $value }} worker timeouts per second in last 5 minutes"
+
+      # GridNotFound errors dominating
+      - alert: HighGridNotFoundRate
+        expr: |
+          (rate(errors_total{error_type="GridNotFound"}[5m]) / rate(errors_total[5m])) > 0.3
+        for: 3m
+        labels:
+          severity: info
+          component: data
+        annotations:
+          summary: "High GridNotFound error rate"
+          description: "{{ $value | humanizePercentage }} of errors are grid-not-found (check grid mapping)"
+
+      # DataMissing errors indicate upstream data issues
+      - alert: HighDataMissingRate
+        expr: |
+          (rate(errors_total{error_type="DataMissing"}[5m]) / rate(errors_total[5m])) > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          component: data
+        annotations:
+          summary: "High DataMissing error rate"
+          description: "{{ $value | humanizePercentage }} of errors are data-missing (check data availability)"
+
+      # Cache entries growing unbounded
+      - alert: CacheEntriesGrowing
+        expr: |
+          rate(cache_entries[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Cache entries growing too fast"
+          description: "Adding {{ $value }} entries per second (check eviction)"
+
+      # ComputationTimeout errors increasing
+      - alert: HighComputationTimeoutRate
+        expr: |
+          (rate(errors_total{error_type="ComputationTimeout"}[5m]) / rate(errors_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: worker
+        annotations:
+          summary: "High computation timeout rate"
+          description: "{{ $value | humanizePercentage }} of errors are timeouts (system may be overloaded)"
