@@ -74,7 +74,7 @@ class FeatureAssembler:
         
         Args:
             grid_id: Grid cell identifier (e.g., "g00000001")
-            timestamp_hour: Prediction timestamp (hour-floored)
+            timestamp_hour: Prediction timestamp (must be timezone-naive, hour-floored)
         
         Returns:
             Single-row DataFrame with 64 feature columns in correct order
@@ -82,7 +82,18 @@ class FeatureAssembler:
         Raises:
             InvalidRequestError: If grid_id not in grid table
             FeatureAssemblyError: If any required raw data is missing or stale
+        
+        Note:
+            timestamp_hour must be timezone-naive to match DuckDB TIMESTAMP storage.
+            Use round_to_hour() to normalize input timestamps.
         """
+        # Ensure timezone-naive (should already be normalized by round_to_hour)
+        if timestamp_hour.tzinfo is not None:
+            logger.warning(f"fetch_features received timezone-aware timestamp: {timestamp_hour}, stripping timezone")
+            timestamp_hour = timestamp_hour.replace(tzinfo=None)
+        
+        logger.debug(f"fetch_features: grid_id={grid_id}, timestamp_hour={timestamp_hour} (type: {type(timestamp_hour)}, tzinfo: {timestamp_hour.tzinfo})")
+        
         conn = self._get_connection()
         
         try:
@@ -171,15 +182,19 @@ class FeatureAssembler:
             
             pm25_value, obs_timestamp = result
             
-            # Check freshness
-            age_seconds = (timestamp_hour - obs_timestamp).total_seconds()
-            if age_seconds > FRESHNESS_THRESHOLDS["pm25_observation"]:
+            # Verify we got the exact timestamp we requested
+            # (For lag features, the observation SHOULD be old - that's the point!)
+            if obs_timestamp != target_ts:
+                logger.warning(
+                    f"PM2.5 {feature_name}: Expected {target_ts}, got {obs_timestamp}"
+                )
                 raise FeatureAssemblyError(
                     grid_id=grid_id,
                     timestamp_hour=timestamp_hour,
-                    missing_feature=f"pm25_observation stale (age={age_seconds}s)"
+                    missing_feature=f"pm25_observation timestamp mismatch: expected {target_ts}, got {obs_timestamp}"
                 )
             
+            logger.debug(f"PM2.5 {feature_name}: value={pm25_value:.2f} at {obs_timestamp}")
             features[feature_name] = pm25_value
         
         return features
@@ -209,6 +224,8 @@ class FeatureAssembler:
             "dewpoint_2m": [0, 1, 3, 6, 12, 24],
             "surface_pressure": [0, 1, 3, 6, 12, 24],
             "cloud_cover": [0, 6, 24],
+            "wind_speed_10m": [0, 1, 3, 6, 12, 24],  # Will convert to U/V components
+            "wind_direction_10m": [0, 1, 3, 6, 12, 24],  # Will convert to U/V components
         }
         
         # Fetch all required observations
@@ -234,13 +251,15 @@ class FeatureAssembler:
                 
                 value, obs_timestamp = result
                 
-                # Check freshness
-                age_seconds = (timestamp_hour - obs_timestamp).total_seconds()
-                if age_seconds > FRESHNESS_THRESHOLDS["meteo"]:
+                # Verify we got the exact timestamp we requested
+                if obs_timestamp != target_ts:
+                    logger.warning(
+                        f"Meteo {var_name} lag{lag}h: Expected {target_ts}, got {obs_timestamp}"
+                    )
                     raise FeatureAssemblyError(
                         grid_id=grid_id,
                         timestamp_hour=timestamp_hour,
-                        missing_feature=f"meteo.{var_name} stale (age={age_seconds}s)"
+                        missing_feature=f"meteo.{var_name} timestamp mismatch: expected {target_ts}, got {obs_timestamp}"
                     )
                 
                 observations[var_name][lag] = value
@@ -248,12 +267,40 @@ class FeatureAssembler:
         # Assemble lagged features
         for var_name, lag_hours in meteo_lags.items():
             for lag in lag_hours:
+                # Skip wind variables - we'll convert them to U/V components below
+                if var_name in ["wind_speed_10m", "wind_direction_10m"]:
+                    continue
+                    
                 if lag == 0:
                     feature_name = var_name
                 else:
                     feature_name = f"{var_name}_lag{lag}h"
                 
                 features[feature_name] = observations[var_name][lag]
+        
+        # Convert wind speed/direction to U/V components
+        # U component: eastward wind (negative = westward)
+        # V component: northward wind (negative = southward)
+        # U = -speed * sin(direction_radians)
+        # V = -speed * cos(direction_radians)
+        for lag in meteo_lags["wind_speed_10m"]:
+            speed = observations["wind_speed_10m"][lag]
+            direction = observations["wind_direction_10m"][lag]
+            
+            # Convert direction from degrees to radians
+            direction_rad = np.deg2rad(direction)
+            
+            # Compute U and V components
+            u_component = -speed * np.sin(direction_rad)
+            v_component = -speed * np.cos(direction_rad)
+            
+            # Add to features
+            if lag == 0:
+                features["wind_u_10m"] = u_component
+                features["wind_v_10m"] = v_component
+            else:
+                features[f"wind_u_10m_lag{lag}h"] = u_component
+                features[f"wind_v_10m_lag{lag}h"] = v_component
         
         # Compute derived meteorological features
         temp_0 = observations["temperature_2m"][0]

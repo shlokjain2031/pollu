@@ -2,11 +2,11 @@
 """Initialize DuckDB schema and load grid reference data.
 
 Usage:
-    python3 takshashika/scripts/init_duckdb.py
-    cd takshashika && python3 scripts/init_duckdb.py
+    python3 takshashila/scripts/init_duckdb.py
+    cd takshashila && python3 scripts/init_duckdb.py
 
 Creates:
-    - DuckDB file at takshashika/duckdb/predictions.duckdb
+    - DuckDB file at takshashila/duckdb/predictions.duckdb
     - All schema tables (grids, features_*, predictions)
     - Loads 509,209 grid cells from Mumbai parquet
     - Populates features_spatial from grids
@@ -19,9 +19,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from takshashika.core.schema import initialize_schema
-from takshashika.core.config import DUCKDB_PATH, GRID_PARQUET_PATH
-from takshashika.core.utils import setup_logging
+from takshashila.core.schema import initialize_schema
+from takshashila.core.config import DUCKDB_PATH, GRID_PARQUET_PATH
+from takshashila.core.utils import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 def main():
     """Initialize DuckDB schema and load grid data."""
     logger.info("=" * 80)
-    logger.info("Initializing DuckDB schema for takshashika Phase 1")
+    logger.info("Initializing DuckDB schema for takshashila Phase 1")
     logger.info("=" * 80)
     
     logger.info(f"DuckDB path: {DUCKDB_PATH}")
@@ -57,7 +57,7 @@ def main():
     logger.info("")
     logger.info("Next steps:")
     logger.info("1. Run populate_mock_features.py to load test data")
-    logger.info("2. Run tests: pytest takshashika/tests/")
+    logger.info("2. Run tests: pytest takshashila/tests/")
     logger.info("")
 
 

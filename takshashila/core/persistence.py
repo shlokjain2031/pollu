@@ -1,6 +1,10 @@
 """DuckDB persistence layer with single-writer enforcement.
 
 Implements read/write operations with validation per SYSTEM_CONTRACTS.md §3 and §5.
+
+TIMESTAMP POLICY:
+    All timestamps passed to persistence methods must be timezone-naive (conceptually UTC).
+    This matches DuckDB's TIMESTAMP column storage behavior.
 """
 import duckdb
 import threading

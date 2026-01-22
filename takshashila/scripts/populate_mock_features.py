@@ -8,8 +8,8 @@ Populates 1000 unique grid IDs with:
 - sentinel2: single date 2 days ago with spectral bands B2, B4, B8, AOT, QA10
 
 Usage:
-    python3 takshashika/scripts/populate_mock_features.py
-    cd takshashika && python3 scripts/populate_mock_features.py
+    python3 takshashila/scripts/populate_mock_features.py
+    cd takshashila && python3 scripts/populate_mock_features.py
 """
 import sys
 import logging
@@ -22,14 +22,16 @@ import duckdb
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from takshashika.core.config import DUCKDB_PATH
-from takshashika.core.utils import setup_logging
+from takshashila.core.config import DUCKDB_PATH
+from takshashila.core.utils import setup_logging, floor_to_hour
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-# Base timestamp for mock data (now)
-BASE_TIMESTAMP = datetime(2026, 1, 21, 12, 0, 0, tzinfo=timezone.utc)
+# Base timestamp for mock data (now) - normalized to floor of hour
+BASE_TIMESTAMP = datetime(
+    2026, 1, 21, 12, 29, 32, tzinfo=timezone.utc
+)
 
 # Number of unique grid IDs to populate
 NUM_GRIDS = 1000
@@ -124,9 +126,15 @@ def populate_raw_observations(db_path: Path):
         # Hourly values for past 7 days (168 readings per grid)
         logger.info(f"Populating pm25_observation: {NUM_GRIDS} grids × 168 hourly readings...")
         pm25_batch = []
+        base_hour = BASE_TIMESTAMP.replace(
+            minute=0,
+            second=0,
+            microsecond=0
+        )
         for grid_id in GRID_IDS:
             for hour_offset in range(168):  # 7 days × 24 hours
-                timestamp = BASE_TIMESTAMP - timedelta(hours=hour_offset)
+                # Floor to hour boundary
+                timestamp = (base_hour - timedelta(hours=hour_offset)).replace(tzinfo=None)
                 obs = generate_pm25_observation(grid_id, timestamp)
                 pm25_batch.append((obs["grid_id"], obs["timestamp"], obs["pm25"]))
         
@@ -136,15 +144,27 @@ def populate_raw_observations(db_path: Path):
         )
         conn.commit()
         pm25_count = conn.execute("SELECT COUNT(*) FROM pm25_observation").fetchone()[0]
+        print(f"=== SAMPLE ROWS: pm25_observation ===")
+        sample = conn.execute(
+            f"SELECT * FROM pm25_observation LIMIT 5"
+        ).fetchdf()
+        print(sample)
+        print()
         logger.info(f"  pm25_observation: {pm25_count} rows")
         
         # === POPULATE METEOROLOGICAL DATA ===
         # Hourly values for past 7 days (168 readings per grid)
         logger.info(f"Populating meteo: {NUM_GRIDS} grids × 168 hourly readings...")
         meteo_batch = []
+        base_hour = BASE_TIMESTAMP.replace(
+            minute=0,
+            second=0,
+            microsecond=0
+        )
         for grid_id in GRID_IDS:
             for hour_offset in range(168):  # 7 days × 24 hours
-                timestamp = BASE_TIMESTAMP - timedelta(hours=hour_offset)
+                # Floor to hour boundary
+                timestamp = (base_hour - timedelta(hours=hour_offset)).replace(tzinfo=None)
                 obs = generate_meteo_observation(grid_id, timestamp)
                 meteo_batch.append((
                     obs["grid_id"],
@@ -173,7 +193,13 @@ def populate_raw_observations(db_path: Path):
         # === POPULATE LANDSAT8 DATA ===
         # Single date: 5 days ago
         logger.info(f"Populating landsat8: {NUM_GRIDS} grids × 1 date (5 days ago)...")
-        landsat_timestamp = BASE_TIMESTAMP - timedelta(days=5)
+        base_hour = BASE_TIMESTAMP.replace(
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        landsat_timestamp = ((base_hour - timedelta(days=5)).replace(tzinfo=None))
         landsat_batch = []
         for grid_id in GRID_IDS:
             obs = generate_landsat8_observation(grid_id, landsat_timestamp)
@@ -196,7 +222,12 @@ def populate_raw_observations(db_path: Path):
         # === POPULATE SENTINEL2 DATA ===
         # Single date: 2 days ago
         logger.info(f"Populating sentinel2: {NUM_GRIDS} grids × 1 date (2 days ago)...")
-        sentinel_timestamp = BASE_TIMESTAMP - timedelta(days=2)
+        base_hour = BASE_TIMESTAMP.replace(
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+        sentinel_timestamp = (base_hour - timedelta(days=2)).replace(tzinfo=None)
         sentinel_batch = []
         for grid_id in GRID_IDS:
             obs = generate_sentinel2_observation(grid_id, sentinel_timestamp)
@@ -246,7 +277,7 @@ def main():
     populate_raw_observations(DUCKDB_PATH)
     
     logger.info("")
-    logger.info("Next step: Run tests with pytest takshashika/tests/ -v")
+    logger.info("Next step: Run tests with pytest takshashila/tests/ -v")
     logger.info("")
     
     return 0
