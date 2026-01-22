@@ -10,13 +10,13 @@ from pathlib import Path
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-PHASE1_PATH = PROJECT_ROOT / "phase1_minimal_inference"
+CORE_PATH = PROJECT_ROOT / "core"
 
 # Add Phase 1 to Python path (so we can import inference module)
-sys.path.insert(0, str(PHASE1_PATH))
+sys.path.insert(0, str(CORE_PATH))
 
-DB_PATH = PHASE1_PATH / "takshashila.db"
-MODEL_PATH = PHASE1_PATH.parent / "artifacts" / "v1" / "aqi" / "prod_v1.txt"
+DB_PATH = CORE_PATH / "takshashila.db"
+MODEL_PATH = CORE_PATH.parent / "artifacts" / "v1" / "aqi" / "prod_v1.txt"
 
 # Worker settings
 WORKER_ID = os.environ.get("WORKER_ID", "worker-unknown")

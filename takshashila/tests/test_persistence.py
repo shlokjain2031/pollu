@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 import threading
 import time
 
-from Takshashila.phase1_minimal_inference.persistence import PersistenceLayer
-from Takshashila.phase1_minimal_inference.errors import PersistenceError
-from Takshashila.phase1_minimal_inference.config import MODEL_VERSION, SCHEMA_HASH
+from takshashika.core.persistence import PersistenceLayer
+from takshashika.core.errors import PersistenceError
+from takshashika.core.config import MODEL_VERSION, SCHEMA_HASH
 
 
 class TestPersistenceLayer:

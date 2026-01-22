@@ -8,8 +8,8 @@ Populates 1000 unique grid IDs with:
 - sentinel2: single date 2 days ago with spectral bands B2, B4, B8, AOT, QA10
 
 Usage:
-    python3 Takshashila/scripts/populate_mock_features.py
-    cd Takshashila && python3 scripts/populate_mock_features.py
+    python3 takshashika/scripts/populate_mock_features.py
+    cd takshashika && python3 scripts/populate_mock_features.py
 """
 import sys
 import logging
@@ -22,8 +22,8 @@ import duckdb
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from Takshashila.phase1_minimal_inference.config import DUCKDB_PATH
-from Takshashila.phase1_minimal_inference.utils import setup_logging
+from takshashika.core.config import DUCKDB_PATH
+from takshashika.core.utils import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -246,7 +246,7 @@ def main():
     populate_raw_observations(DUCKDB_PATH)
     
     logger.info("")
-    logger.info("Next step: Run tests with pytest Takshashila/tests/ -v")
+    logger.info("Next step: Run tests with pytest takshashika/tests/ -v")
     logger.info("")
     
     return 0

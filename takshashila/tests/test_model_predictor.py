@@ -4,9 +4,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
-from Takshashila.phase1_minimal_inference.model_predictor import ModelPredictor
-from Takshashila.phase1_minimal_inference.errors import ModelInferenceError
-from Takshashila.phase1_minimal_inference.config import MODEL_PATH, N_FEATURES
+from takshashika.core.model_predictor import ModelPredictor
+from takshashika.core.errors import ModelInferenceError
+from takshashika.core.config import MODEL_PATH, N_FEATURES
 
 
 class TestModelPredictor:
