@@ -18,13 +18,13 @@ import (
 // Coordinator is the main coordinator service
 // Item 26: Stores model/feature versions read at startup from environment
 type Coordinator struct {
-	config           *Config
-	queue            *JobQueue
-	pool             *WorkerPool
-	dedup            *Deduplicator
-	cache            *ResultCache
-	modelVersion     string // Read from MODEL_VERSION env var (Item 26)
-	featureVersion   string // Read from FEATURE_VERSION env var (Item 26)
+	config         *Config
+	queue          *JobQueue
+	pool           *WorkerPool
+	dedup          *Deduplicator
+	cache          *ResultCache
+	modelVersion   string // Read from MODEL_VERSION env var (Item 26)
+	featureVersion string // Read from FEATURE_VERSION env var (Item 26)
 }
 
 // PredictRequest is the HTTP request payload
