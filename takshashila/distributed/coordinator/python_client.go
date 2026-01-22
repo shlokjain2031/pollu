@@ -74,7 +74,7 @@ func NewWorkerPool(numWorkers int, pythonPath string, queue *JobQueue) (*WorkerP
 
 // spawnWorker starts a single Python worker process
 func spawnWorker(id, pythonPath string) (*PythonWorker, error) {
-	cmd := exec.Command("python", pythonPath)
+	cmd := exec.Command("python3", pythonPath)
 
 	// Set environment variable so worker knows its ID
 	cmd.Env = append(os.Environ(), fmt.Sprintf("WORKER_ID=%s", id))

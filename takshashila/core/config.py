@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Project structure
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-TAKSHASHILA_ROOT = PROJECT_ROOT / "Takshashila"
+TAKSHASHILA_ROOT = PROJECT_ROOT / "takshashila"
 
 # Model artifacts
 MODEL_PATH = PROJECT_ROOT / "dwarka/models/prod_v1/model.txt"
@@ -18,7 +18,7 @@ GRID_PARQUET_PATH = PROJECT_ROOT / "artifacts/v1/grids/mumbai/grid.parquet"
 GRID_METADATA_PATH = PROJECT_ROOT / "artifacts/v1/grids/mumbai/metadata.json"
 
 # DuckDB storage
-DUCKDB_PATH = TAKSHASHILA_ROOT / "duckdb/predictions.duckdb"
+DUCKDB_PATH = TAKSHASHILA_ROOT / "duckdb/pollu.duckdb"
 
 # Model metadata
 MODEL_VERSION = "prod_v1"

@@ -8,31 +8,30 @@ from .config import LOG_LEVEL, LOG_FORMAT, LOG_DATEFMT
 
 
 def round_to_hour(dt: datetime) -> datetime:
-    """Floor timestamp to nearest hour boundary (UTC).
+    """Floor timestamp to nearest hour boundary (timezone-naive UTC).
     
-    Implements time semantics per SYSTEM_CONTRACTS.md §2.
+    Returns timezone-naive datetime to match DuckDB TIMESTAMP storage.
+    All timestamps in the system are conceptually UTC but stored without tzinfo.
     
     Args:
-        dt: Input datetime (any timezone)
+        dt: Input datetime (any timezone or naive)
     
     Returns:
-        Datetime floored to hour, in UTC
+        Timezone-naive datetime floored to hour (UTC)
     
     Examples:
         >>> round_to_hour(datetime(2026, 1, 19, 16, 47, 30))
-        datetime(2026, 1, 19, 16, 0, 0, tzinfo=timezone.utc)
+        datetime(2026, 1, 19, 16, 0, 0)
         
-        >>> round_to_hour(datetime(2026, 1, 19, 16, 0, 0))
-        datetime(2026, 1, 19, 16, 0, 0, tzinfo=timezone.utc)
+        >>> round_to_hour(datetime(2026, 1, 19, 16, 0, 0, tzinfo=timezone.utc))
+        datetime(2026, 1, 19, 16, 0, 0)
     """
-    # Ensure UTC
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
+    # Convert to UTC if timezone-aware
+    if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc)
     
-    # Floor to hour
-    return dt.replace(minute=0, second=0, microsecond=0)
+    # Floor to hour and remove timezone info
+    return dt.replace(minute=0, second=0, microsecond=0, tzinfo=None)
 
 
 def setup_logging(level: str = LOG_LEVEL) -> None:
@@ -90,3 +89,6 @@ def validate_grid_id_format(grid_id: str) -> bool:
         return True
     except ValueError:
         return False
+    
+def floor_to_hour(ts: datetime) -> datetime:
+    return ts.replace(minute=0, second=0, microsecond=0)

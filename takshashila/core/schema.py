@@ -1,6 +1,11 @@
 """DuckDB schema definitions for Takshashila inference system.
 
 Defines all tables, indices, and schema initialization logic.
+
+TIMESTAMP POLICY:
+    All TIMESTAMP columns store timezone-naive datetimes (conceptually UTC).
+    DuckDB's TIMESTAMP type does not preserve timezone information.
+    Use round_to_hour() from utils.py to normalize all timestamps before DB operations.
 """
 import duckdb
 import pandas as pd

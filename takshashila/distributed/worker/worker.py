@@ -16,9 +16,12 @@ from datetime import datetime
 # Use absolute path based on this file's location
 WORKER_SCRIPT = Path(__file__).resolve()
 WORKER_DIR = WORKER_SCRIPT.parent
-TAKSHASHILA_ROOT = WORKER_DIR.parent
+DISTRIBUTED_DIR = WORKER_DIR.parent
+TAKSHASHILA_ROOT = DISTRIBUTED_DIR.parent  # Go up 2 levels: worker -> distributed -> takshashila
 POLLU_ROOT = TAKSHASHILA_ROOT.parent
 
+# Add Takshashila to path so we can import core as a package
+# This is critical for subprocess spawning
 sys.path.insert(0, str(TAKSHASHILA_ROOT))
 
 # Now import Phase 1 as a package
