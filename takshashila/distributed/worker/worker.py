@@ -31,7 +31,7 @@ from core.inference import InferenceEngine
 WORKER_ID = os.environ.get("WORKER_ID", "worker-unknown")
 
 # Use absolute paths based on actual file locations
-DUCKDB_PATH = TAKSHASHILA_ROOT / "duckdb" / "predictions.duckdb"
+DUCKDB_PATH = TAKSHASHILA_ROOT / "duckdb" / "pollu.duckdb"
 MODEL_PATH = POLLU_ROOT / "dwarka" / "models" / "prod_v1" / "model.txt"
 FEATURE_SCHEMA_PATH = POLLU_ROOT / "dwarka" / "models" / "prod_v1" / "feature_schema.json"
 
@@ -69,6 +69,37 @@ class Worker:
         except Exception as e:
             logger.error(f"Failed to initialize worker: {e}")
             raise
+    
+    def process_message(self, msg):
+        """
+        Part 1: Route message to appropriate handler based on type field.
+        
+        Handles:
+        - "job": Regular inference job
+        - "health_check": Health check ping
+        """
+        msg_type = msg.get("type")
+        
+        # Part 1: Handle health check
+        if msg_type == "health_check":
+            return {
+                "type": "health_response",
+                "pong": True
+            }
+        
+        # Default: treat as job for backward compatibility
+        if msg_type is None or msg_type == "job":
+            return self.process_job(msg)
+        
+        # Unknown message type
+        logger.warning(f"Unknown message type: {msg_type}")
+        return {
+            "request_id": msg.get("request_id", "unknown"),
+            "pm25": 0.0,
+            "error": f"Unknown message type: {msg_type}",
+            "error_type": "InvalidRequest",
+            "worker_id": WORKER_ID
+        }
     
     def process_job(self, job):
         """
@@ -157,11 +188,11 @@ class Worker:
                     continue
                 
                 try:
-                    # Parse job
-                    job = json.loads(line)
+                    # Parse message (job or health check)
+                    msg = json.loads(line)
                     
-                    # Process job
-                    result = self.process_job(job)
+                    # Part 1: Route message based on type field
+                    result = self.process_message(msg)
                     
                     # Write result to stdout (one JSON object per line)
                     result_json = json.dumps(result)

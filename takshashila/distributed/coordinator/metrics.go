@@ -25,7 +25,14 @@ type Metrics struct {
 	CacheHitsTotal     *prometheus.CounterVec // Labels: cache_result
 	CacheMissesTotal   *prometheus.CounterVec // Labels: cache_result
 	CacheEvictionTotal *prometheus.CounterVec // Labels: reason
+	CacheEvictions     prometheus.Counter     // Total evictions (aggregate)
 	CacheEntriesGauge  prometheus.Gauge
+
+	// Async Write Metrics (Phase 1 prediction cache)
+	CacheWriteSuccessTotal   prometheus.Counter
+	CacheWriteFailureTotal   prometheus.Counter
+	CacheWriteRetryTotal     prometheus.Counter
+	CacheWriteLatencySeconds prometheus.Histogram
 
 	// Dedup Metrics
 	DedupLeadersTotal          prometheus.Counter
@@ -50,6 +57,12 @@ type Metrics struct {
 	WorkerRestartsTotal      prometheus.Counter
 	WorkerErrorsTotal        prometheus.Counter
 	WorkerJobDurationSeconds prometheus.Histogram
+
+	// Health Check Metrics (Part 1)
+	WorkerHealthStatus              *prometheus.GaugeVec     // Labels: worker_id (1=Healthy, 0=Unhealthy)
+	WorkerHealthChecksTotal         *prometheus.CounterVec   // Labels: worker_id
+	WorkerHealthCheckFailuresTotal  *prometheus.CounterVec   // Labels: worker_id
+	WorkerHealthCheckLatencySeconds *prometheus.HistogramVec // Labels: worker_id
 }
 
 // NewMetrics creates and registers all Prometheus metrics
@@ -124,10 +137,47 @@ func NewMetrics() *Metrics {
 			[]string{"reason"},
 		),
 
+		CacheEvictions: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_evictions",
+				Help: "Total cache evictions (aggregate)",
+			},
+		),
+
 		CacheEntriesGauge: promauto.NewGauge(
 			prometheus.GaugeOpts{
 				Name: "cache_entries",
 				Help: "Current number of entries in the result cache",
+			},
+		),
+
+		// Async write metrics (Phase 1 prediction cache)
+		CacheWriteSuccessTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_write_success_total",
+				Help: "Total successful async DB writes from cache",
+			},
+		),
+
+		CacheWriteFailureTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_write_failure_total",
+				Help: "Total failed async DB writes from cache",
+			},
+		),
+
+		CacheWriteRetryTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_write_retry_total",
+				Help: "Total async DB write retry attempts",
+			},
+		),
+
+		CacheWriteLatencySeconds: promauto.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:    "cache_write_latency_seconds",
+				Help:    "Async DB write latency from cache",
+				Buckets: histogramBuckets,
 			},
 		),
 
@@ -253,6 +303,40 @@ func NewMetrics() *Metrics {
 				Help:    "End-to-end job processing time in worker",
 				Buckets: histogramBuckets,
 			},
+		),
+
+		// Health Check Metrics (Part 1)
+		WorkerHealthStatus: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "worker_health_status",
+				Help: "Current health status of worker (1=Healthy, 0=Unhealthy)",
+			},
+			[]string{"worker_id"},
+		),
+
+		WorkerHealthChecksTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "worker_health_checks_total",
+				Help: "Total health checks performed on worker",
+			},
+			[]string{"worker_id"},
+		),
+
+		WorkerHealthCheckFailuresTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "worker_health_check_failures_total",
+				Help: "Total health check failures for worker",
+			},
+			[]string{"worker_id"},
+		),
+
+		WorkerHealthCheckLatencySeconds: promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "worker_health_check_latency_seconds",
+				Help:    "Health check request/response latency",
+				Buckets: histogramBuckets,
+			},
+			[]string{"worker_id"},
 		),
 	}
 
