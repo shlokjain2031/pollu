@@ -6,7 +6,7 @@ Usage:
     cd takshashila && python3 scripts/init_duckdb.py
 
 Creates:
-    - DuckDB file at takshashila/duckdb/predictions.duckdb
+    - DuckDB file at takshashila/duckdb/pollu.duckdb
     - All schema tables (grids, features_*, predictions)
     - Loads 509,209 grid cells from Mumbai parquet
     - Populates features_spatial from grids

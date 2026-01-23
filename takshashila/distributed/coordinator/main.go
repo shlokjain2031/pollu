@@ -18,13 +18,14 @@ import (
 // Coordinator is the main coordinator service
 // Item 26: Stores model/feature versions read at startup from environment
 type Coordinator struct {
-	config         *Config
-	queue          *JobQueue
-	pool           *WorkerPool
-	dedup          *Deduplicator
-	cache          *ResultCache
-	modelVersion   string // Read from MODEL_VERSION env var (Item 26)
-	featureVersion string // Read from FEATURE_VERSION env var (Item 26)
+	config          *Config
+	queue           *JobQueue
+	pool            *WorkerPool
+	dedup           *Deduplicator
+	cache           *ResultCache
+	predictionCache *PredictionCache // Phase 1: In-memory cache with async writes
+	modelVersion    string           // Read from MODEL_VERSION env var (Item 26)
+	featureVersion  string           // Read from FEATURE_VERSION env var (Item 26)
 }
 
 // PredictRequest is the HTTP request payload
@@ -68,14 +69,18 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 	// Create result cache with 5-minute TTL (Part 1)
 	cache := NewResultCache(5 * time.Minute)
 
+	// Create prediction cache with 2-hour TTL (Phase 1)
+	predictionCache := NewPredictionCache(2 * time.Hour)
+
 	return &Coordinator{
-		config:         config,
-		queue:          queue,
-		pool:           pool,
-		dedup:          dedup,
-		cache:          cache,
-		modelVersion:   modelVersion,   // Item 26: Stored at startup
-		featureVersion: featureVersion, // Item 26: Stored at startup
+		config:          config,
+		queue:           queue,
+		pool:            pool,
+		dedup:           dedup,
+		cache:           cache,
+		predictionCache: predictionCache,
+		modelVersion:    modelVersion,   // Item 26: Stored at startup
+		featureVersion:  featureVersion, // Item 26: Stored at startup
 	}, nil
 }
 
@@ -101,6 +106,12 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	// Validate request
 	if req.GridID == "" || req.TimestampHour == "" {
 		http.Error(w, "Missing required fields: grid_id, timestamp_hour", http.StatusBadRequest)
+		return
+	}
+
+	// Part 1: Check if any healthy workers are available
+	if c.pool.healthChecker.HealthyWorkerCount() == 0 {
+		http.Error(w, "Service unavailable: no healthy workers", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -163,6 +174,12 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 // executePredictionWithPath orchestrates cache check, dedup, and computation
 // Returns: (pm25, path, error) where path is "cache", "dedup", or "compute"
 func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, timestampHour, requestID string) (float64, string, error) {
+	// Phase 1: Check prediction cache FIRST (before old result cache)
+	if pm25, hit := c.predictionCache.Get(gridID, timestampHour); hit {
+		log.Printf("[%s] Prediction cache HIT for %s:%s", requestID, gridID, timestampHour)
+		return pm25, "cache", nil
+	}
+
 	// Construct dedup/cache key (model_version and feature_version hardcoded for now)
 	key := DedupKey{
 		GridID:         gridID,
@@ -171,7 +188,7 @@ func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, tim
 		FeatureVersion: "v1",
 	}
 
-	// Step 1: Check cache (both success and cacheable errors)
+	// Step 1: Check OLD cache (both success and cacheable errors)
 	cacheKey := CacheKey{
 		GridID:         key.GridID,
 		TimestampHour:  key.TimestampHour,
@@ -236,7 +253,13 @@ func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, tim
 	}
 	c.dedup.Complete(key, dedupResult)
 
-	// Cache result based on error type
+	// Phase 1: Cache in prediction cache (async write to DB)
+	if predErr == nil {
+		c.predictionCache.Set(gridID, timestampHour, pm25)
+		log.Printf("[%s] LEADER: cached in prediction cache (pm25=%.2f, async write scheduled)", requestID, pm25)
+	}
+
+	// Also cache in OLD result cache based on error type
 	if predErr == nil {
 		// Success - cache with default TTL
 		c.cache.Set(cacheKey, pm25)
@@ -355,6 +378,8 @@ func (c *Coordinator) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (c *Coordinator) Shutdown() {
 	log.Println("Shutting down coordinator...")
 	c.pool.Shutdown()
+	c.predictionCache.Stop()
+	log.Println("Prediction cache stopped")
 }
 
 func main() {

@@ -35,6 +35,7 @@ type PythonWorker struct {
 type WorkerPool struct {
 	workers       []*PythonWorker
 	queue         *JobQueue
+	healthChecker *HealthChecker // Part 1: Health checks & crash detection
 	resultChans   map[string]chan WorkerResult
 	resultChansMu sync.RWMutex
 	wg            sync.WaitGroup
@@ -64,6 +65,12 @@ func NewWorkerPool(numWorkers int, pythonPath string, queue *JobQueue) (*WorkerP
 
 		log.Printf("Spawned worker: %s", worker.ID)
 	}
+
+	// Part 1: Initialize health checker for all workers
+	healthCheckInterval := 2000 // 2 seconds (milliseconds)
+	healthCheckTimeout := 500   // 500ms
+	failureThreshold := 2       // 2 consecutive failures
+	pool.healthChecker = NewHealthChecker(pool.workers, healthCheckInterval, healthCheckTimeout, failureThreshold)
 
 	// Start job dispatcher
 	pool.wg.Add(1)
@@ -134,9 +141,32 @@ func (wp *WorkerPool) dispatchJobs() {
 
 	workerIdx := 0
 	for job := range wp.queue.queue {
-		// Round-robin worker selection
-		worker := wp.workers[workerIdx]
-		workerIdx = (workerIdx + 1) % len(wp.workers)
+		// Part 1: Skip unhealthy workers with round-robin
+		attemptsLeft := len(wp.workers)
+		var worker *PythonWorker
+		for attemptsLeft > 0 {
+			worker = wp.workers[workerIdx]
+			workerIdx = (workerIdx + 1) % len(wp.workers)
+
+			if wp.healthChecker.IsWorkerHealthy(worker.ID) {
+				break
+			}
+			attemptsLeft--
+		}
+
+		// Part 1: If no healthy workers, return error
+		if attemptsLeft == 0 {
+			log.Printf("No healthy workers available for job %s", job.RequestID)
+			wp.resultChansMu.RLock()
+			if ch, ok := wp.resultChans[job.RequestID]; ok {
+				ch <- WorkerResult{
+					RequestID: job.RequestID,
+					Error:     "no healthy workers available",
+				}
+			}
+			wp.resultChansMu.RUnlock()
+			continue
+		}
 
 		// Send job to worker
 		if err := wp.sendJob(worker, job); err != nil {
@@ -240,6 +270,11 @@ func (wp *WorkerPool) UnregisterResultChannel(requestID string) {
 // Shutdown gracefully shuts down all workers
 func (wp *WorkerPool) Shutdown() {
 	log.Println("Shutting down worker pool...")
+
+	// Part 1: Stop health checker
+	if wp.healthChecker != nil {
+		wp.healthChecker.Stop()
+	}
 
 	// Close queue to stop dispatcher
 	wp.queue.Close()

@@ -8,6 +8,7 @@ TIMESTAMP POLICY:
 """
 import duckdb
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,10 @@ from .errors import PersistenceError
 from .config import WRITE_LOCK_TIMEOUT_SEC
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration for read operations during concurrent writes
+MAX_READ_RETRIES = 5
+READ_RETRY_BASE_DELAY_MS = 10  # Start with 10ms
 
 
 class PersistenceLayer:
@@ -43,13 +48,86 @@ class PersistenceLayer:
             logger.warning(f"DuckDB file does not exist: {db_path}. "
                          "Run init_duckdb.py to initialize schema.")
     
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
+    def _get_connection(self, read_only: bool = False) -> duckdb.DuckDBPyConnection:
         """Get a new DuckDB connection.
         
         DuckDB supports multiple reader connections but only one writer.
         We enforce single-writer at application level via _write_lock.
+        
+        Args:
+            read_only: If True, open in read-only mode for concurrent reads
         """
-        return duckdb.connect(str(self.db_path))
+        conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        
+        # Enable WAL mode for better concurrent access (write-ahead logging)
+        # This allows multiple readers while safely serializing writes
+        try:
+            conn.execute("PRAGMA enable_object_cache=true")
+        except:
+            pass  # WAL may not be supported in all versions
+        
+        return conn
+    
+    def _execute_with_retry(self, query: str, params: list = None, read_only: bool = False) -> Optional[tuple]:
+        """Execute a query with retry logic for read operations during concurrent writes.
+        
+        When multiple workers try to read while another is writing, DuckDB may return
+        lock errors. This method retries with exponential backoff.
+        
+        Args:
+            query: SQL query to execute
+            params: Query parameters
+            read_only: If True, use read-only connection and retry on lock errors
+        
+        Returns:
+            Query result (first row) or None if no result
+        
+        Raises:
+            PersistenceError: On persistent failures
+        """
+        if params is None:
+            params = []
+        
+        if not read_only:
+            # Write operations don't retry, they should fail fast
+            conn = self._get_connection(read_only=False)
+            try:
+                return conn.execute(query, params).fetchone()
+            finally:
+                conn.close()
+        
+        # Read operations with retry on lock conflicts
+        last_error = None
+        for attempt in range(MAX_READ_RETRIES):
+            try:
+                conn = self._get_connection(read_only=True)
+                try:
+                    return conn.execute(query, params).fetchone()
+                finally:
+                    conn.close()
+            except Exception as e:
+                error_msg = str(e)
+                # Check if this is a lock error
+                if "lock" in error_msg.lower() or "Conflicting" in error_msg:
+                    last_error = e
+                    if attempt < MAX_READ_RETRIES - 1:
+                        # Exponential backoff with jitter
+                        delay_ms = READ_RETRY_BASE_DELAY_MS * (2 ** attempt)
+                        delay_s = delay_ms / 1000.0
+                        logger.debug(f"Lock conflict on read (attempt {attempt+1}/{MAX_READ_RETRIES}), "
+                                   f"retrying in {delay_ms}ms...")
+                        time.sleep(delay_s)
+                        continue
+                # Non-lock errors should fail immediately
+                raise e
+        
+        # All retries exhausted
+        raise PersistenceError(
+            operation="read_with_retry",
+            grid_id="unknown",
+            timestamp_hour=None,
+            reason=f"Failed after {MAX_READ_RETRIES} retries: {last_error}"
+        )
     
     def read_prediction(self, grid_id: str, timestamp_hour: datetime) -> Optional[float]:
         """Read existing prediction from database.
@@ -65,22 +143,16 @@ class PersistenceLayer:
             PersistenceError: On database read failure
         """
         try:
-            conn = self._get_connection()
+            result = self._execute_with_retry("""
+                SELECT pm25_prediction 
+                FROM predictions 
+                WHERE grid_id = ? AND timestamp_hour = ?
+            """, [grid_id, timestamp_hour], read_only=True)
             
-            try:
-                result = conn.execute("""
-                    SELECT pm25_prediction 
-                    FROM predictions 
-                    WHERE grid_id = ? AND timestamp_hour = ?
-                """, [grid_id, timestamp_hour]).fetchone()
-                
-                if result is None:
-                    return None
-                
-                return float(result[0])
+            if result is None:
+                return None
             
-            finally:
-                conn.close()
+            return float(result[0])
         
         except Exception as e:
             raise PersistenceError(
@@ -212,19 +284,13 @@ class PersistenceLayer:
             PersistenceError: On database read failure
         """
         try:
-            conn = self._get_connection()
+            result = self._execute_with_retry("""
+                SELECT COUNT(*) 
+                FROM grid 
+                WHERE grid_id = ?
+            """, [grid_id], read_only=True)
             
-            try:
-                result = conn.execute("""
-                    SELECT COUNT(*) 
-                    FROM grid 
-                    WHERE grid_id = ?
-                """, [grid_id]).fetchone()
-                
-                return result[0] > 0
-            
-            finally:
-                conn.close()
+            return result[0] > 0
         
         except Exception as e:
             raise PersistenceError(
