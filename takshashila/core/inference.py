@@ -21,6 +21,15 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
+# Import pool manager if available (optional for backward compatibility)
+try:
+    from kashi.db_pool import PoolManager
+    POOL_AVAILABLE = True
+except ImportError:
+    PoolManager = None
+    POOL_AVAILABLE = False
+    logger.warning("Connection pooling not available (kashi.db_pool not found)")
+
 
 class InferenceEngine:
     """Orchestrates the full inference pipeline.
@@ -42,7 +51,7 @@ class InferenceEngine:
     - Idempotency: Same input → same output (§1.2)
     """
     
-    def __init__(self, db_paths: dict = None, model_path: str = None, feature_schema_path: str = None):
+    def __init__(self, db_paths: dict = None, model_path: str = None, feature_schema_path: str = None, pool_manager=None):
         """Initialize inference engine.
         
         Args:
@@ -57,6 +66,7 @@ class InferenceEngine:
                 }
             model_path: Path to LightGBM model.txt
             feature_schema_path: Path to feature_schema.json
+            pool_manager: Optional PoolManager for connection pooling (from kashi.db_pool)
         """
         # Use default paths if not provided
         if db_paths is None:
@@ -73,13 +83,15 @@ class InferenceEngine:
         with open(feature_schema_path, 'r') as f:
             feature_schema = json.load(f)
         
-        # Initialize components
-        self.persistence = PersistenceLayer(db_paths[TABLE_PREDICTIONS])
+        # Initialize components with pool_manager
+        self.pool_manager = pool_manager
+        self.persistence = PersistenceLayer(db_paths[TABLE_PREDICTIONS], pool_manager=pool_manager)
         self.model_predictor = ModelPredictor(model_path)
-        self.feature_assembler = FeatureAssembler(db_paths, feature_schema)
+        self.feature_assembler = FeatureAssembler(db_paths, feature_schema, pool_manager=pool_manager)
         
         self.logger = logging.getLogger(__name__)
-        self.logger.info("InferenceEngine initialized with separate DuckDB files")
+        pool_status = "with connection pooling" if pool_manager else "without connection pooling"
+        self.logger.info(f"InferenceEngine initialized {pool_status} with separate DuckDB files")
     
     def predict(self, grid_id: str, timestamp_hour: datetime) -> float:
         """Compute PM2.5 prediction for (grid_id, timestamp_hour).
