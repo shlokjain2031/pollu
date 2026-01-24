@@ -4,17 +4,17 @@ from datetime import datetime, timezone
 import threading
 import time
 
-from takshashika.core.persistence import PersistenceLayer
-from takshashika.core.errors import PersistenceError
-from takshashika.core.config import MODEL_VERSION, SCHEMA_HASH
+from takshashila.core.persistence import PersistenceLayer
+from takshashila.core.errors import PersistenceError
+from takshashila.core.config import MODEL_VERSION, SCHEMA_HASH, TABLE_PREDICTIONS
 
 
 class TestPersistenceLayer:
     """Test DuckDB persistence operations."""
     
-    def test_read_nonexistent_prediction(self, test_db_path, valid_grid_id, test_timestamp):
+    def test_read_nonexistent_prediction(self, test_db_paths, valid_grid_id, test_timestamp):
         """Test reading prediction that doesn't exist returns None."""
-        persistence = PersistenceLayer(test_db_path)
+        persistence = PersistenceLayer(test_db_paths[TABLE_PREDICTIONS])
         
         # Use a timestamp that has no prediction
         future_ts = datetime(2099, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -44,9 +44,9 @@ class TestPersistenceLayer:
         assert result is not None
         assert abs(result - pm25_value) < 1e-6
     
-    def test_write_duplicate_raises_error(self, test_db_path, valid_grid_id):
+    def test_write_duplicate_raises_error(self, test_db_paths, valid_grid_id):
         """Test writing duplicate (grid_id, timestamp) raises error."""
-        persistence = PersistenceLayer(test_db_path)
+        persistence = PersistenceLayer(test_db_paths[TABLE_PREDICTIONS])
         
         ts = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
         pm25_value = 70.0
@@ -72,16 +72,16 @@ class TestPersistenceLayer:
         
         assert exc_info.value.operation == "write"
     
-    def test_grid_exists(self, test_db_path, valid_grid_id, invalid_grid_id):
+    def test_grid_exists(self, test_db_paths, valid_grid_id, invalid_grid_id):
         """Test grid_exists checks grids table."""
-        persistence = PersistenceLayer(test_db_path)
+        persistence = PersistenceLayer(test_db_paths[TABLE_PREDICTIONS])
         
         assert persistence.grid_exists(valid_grid_id) is True
         assert persistence.grid_exists(invalid_grid_id) is False
     
-    def test_write_lock_serialization(self, test_db_path, valid_grid_id):
+    def test_write_lock_serialization(self, test_db_paths, valid_grid_id):
         """Test single-writer lock enforces serialization."""
-        persistence = PersistenceLayer(test_db_path)
+        persistence = PersistenceLayer(test_db_paths[TABLE_PREDICTIONS])
         
         write_order = []
         

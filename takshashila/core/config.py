@@ -17,8 +17,17 @@ MODEL_MANIFEST_PATH = PROJECT_ROOT / "dwarka/models/prod_v1/manifest.json"
 GRID_PARQUET_PATH = PROJECT_ROOT / "artifacts/v1/grids/mumbai/grid.parquet"
 GRID_METADATA_PATH = PROJECT_ROOT / "artifacts/v1/grids/mumbai/metadata.json"
 
-# DuckDB storage
-DUCKDB_PATH = TAKSHASHILA_ROOT / "duckdb/pollu.duckdb"
+# DuckDB storage (one file per table in duckdb/ directory)
+DUCKDB_DIR = TAKSHASHILA_ROOT / "duckdb"
+DUCKDB_GRID_PATH = DUCKDB_DIR / "grid.duckdb"
+DUCKDB_PM25_PATH = DUCKDB_DIR / "pm25_observations.duckdb"
+DUCKDB_METEO_PATH = DUCKDB_DIR / "meteo.duckdb"
+DUCKDB_LANDSAT8_PATH = DUCKDB_DIR / "landsat8.duckdb"
+DUCKDB_SENTINEL2_PATH = DUCKDB_DIR / "sentinel2.duckdb"
+DUCKDB_PREDICTIONS_PATH = DUCKDB_DIR / "predictions.duckdb"
+
+# Legacy path kept for backward compatibility (deprecated)
+DUCKDB_PATH = DUCKDB_DIR / "pollu.duckdb"
 
 # Model metadata
 MODEL_VERSION = "prod_v1"
@@ -47,6 +56,22 @@ TABLE_METEO = "meteo"
 TABLE_LANDSAT8 = "landsat8"
 TABLE_SENTINEL2 = "sentinel2"
 TABLE_PREDICTIONS = "predictions"
+
+# Table-to-file mapping
+TABLE_TO_DB_PATH = {
+    TABLE_GRID: DUCKDB_GRID_PATH,
+    TABLE_PM25_OBSERVATION: DUCKDB_PM25_PATH,
+    TABLE_METEO: DUCKDB_METEO_PATH,
+    TABLE_LANDSAT8: DUCKDB_LANDSAT8_PATH,
+    TABLE_SENTINEL2: DUCKDB_SENTINEL2_PATH,
+    TABLE_PREDICTIONS: DUCKDB_PREDICTIONS_PATH,
+}
+
+def get_db_path_for_table(table_name: str):
+    """Get DuckDB file path for a given table name."""
+    if table_name not in TABLE_TO_DB_PATH:
+        raise ValueError(f"Unknown table: {table_name}. Valid tables: {list(TABLE_TO_DB_PATH.keys())}")
+    return TABLE_TO_DB_PATH[table_name]
 
 # Logging
 LOG_LEVEL = "INFO"
