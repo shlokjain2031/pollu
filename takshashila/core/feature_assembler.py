@@ -28,7 +28,9 @@ import logging
 from .errors import FeatureAssemblyError, InvalidRequestError, PersistenceError
 from .config import (
     TABLE_GRID, TABLE_PM25_OBSERVATION, TABLE_METEO,
-    TABLE_LANDSAT8, TABLE_SENTINEL2, DUCKDB_PATH
+    TABLE_LANDSAT8, TABLE_SENTINEL2,
+    DUCKDB_GRID_PATH, DUCKDB_PM25_PATH, DUCKDB_METEO_PATH,
+    DUCKDB_LANDSAT8_PATH, DUCKDB_SENTINEL2_PATH, get_db_path_for_table
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,13 @@ FRESHNESS_THRESHOLDS = {
 class FeatureAssembler:
     """Assemble all 64 required features by computing from raw observational data.
     
+    Reads from separate DuckDB files per table:
+    - grid.duckdb: grid reference data
+    - pm25_observations.duckdb: PM2.5 observations
+    - meteo.duckdb: meteorological data
+    - landsat8.duckdb: Landsat8 satellite imagery
+    - sentinel2.duckdb: Sentinel2 satellite imagery
+    
     Validates:
     - grid_id exists in grid table
     - All required raw data is available
@@ -52,22 +61,46 @@ class FeatureAssembler:
     - Derived features computed correctly
     """
     
-    def __init__(self, db_path: str, feature_schema: Dict):
-        """Initialize feature assembler.
+    def __init__(self, db_paths: Dict[str, str], feature_schema: Dict):
+        """Initialize feature assembler with paths to all DuckDB files.
         
         Args:
-            db_path: Path to DuckDB file
+            db_paths: Dict mapping table names to file paths:
+                {
+                    "grid": "/path/to/grid.duckdb",
+                    "pm25_observation": "/path/to/pm25_observations.duckdb",
+                    "meteo": "/path/to/meteo.duckdb",
+                    "landsat8": "/path/to/landsat8.duckdb",
+                    "sentinel2": "/path/to/sentinel2.duckdb"
+                }
             feature_schema: Loaded feature_schema.json dict
         """
-        self.db_path = Path(db_path)
+        self.db_paths = {k: Path(v) for k, v in db_paths.items()}
         self.required_features = feature_schema["feature_list"]
         self.n_features = len(self.required_features)
         
-        logger.info(f"FeatureAssembler initialized with {self.n_features} features")
+        # Validate all required tables have paths
+        required_tables = [TABLE_GRID, TABLE_PM25_OBSERVATION, TABLE_METEO, TABLE_LANDSAT8, TABLE_SENTINEL2]
+        for table in required_tables:
+            if table not in self.db_paths:
+                raise ValueError(f"Missing db_path for table: {table}")
+        
+        logger.info(f"FeatureAssembler initialized with {self.n_features} features across {len(self.db_paths)} databases")
     
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Get a new DuckDB connection for reading."""
-        return duckdb.connect(str(self.db_path), read_only=True)
+    def _get_connection(self, table_name: str) -> duckdb.DuckDBPyConnection:
+        """Get a new DuckDB connection for reading a specific table.
+        
+        Args:
+            table_name: Name of table (e.g., 'grid', 'pm25_observation', 'meteo')
+        
+        Returns:
+            Read-only DuckDB connection to the file containing that table
+        """
+        if table_name not in self.db_paths:
+            raise ValueError(f"No db_path configured for table: {table_name}")
+        
+        db_path = self.db_paths[table_name]
+        return duckdb.connect(str(db_path), read_only=True)
     
     def fetch_features(self, grid_id: str, timestamp_hour: datetime) -> pd.DataFrame:
         """Fetch and compute all 64 features for (grid_id, timestamp_hour).
@@ -94,11 +127,10 @@ class FeatureAssembler:
         
         logger.debug(f"fetch_features: grid_id={grid_id}, timestamp_hour={timestamp_hour} (type: {type(timestamp_hour)}, tzinfo: {timestamp_hour.tzinfo})")
         
-        conn = self._get_connection()
-        
+        # Validate grid exists (opens grid.duckdb)
+        conn_grid = self._get_connection(TABLE_GRID)
         try:
-            # 1. Validate grid exists
-            grid_exists = conn.execute(
+            grid_exists = conn_grid.execute(
                 f"SELECT COUNT(*) FROM {TABLE_GRID} WHERE grid_id = ?",
                 [grid_id]
             ).fetchone()[0] > 0
@@ -106,34 +138,33 @@ class FeatureAssembler:
             if not grid_exists:
                 raise InvalidRequestError(f"grid_id '{grid_id}' not found in grid table")
             
-            # 2. Compute PM2.5 lag features
-            pm25_features = self._compute_pm25_lags(conn, grid_id, timestamp_hour)
-            
-            # 3. Compute meteorological features
-            meteo_features = self._compute_meteo_features(conn, grid_id, timestamp_hour)
-            
-            # 4. Compute satellite features
-            sat_features = self._compute_satellite_features(conn, grid_id, timestamp_hour)
-            
-            # 5. Fetch spatial features (static)
-            spatial_features = self._fetch_spatial_features(conn, grid_id)
-            
-            # 6. Merge all features
-            all_features = {**pm25_features, **meteo_features, **sat_features, **spatial_features}
-            
-            # 7. Validate completeness
-            self._validate_features(all_features, grid_id, timestamp_hour)
-            
-            # 8. Build DataFrame in correct column order
-            features_df = pd.DataFrame([all_features])
-            features_df = features_df[self.required_features]  # Reorder columns
-            
-            logger.debug(f"Assembled {len(all_features)} features for {grid_id} @ {timestamp_hour}")
-            
-            return features_df
-        
+            # Fetch spatial features while we have grid connection open
+            spatial_features = self._fetch_spatial_features(conn_grid, grid_id)
         finally:
-            conn.close()
+            conn_grid.close()
+        
+        # Compute PM2.5 lag features (opens pm25_observations.duckdb)
+        pm25_features = self._compute_pm25_lags(grid_id, timestamp_hour)
+        
+        # Compute meteorological features (opens meteo.duckdb)
+        meteo_features = self._compute_meteo_features(grid_id, timestamp_hour)
+        
+        # Compute satellite features (opens landsat8.duckdb and sentinel2.duckdb)
+        sat_features = self._compute_satellite_features(grid_id, timestamp_hour)
+        
+        # Merge all features
+        all_features = {**pm25_features, **meteo_features, **sat_features, **spatial_features}
+        
+        # Validate completeness
+        self._validate_features(all_features, grid_id, timestamp_hour)
+        
+        # Build DataFrame in correct column order
+        features_df = pd.DataFrame([all_features])
+        features_df = features_df[self.required_features]  # Reorder columns
+        
+        logger.debug(f"Assembled {len(all_features)} features for {grid_id} @ {timestamp_hour}")
+        
+        return features_df
     
     # =========================================================================
     # PM2.5 Feature Computation
@@ -141,7 +172,6 @@ class FeatureAssembler:
     
     def _compute_pm25_lags(
         self,
-        conn: duckdb.DuckDBPyConnection,
         grid_id: str,
         timestamp_hour: datetime
     ) -> Dict[str, float]:
@@ -164,38 +194,42 @@ class FeatureAssembler:
         
         features = {}
         
-        for feature_name, hours_back in lags.items():
-            target_ts = timestamp_hour - timedelta(hours=hours_back)
-            
-            result = conn.execute(f"""
-                SELECT pm25, timestamp
-                FROM {TABLE_PM25_OBSERVATION}
-                WHERE grid_id = ? AND timestamp = ?
-            """, [grid_id, target_ts]).fetchone()
-            
-            if result is None:
-                raise FeatureAssemblyError(
-                    grid_id=grid_id,
-                    timestamp_hour=timestamp_hour,
-                    missing_feature=f"pm25_observation at {target_ts}"
-                )
-            
-            pm25_value, obs_timestamp = result
-            
-            # Verify we got the exact timestamp we requested
-            # (For lag features, the observation SHOULD be old - that's the point!)
-            if obs_timestamp != target_ts:
-                logger.warning(
-                    f"PM2.5 {feature_name}: Expected {target_ts}, got {obs_timestamp}"
-                )
-                raise FeatureAssemblyError(
-                    grid_id=grid_id,
-                    timestamp_hour=timestamp_hour,
-                    missing_feature=f"pm25_observation timestamp mismatch: expected {target_ts}, got {obs_timestamp}"
-                )
-            
-            logger.debug(f"PM2.5 {feature_name}: value={pm25_value:.2f} at {obs_timestamp}")
-            features[feature_name] = pm25_value
+        conn = self._get_connection(TABLE_PM25_OBSERVATION)
+        try:
+            for feature_name, hours_back in lags.items():
+                target_ts = timestamp_hour - timedelta(hours=hours_back)
+                
+                result = conn.execute(f"""
+                    SELECT pm25, timestamp
+                    FROM {TABLE_PM25_OBSERVATION}
+                    WHERE grid_id = ? AND timestamp = ?
+                """, [grid_id, target_ts]).fetchone()
+                
+                if result is None:
+                    raise FeatureAssemblyError(
+                        grid_id=grid_id,
+                        timestamp_hour=timestamp_hour,
+                        missing_feature=f"pm25_observation at {target_ts}"
+                    )
+                
+                pm25_value, obs_timestamp = result
+                
+                # Verify we got the exact timestamp we requested
+                # (For lag features, the observation SHOULD be old - that's the point!)
+                if obs_timestamp != target_ts:
+                    logger.warning(
+                        f"PM2.5 {feature_name}: Expected {target_ts}, got {obs_timestamp}"
+                    )
+                    raise FeatureAssemblyError(
+                        grid_id=grid_id,
+                        timestamp_hour=timestamp_hour,
+                        missing_feature=f"pm25_observation timestamp mismatch: expected {target_ts}, got {obs_timestamp}"
+                    )
+                
+                logger.debug(f"PM2.5 {feature_name}: value={pm25_value:.2f} at {obs_timestamp}")
+                features[feature_name] = pm25_value
+        finally:
+            conn.close()
         
         return features
     
@@ -205,7 +239,6 @@ class FeatureAssembler:
     
     def _compute_meteo_features(
         self,
-        conn: duckdb.DuckDBPyConnection,
         grid_id: str,
         timestamp_hour: datetime
     ) -> Dict[str, float]:
@@ -228,41 +261,45 @@ class FeatureAssembler:
             "wind_direction_10m": [0, 1, 3, 6, 12, 24],  # Will convert to U/V components
         }
         
-        # Fetch all required observations
-        observations = {}
-        for var_name, lag_hours in meteo_lags.items():
-            observations[var_name] = {}
-            
-            for lag in lag_hours:
-                target_ts = timestamp_hour - timedelta(hours=lag)
+        conn = self._get_connection(TABLE_METEO)
+        try:
+            # Fetch all required observations
+            observations = {}
+            for var_name, lag_hours in meteo_lags.items():
+                observations[var_name] = {}
                 
-                result = conn.execute(f"""
-                    SELECT {var_name}, timestamp
-                    FROM {TABLE_METEO}
-                    WHERE grid_id = ? AND timestamp = ?
-                """, [grid_id, target_ts]).fetchone()
-                
-                if result is None:
-                    raise FeatureAssemblyError(
-                        grid_id=grid_id,
-                        timestamp_hour=timestamp_hour,
-                        missing_feature=f"meteo.{var_name} at {target_ts}"
-                    )
-                
-                value, obs_timestamp = result
-                
-                # Verify we got the exact timestamp we requested
-                if obs_timestamp != target_ts:
-                    logger.warning(
-                        f"Meteo {var_name} lag{lag}h: Expected {target_ts}, got {obs_timestamp}"
-                    )
-                    raise FeatureAssemblyError(
-                        grid_id=grid_id,
-                        timestamp_hour=timestamp_hour,
-                        missing_feature=f"meteo.{var_name} timestamp mismatch: expected {target_ts}, got {obs_timestamp}"
-                    )
-                
-                observations[var_name][lag] = value
+                for lag in lag_hours:
+                    target_ts = timestamp_hour - timedelta(hours=lag)
+                    
+                    result = conn.execute(f"""
+                        SELECT {var_name}, timestamp
+                        FROM {TABLE_METEO}
+                        WHERE grid_id = ? AND timestamp = ?
+                    """, [grid_id, target_ts]).fetchone()
+                    
+                    if result is None:
+                        raise FeatureAssemblyError(
+                            grid_id=grid_id,
+                            timestamp_hour=timestamp_hour,
+                            missing_feature=f"meteo.{var_name} at {target_ts}"
+                        )
+                    
+                    value, obs_timestamp = result
+                    
+                    # Verify we got the exact timestamp we requested
+                    if obs_timestamp != target_ts:
+                        logger.warning(
+                            f"Meteo {var_name} lag{lag}h: Expected {target_ts}, got {obs_timestamp}"
+                        )
+                        raise FeatureAssemblyError(
+                            grid_id=grid_id,
+                            timestamp_hour=timestamp_hour,
+                            missing_feature=f"meteo.{var_name} timestamp mismatch: expected {target_ts}, got {obs_timestamp}"
+                        )
+                    
+                    observations[var_name][lag] = value
+        finally:
+            conn.close()
         
         # Assemble lagged features
         for var_name, lag_hours in meteo_lags.items():
@@ -364,7 +401,6 @@ class FeatureAssembler:
     
     def _compute_satellite_features(
         self,
-        conn: duckdb.DuckDBPyConnection,
         grid_id: str,
         timestamp_hour: datetime
     ) -> Dict[str, float]:
@@ -378,14 +414,22 @@ class FeatureAssembler:
         features = {}
         
         # Fetch most recent Landsat8 data <= timestamp_hour
-        landsat_result = self._find_most_recent_satellite(
-            conn, TABLE_LANDSAT8, grid_id, timestamp_hour
-        )
+        conn_landsat = self._get_connection(TABLE_LANDSAT8)
+        try:
+            landsat_result = self._find_most_recent_satellite(
+                conn_landsat, TABLE_LANDSAT8, grid_id, timestamp_hour
+            )
+        finally:
+            conn_landsat.close()
         
         # Fetch most recent Sentinel2 data <= timestamp_hour
-        sentinel_result = self._find_most_recent_satellite(
-            conn, TABLE_SENTINEL2, grid_id, timestamp_hour
-        )
+        conn_sentinel = self._get_connection(TABLE_SENTINEL2)
+        try:
+            sentinel_result = self._find_most_recent_satellite(
+                conn_sentinel, TABLE_SENTINEL2, grid_id, timestamp_hour
+            )
+        finally:
+            conn_sentinel.close()
         
         # Compute Landsat indices
         if landsat_result is not None:

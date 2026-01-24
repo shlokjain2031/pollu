@@ -2,9 +2,9 @@
 import pytest
 from datetime import datetime, timezone
 
-from takshashika.core.feature_assembler import FeatureAssembler
-from takshashika.core.errors import FeatureAssemblyError, InvalidRequestError
-from takshashika.core.config import FEATURE_SCHEMA_PATH
+from takshashila.core.feature_assembler import FeatureAssembler
+from takshashila.core.errors import FeatureAssemblyError, InvalidRequestError
+from takshashila.core.config import FEATURE_SCHEMA_PATH
 import json
 
 
@@ -18,9 +18,9 @@ class TestFeatureAssembler:
             return json.load(f)
     
     @pytest.fixture
-    def assembler(self, test_db_path, feature_schema):
+    def assembler(self, test_db_paths, feature_schema):
         """Create FeatureAssembler instance."""
-        return FeatureAssembler(test_db_path, feature_schema)
+        return FeatureAssembler(test_db_paths, feature_schema)
     
     def test_fetch_features_valid_grid(self, assembler, valid_grid_id, test_timestamp):
         """Test fetching features for valid grid with complete data."""

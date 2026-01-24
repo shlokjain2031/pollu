@@ -31,7 +31,13 @@ from core.inference import InferenceEngine
 WORKER_ID = os.environ.get("WORKER_ID", "worker-unknown")
 
 # Use absolute paths based on actual file locations
-DUCKDB_PATH = TAKSHASHILA_ROOT / "duckdb" / "pollu.duckdb"
+DUCKDB_DIR = TAKSHASHILA_ROOT / "duckdb"
+DUCKDB_GRID_PATH = DUCKDB_DIR / "grid.duckdb"
+DUCKDB_PM25_PATH = DUCKDB_DIR / "pm25_observations.duckdb"
+DUCKDB_METEO_PATH = DUCKDB_DIR / "meteo.duckdb"
+DUCKDB_LANDSAT8_PATH = DUCKDB_DIR / "landsat8.duckdb"
+DUCKDB_SENTINEL2_PATH = DUCKDB_DIR / "sentinel2.duckdb"
+DUCKDB_PREDICTIONS_PATH = DUCKDB_DIR / "predictions.duckdb"
 MODEL_PATH = POLLU_ROOT / "dwarka" / "models" / "prod_v1" / "model.txt"
 FEATURE_SCHEMA_PATH = POLLU_ROOT / "dwarka" / "models" / "prod_v1" / "feature_schema.json"
 
@@ -50,18 +56,31 @@ class Worker:
     def __init__(self):
         """Initialize the worker with Phase 1 inference engine."""
         # Validate paths exist before initializing
-        if not DUCKDB_PATH.exists():
-            raise FileNotFoundError(f"DuckDB file not found: {DUCKDB_PATH}")
-        if not MODEL_PATH.exists():
-            raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
-        if not FEATURE_SCHEMA_PATH.exists():
-            raise FileNotFoundError(f"Feature schema file not found: {FEATURE_SCHEMA_PATH}")
+        required_files = [
+            DUCKDB_GRID_PATH, DUCKDB_PM25_PATH, DUCKDB_METEO_PATH,
+            DUCKDB_LANDSAT8_PATH, DUCKDB_SENTINEL2_PATH, DUCKDB_PREDICTIONS_PATH,
+            MODEL_PATH, FEATURE_SCHEMA_PATH
+        ]
         
-        logger.info(f"Initializing worker (DB: {DUCKDB_PATH}, Model: {MODEL_PATH}, Schema: {FEATURE_SCHEMA_PATH})")
+        for file_path in required_files:
+            if not file_path.exists():
+                raise FileNotFoundError(f"Required file not found: {file_path}")
+        
+        logger.info(f"Initializing worker (DB dir: {DUCKDB_DIR}, Model: {MODEL_PATH}, Schema: {FEATURE_SCHEMA_PATH})")
         
         try:
+            # Build db_paths dictionary
+            db_paths = {
+                "grid": str(DUCKDB_GRID_PATH),
+                "pm25_observation": str(DUCKDB_PM25_PATH),
+                "meteo": str(DUCKDB_METEO_PATH),
+                "landsat8": str(DUCKDB_LANDSAT8_PATH),
+                "sentinel2": str(DUCKDB_SENTINEL2_PATH),
+                "predictions": str(DUCKDB_PREDICTIONS_PATH)
+            }
+            
             self.engine = InferenceEngine(
-                db_path=str(DUCKDB_PATH),
+                db_paths=db_paths,
                 model_path=str(MODEL_PATH),
                 feature_schema_path=str(FEATURE_SCHEMA_PATH)
             )
