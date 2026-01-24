@@ -19,6 +19,15 @@ from .config import WRITE_LOCK_TIMEOUT_SEC
 
 logger = logging.getLogger(__name__)
 
+# Import pool manager if available (optional for backward compatibility)
+try:
+    from kashi.db_pool import PoolManager
+    POOL_AVAILABLE = True
+except ImportError:
+    PoolManager = None
+    POOL_AVAILABLE = False
+    logger.warning("Connection pooling not available (kashi.db_pool not found)")
+
 # Retry configuration for read operations during concurrent writes
 MAX_READ_RETRIES = 5
 READ_RETRY_BASE_DELAY_MS = 10  # Start with 10ms
@@ -35,28 +44,45 @@ class PersistenceLayer:
     Thread-safe for concurrent readers, serialized writes.
     """
     
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, pool_manager=None):
         """Initialize persistence layer.
         
         Args:
             db_path: Path to DuckDB file
+            pool_manager: Optional PoolManager for connection pooling (from kashi.db_pool)
         """
         self.db_path = Path(db_path)
         self._write_lock = threading.Lock()
+        self.pool_manager = pool_manager
         
         if not self.db_path.exists():
             logger.warning(f"DuckDB file does not exist: {db_path}. "
                          "Run init_duckdb.py to initialize schema.")
+        
+        pool_status = "with connection pooling" if pool_manager else "without connection pooling"
+        logger.info(f"PersistenceLayer initialized {pool_status} for {db_path}")
     
     def _get_connection(self, read_only: bool = False) -> duckdb.DuckDBPyConnection:
-        """Get a new DuckDB connection.
+        """Get a DuckDB connection.
         
-        DuckDB supports multiple reader connections but only one writer.
-        We enforce single-writer at application level via _write_lock.
+        If pool_manager is available and read_only=True, acquires from pool.
+        Write operations always use new connections (not pooled).
         
         Args:
             read_only: If True, open in read-only mode for concurrent reads
+        
+        Returns:
+            DuckDB connection (pooled if available and read_only, otherwise new)
         """
+        # Use pooled connection for reads if available
+        if read_only and self.pool_manager is not None:
+            try:
+                pool = self.pool_manager.get_pool('predictions')
+                return pool.acquire()
+            except Exception as e:
+                logger.warning(f"Failed to acquire pooled connection for predictions, falling back to direct connection: {e}")
+        
+        # Fallback or write: create new connection
         conn = duckdb.connect(str(self.db_path), read_only=read_only)
         
         # Enable WAL mode for better concurrent access (write-ahead logging)
@@ -67,6 +93,24 @@ class PersistenceLayer:
             pass  # WAL may not be supported in all versions
         
         return conn
+    
+    def _release_connection(self, conn: duckdb.DuckDBPyConnection, read_only: bool = False) -> None:
+        """Release a connection back to the pool or close it.
+        
+        Args:
+            conn: Connection to release
+            read_only: Whether this was a read-only connection
+        """
+        if read_only and self.pool_manager is not None:
+            try:
+                pool = self.pool_manager.get_pool('predictions')
+                pool.release(conn)
+            except Exception as e:
+                logger.warning(f"Failed to release pooled connection for predictions: {e}")
+                conn.close()
+        else:
+            # Write connections or legacy mode: just close
+            conn.close()
     
     def _execute_with_retry(self, query: str, params: list = None, read_only: bool = False) -> Optional[tuple]:
         """Execute a query with retry logic for read operations during concurrent writes.
@@ -94,7 +138,7 @@ class PersistenceLayer:
             try:
                 return conn.execute(query, params).fetchone()
             finally:
-                conn.close()
+                self._release_connection(conn, read_only=False)
         
         # Read operations with retry on lock conflicts
         last_error = None
@@ -104,7 +148,7 @@ class PersistenceLayer:
                 try:
                     return conn.execute(query, params).fetchone()
                 finally:
-                    conn.close()
+                    self._release_connection(conn, read_only=True)
             except Exception as e:
                 error_msg = str(e)
                 # Check if this is a lock error
@@ -234,7 +278,7 @@ class PersistenceLayer:
                 )
             
             finally:
-                conn.close()
+                self._release_connection(conn, read_only=False)
         
         finally:
             self._write_lock.release()

@@ -35,6 +35,15 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
+# Import pool manager if available (optional for backward compatibility)
+try:
+    from kashi.db_pool import PoolManager
+    POOL_AVAILABLE = True
+except ImportError:
+    PoolManager = None
+    POOL_AVAILABLE = False
+    logger.warning("Connection pooling not available (kashi.db_pool not found)")
+
 # Freshness thresholds (in seconds)
 FRESHNESS_THRESHOLDS = {
     "pm25_observation": 3600,      # 1 hour
@@ -61,7 +70,7 @@ class FeatureAssembler:
     - Derived features computed correctly
     """
     
-    def __init__(self, db_paths: Dict[str, str], feature_schema: Dict):
+    def __init__(self, db_paths: Dict[str, str], feature_schema: Dict, pool_manager=None):
         """Initialize feature assembler with paths to all DuckDB files.
         
         Args:
@@ -74,10 +83,12 @@ class FeatureAssembler:
                     "sentinel2": "/path/to/sentinel2.duckdb"
                 }
             feature_schema: Loaded feature_schema.json dict
+            pool_manager: Optional PoolManager for connection pooling (from kashi.db_pool)
         """
         self.db_paths = {k: Path(v) for k, v in db_paths.items()}
         self.required_features = feature_schema["feature_list"]
         self.n_features = len(self.required_features)
+        self.pool_manager = pool_manager
         
         # Validate all required tables have paths
         required_tables = [TABLE_GRID, TABLE_PM25_OBSERVATION, TABLE_METEO, TABLE_LANDSAT8, TABLE_SENTINEL2]
@@ -85,22 +96,53 @@ class FeatureAssembler:
             if table not in self.db_paths:
                 raise ValueError(f"Missing db_path for table: {table}")
         
-        logger.info(f"FeatureAssembler initialized with {self.n_features} features across {len(self.db_paths)} databases")
+        pool_status = "with connection pooling" if pool_manager else "without connection pooling"
+        logger.info(f"FeatureAssembler initialized {pool_status} with {self.n_features} features across {len(self.db_paths)} databases")
     
     def _get_connection(self, table_name: str) -> duckdb.DuckDBPyConnection:
-        """Get a new DuckDB connection for reading a specific table.
+        """Get a DuckDB connection for reading a specific table.
+        
+        If pool_manager is available, acquires from pool (reused connections).
+        Otherwise, creates a new read-only connection (legacy mode).
         
         Args:
             table_name: Name of table (e.g., 'grid', 'pm25_observation', 'meteo')
         
         Returns:
-            Read-only DuckDB connection to the file containing that table
+            DuckDB connection to the file containing that table
         """
         if table_name not in self.db_paths:
             raise ValueError(f"No db_path configured for table: {table_name}")
         
+        # Use pooled connection if available
+        if self.pool_manager is not None:
+            try:
+                pool = self.pool_manager.get_pool(table_name)
+                return pool.acquire()
+            except Exception as e:
+                logger.warning(f"Failed to acquire pooled connection for {table_name}, falling back to direct connection: {e}")
+        
+        # Fallback: create new connection (legacy mode)
         db_path = self.db_paths[table_name]
         return duckdb.connect(str(db_path), read_only=True)
+    
+    def _release_connection(self, table_name: str, conn: duckdb.DuckDBPyConnection) -> None:
+        """Release a connection back to the pool or close it.
+        
+        Args:
+            table_name: Name of table the connection was for
+            conn: Connection to release
+        """
+        if self.pool_manager is not None:
+            try:
+                pool = self.pool_manager.get_pool(table_name)
+                pool.release(conn)
+            except Exception as e:
+                logger.warning(f"Failed to release pooled connection for {table_name}: {e}")
+                conn.close()
+        else:
+            # Legacy mode: just close the connection
+            conn.close()
     
     def fetch_features(self, grid_id: str, timestamp_hour: datetime) -> pd.DataFrame:
         """Fetch and compute all 64 features for (grid_id, timestamp_hour).
@@ -141,7 +183,7 @@ class FeatureAssembler:
             # Fetch spatial features while we have grid connection open
             spatial_features = self._fetch_spatial_features(conn_grid, grid_id)
         finally:
-            conn_grid.close()
+            self._release_connection(TABLE_GRID, conn_grid)
         
         # Compute PM2.5 lag features (opens pm25_observations.duckdb)
         pm25_features = self._compute_pm25_lags(grid_id, timestamp_hour)
@@ -229,7 +271,7 @@ class FeatureAssembler:
                 logger.debug(f"PM2.5 {feature_name}: value={pm25_value:.2f} at {obs_timestamp}")
                 features[feature_name] = pm25_value
         finally:
-            conn.close()
+            self._release_connection(TABLE_PM25_OBSERVATION, conn)
         
         return features
     
@@ -299,7 +341,7 @@ class FeatureAssembler:
                     
                     observations[var_name][lag] = value
         finally:
-            conn.close()
+            self._release_connection(TABLE_METEO, conn)
         
         # Assemble lagged features
         for var_name, lag_hours in meteo_lags.items():
@@ -420,7 +462,7 @@ class FeatureAssembler:
                 conn_landsat, TABLE_LANDSAT8, grid_id, timestamp_hour
             )
         finally:
-            conn_landsat.close()
+            self._release_connection(TABLE_LANDSAT8, conn_landsat)
         
         # Fetch most recent Sentinel2 data <= timestamp_hour
         conn_sentinel = self._get_connection(TABLE_SENTINEL2)
@@ -429,7 +471,7 @@ class FeatureAssembler:
                 conn_sentinel, TABLE_SENTINEL2, grid_id, timestamp_hour
             )
         finally:
-            conn_sentinel.close()
+            self._release_connection(TABLE_SENTINEL2, conn_sentinel)
         
         # Compute Landsat indices
         if landsat_result is not None:
