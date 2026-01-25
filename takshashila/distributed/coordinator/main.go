@@ -49,6 +49,46 @@ type PredictRequest struct {
 	TimestampHour string `json:"timestamp_hour"`
 }
 
+// normalizeGridID converts grid IDs to 8-digit zero-padded format with 'g' prefix
+// Examples: "g1" → "g00000001", "g000001" → "g00000001", "g00000001" → "g00000001"
+func normalizeGridID(gridID string) string {
+	// Remove 'g' prefix if present
+	numericPart := gridID
+	if len(gridID) > 0 && gridID[0] == 'g' {
+		numericPart = gridID[1:]
+	}
+
+	// Parse as integer and re-format with 8-digit zero-padding
+	gridNum, err := strconv.Atoi(numericPart)
+	if err != nil {
+		// If parsing fails, return original (shouldn't happen in normal operation)
+		return gridID
+	}
+
+	return fmt.Sprintf("g%08d", gridNum)
+}
+
+// constructRedisCacheKey builds the cache key to match inference_job_worker format
+// Format: "prediction:{grid_id}:{timestamp_hour_iso}"
+// The inference worker writes with timestamp.isoformat() which produces "+00:00" format
+func constructRedisCacheKey(gridID, timestampHourStr string) string {
+	// Parse the incoming timestamp (typically "2026-01-25T13:00:00Z")
+	// and convert to ISO format with +00:00
+	parsedTime, err := time.Parse("2006-01-02T15:04:05Z", timestampHourStr)
+	if err != nil {
+		// Fallback: try without Z
+		parsedTime, err = time.Parse("2006-01-02T15:04:05", timestampHourStr)
+		if err != nil {
+			// If parsing fails, use as-is (shouldn't happen)
+			return fmt.Sprintf("prediction:%s:%s", gridID, timestampHourStr)
+		}
+	}
+
+	// Convert to ISO format with +00:00 (matching Python's isoformat())
+	isoTimeStr := parsedTime.Format("2006-01-02T15:04:05-07:00")
+	return fmt.Sprintf("prediction:%s:%s", gridID, isoTimeStr)
+}
+
 // PredictResponse is the HTTP response payload
 type PredictResponse struct {
 	RequestID string         `json:"request_id"`
@@ -164,18 +204,21 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize grid ID to 8-digit zero-padded format
+	normalizedGridID := normalizeGridID(req.GridID)
+
 	// Generate request ID
 	requestID := uuid.New().String()
 
 	// Item 27: Log request_id in structured logs (not in metrics)
-	log.Printf("[%s] [START] Received prediction request (grid_id=%s, timestamp=%s, model=%s, feature=%s)",
-		requestID, req.GridID, req.TimestampHour, c.modelVersion, c.featureVersion)
+	log.Printf("[%s] [START] Received prediction request (grid_id=%s → %s, timestamp=%s, model=%s, feature=%s)",
+		requestID, req.GridID, normalizedGridID, req.TimestampHour, c.modelVersion, c.featureVersion)
 
 	// Try to read from cache FIRST (Redis → DuckDB → on-demand inference)
 	// Use 120-second timeout to allow on-demand inference to complete
 	cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cacheCancel()
-	pm25, source, err := c.readPredictionFromCache(cacheCtx, req.GridID, req.TimestampHour, requestID)
+	pm25, source, err := c.readPredictionFromCache(cacheCtx, normalizedGridID, req.TimestampHour, requestID)
 
 	// If found in cache, return immediately (no workers needed)
 	if err == nil {
@@ -365,18 +408,18 @@ func (c *Coordinator) readPredictionFromCache(
 ) (float64, string, error) { // Returns: (pm25, source, error)
 
 	// Step 1: Try Redis cache (hot cache, 2-hour TTL)
-	redisKey := fmt.Sprintf("%s:%s", gridID, timestampHour)
+	redisKey := constructRedisCacheKey(gridID, timestampHour)
 	pm25Str, err := c.redisClient.Get(ctx, redisKey).Result()
 	if err == nil {
 		pm25, parseErr := strconv.ParseFloat(pm25Str, 64)
 		if parseErr == nil {
-			log.Printf("[%s] Redis cache HIT for %s:%s (pm25=%.2f)", requestID, gridID, timestampHour, pm25)
+			log.Printf("[%s] Redis cache HIT for %s (pm25=%.2f)", requestID, redisKey, pm25)
 			return pm25, "redis", nil
 		}
 		log.Printf("[%s] Redis cache value parse error: %v", requestID, parseErr)
 	}
 
-	log.Printf("[%s] Redis cache MISS for %s:%s", requestID, gridID, timestampHour)
+	log.Printf("[%s] Redis cache MISS for %s", requestID, redisKey)
 
 	// Step 2: Try DuckDB predictions table (persistent cache)
 	query := `
@@ -401,9 +444,6 @@ func (c *Coordinator) readPredictionFromCache(
 	}
 
 	// Step 3: On-demand inference via orchestrator
-	// TODO: Test on-demand inference with grids that have complete feature data
-	// Current blockers: Feature tables incomplete for most grids
-	// Test case: Find grid with all 64 required features populated in feature tables
 	log.Printf("[%s] Prediction NOT FOUND - requesting on-demand inference for %s:%s", requestID, gridID, timestampHour)
 
 	pm25, err = c.requestInferenceFromOrchestrator(ctx, gridID, timestampHour, requestID)
@@ -489,7 +529,7 @@ func (c *Coordinator) pollRedisForResult(
 	timeout time.Duration,
 ) (float64, error) {
 
-	redisKey := fmt.Sprintf("%s:%s", gridID, timestampHour)
+	redisKey := constructRedisCacheKey(gridID, timestampHour)
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -632,13 +672,8 @@ func main() {
 	log.Printf("Starting coordinator with config: port=%s, workers=%d, queue_capacity=%d",
 		config.ServerPort, config.NumWorkers, config.QueueCapacity)
 
-	// TODO: Spawn orchestrator as subprocess
-	// Currently orchestrator is started manually. Should:
-	// 1. Spawn: subprocess.Popen(['python3', '-m', 'takshashila.distributed.worker.orchestrator'])
-	// 2. Monitor orchestrator health via /health endpoint
-	// 3. Restart orchestrator if it crashes
-	// 4. Kill orchestrator on coordinator shutdown
-	// 5. Log orchestrator output for debugging
+	// Note: Orchestrator is started separately as a standalone service
+	// This separation ensures independent lifecycle management and easier debugging
 
 	// Create coordinator
 	coordinator, err := NewCoordinator(config)

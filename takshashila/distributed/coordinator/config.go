@@ -28,8 +28,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		ServerPort:            "8080",
-		NumWorkers:            2,
-		PythonWorkerPath:      "../worker/worker.py",
+		NumWorkers:            0, // Phase 3: on-demand inference via orchestrator, no local workers needed
+		PythonWorkerPath:      "",
 		QueueCapacity:         100,
 		RequestTimeout:        1 * time.Second,
 		RedisAddr:             "localhost:6379",
