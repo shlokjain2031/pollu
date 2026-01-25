@@ -46,11 +46,11 @@ BASE_TIMESTAMP = datetime(
 )
 
 # Number of unique grid IDs to populate (configurable via env)
-NUM_GRIDS = int(os.environ.get("NUM_GRIDS", "500000"))
+NUM_GRIDS = int(os.environ.get("NUM_GRIDS", "5000"))
 
 # Batch size for inserts (tune for memory vs speed)
 # Larger batches = faster but more memory. 50k rows = ~2-5MB per table
-BATCH_SIZE = 50000
+BATCH_SIZE = 500
 
 GRID_IDS = [f"g{i:08d}" for i in range(1, NUM_GRIDS + 1)]
 
