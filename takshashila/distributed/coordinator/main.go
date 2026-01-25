@@ -1,18 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/marcboeker/go-duckdb"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 )
 
 // Coordinator is the main coordinator service
@@ -26,6 +31,16 @@ type Coordinator struct {
 	predictionCache *PredictionCache // Phase 1: In-memory cache with async writes
 	modelVersion    string           // Read from MODEL_VERSION env var (Item 26)
 	featureVersion  string           // Read from FEATURE_VERSION env var (Item 26)
+
+	// NEW: Redis connection for hot cache (2-hour TTL)
+	redisClient *redis.Client
+
+	// NEW: DuckDB connection for persistent predictions cache
+	duckdbConn *sql.DB
+
+	// NEW: Orchestrator HTTP client for on-demand inference
+	orchestratorClient *http.Client
+	orchestratorURL    string
 }
 
 // PredictRequest is the HTTP request payload
@@ -38,6 +53,7 @@ type PredictRequest struct {
 type PredictResponse struct {
 	RequestID string         `json:"request_id"`
 	PM25      float64        `json:"pm25,omitempty"`
+	Source    string         `json:"source,omitempty"` // "redis", "duckdb", or "inference"
 	Error     *ErrorResponse `json:"error,omitempty"`
 }
 
@@ -69,18 +85,57 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 	// Create result cache with 5-minute TTL (Part 1)
 	cache := NewResultCache(5 * time.Minute)
 
-	// Create prediction cache with 2-hour TTL (Phase 1)
-	predictionCache := NewPredictionCache(2 * time.Hour)
+	// NEW: Initialize Redis client for hot cache
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379" // Default
+	}
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+
+	// Test Redis connection
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Printf("WARNING: Redis connection failed: %v (predictions will fallback to DuckDB)", err)
+	}
+
+	// NEW: Initialize DuckDB predictions connection
+	duckdbPath := os.Getenv("DUCKDB_PREDICTIONS_PATH")
+	if duckdbPath == "" {
+		duckdbPath = "/Users/shlokjain/pollu/takshashila/duckdb/predictions.duckdb" // Default
+	}
+	duckdbConn, err := sql.Open("duckdb", duckdbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open DuckDB predictions: %w", err)
+	}
+
+	// Test DuckDB connection
+	if err := duckdbConn.Ping(); err != nil {
+		log.Printf("WARNING: DuckDB connection failed: %v", err)
+	}
+
+	// NEW: Initialize Orchestrator HTTP client
+	orchestratorURL := os.Getenv("KASHI_ORCHESTRATOR_URL")
+	if orchestratorURL == "" {
+		orchestratorURL = "http://localhost:9999" // Default
+	}
+	orchestratorClient := &http.Client{
+		Timeout: 120 * time.Second, // 2 minutes for inference completion
+	}
+	log.Printf("Orchestrator configured at: %s", orchestratorURL)
 
 	return &Coordinator{
-		config:          config,
-		queue:           queue,
-		pool:            pool,
-		dedup:           dedup,
-		cache:           cache,
-		predictionCache: predictionCache,
-		modelVersion:    modelVersion,   // Item 26: Stored at startup
-		featureVersion:  featureVersion, // Item 26: Stored at startup
+		config:             config,
+		queue:              queue,
+		pool:               pool,
+		dedup:              dedup,
+		cache:              cache,
+		modelVersion:       modelVersion,   // Item 26: Stored at startup
+		featureVersion:     featureVersion, // Item 26: Stored at startup
+		redisClient:        redisClient,
+		duckdbConn:         duckdbConn,
+		orchestratorClient: orchestratorClient,
+		orchestratorURL:    orchestratorURL,
 	}, nil
 }
 
@@ -109,24 +164,50 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Part 1: Check if any healthy workers are available
-	if c.pool.healthChecker.HealthyWorkerCount() == 0 {
-		http.Error(w, "Service unavailable: no healthy workers", http.StatusServiceUnavailable)
-		return
-	}
-
 	// Generate request ID
 	requestID := uuid.New().String()
 
 	// Item 27: Log request_id in structured logs (not in metrics)
-	log.Printf("[%s] Received prediction request (grid_id=%s, timestamp=%s, model=%s, feature=%s)",
+	log.Printf("[%s] [START] Received prediction request (grid_id=%s, timestamp=%s, model=%s, feature=%s)",
 		requestID, req.GridID, req.TimestampHour, c.modelVersion, c.featureVersion)
+
+	// Try to read from cache FIRST (Redis → DuckDB → on-demand inference)
+	// Use 120-second timeout to allow on-demand inference to complete
+	cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cacheCancel()
+	pm25, source, err := c.readPredictionFromCache(cacheCtx, req.GridID, req.TimestampHour, requestID)
+
+	// If found in cache, return immediately (no workers needed)
+	if err == nil {
+		elapsed := time.Since(startTime).Milliseconds()
+		resp := PredictResponse{
+			RequestID: requestID,
+			PM25:      pm25,
+			Source:    source,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		log.Printf("[%s] [END] Served from cache (Source: %s) in %dms", requestID, source, elapsed)
+		return
+	}
+
+	// Cache miss - now check if workers are available for on-demand inference
+	if c.pool.healthChecker.HealthyWorkerCount() == 0 {
+		// No workers - return cached error (PredictionNotAvailableError)
+		log.Printf("[%s] No healthy workers available and cache miss", requestID)
+		predErr := ClassifyError(err)
+		errorResp := NewErrorResponse(predErr)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(predErr.HTTPStatus())
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": errorResp})
+		return
+	}
 
 	// Create context with 1-second timeout (Part 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	// Execute prediction with dedup + cache
+	// Execute prediction with dedup + cache (workers ARE healthy)
 	pm25, path, err := c.executePredictionWithPath(ctx, req.GridID, req.TimestampHour, requestID)
 
 	// Record end-to-end latency
@@ -162,6 +243,7 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 
 	// Success - record with path, status, model_version, feature_version labels
 	resp.PM25 = pm25
+	resp.Source = "inference" // Came from worker inference
 	if globalMetrics != nil {
 		globalMetrics.RequestsTotal.WithLabelValues(path, "success", c.modelVersion, c.featureVersion).Inc()
 	}
@@ -174,12 +256,6 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 // executePredictionWithPath orchestrates cache check, dedup, and computation
 // Returns: (pm25, path, error) where path is "cache", "dedup", or "compute"
 func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, timestampHour, requestID string) (float64, string, error) {
-	// Phase 1: Check prediction cache FIRST (before old result cache)
-	if pm25, hit := c.predictionCache.Get(gridID, timestampHour); hit {
-		log.Printf("[%s] Prediction cache HIT for %s:%s", requestID, gridID, timestampHour)
-		return pm25, "cache", nil
-	}
-
 	// Construct dedup/cache key (model_version and feature_version hardcoded for now)
 	key := DedupKey{
 		GridID:         gridID,
@@ -238,7 +314,9 @@ func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, tim
 		defer globalMetrics.InflightLeaderComputations.Dec()
 	}
 
-	pm25, err := c.executeComputation(ctx, gridID, timestampHour, requestID)
+	// NEW: Read from cache tiers (Redis → DuckDB) instead of computing
+	pm25, source, err := c.readPredictionFromCache(ctx, gridID, timestampHour, requestID)
+	_ = source // Dedup path doesn't need to track source separately
 
 	// Classify error if present
 	var predErr PredictionError
@@ -253,13 +331,7 @@ func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, tim
 	}
 	c.dedup.Complete(key, dedupResult)
 
-	// Phase 1: Cache in prediction cache (async write to DB)
-	if predErr == nil {
-		c.predictionCache.Set(gridID, timestampHour, pm25)
-		log.Printf("[%s] LEADER: cached in prediction cache (pm25=%.2f, async write scheduled)", requestID, pm25)
-	}
-
-	// Also cache in OLD result cache based on error type
+	// Phase 1: Cache in OLD result cache based on error type
 	if predErr == nil {
 		// Success - cache with default TTL
 		c.cache.Set(cacheKey, pm25)
@@ -280,6 +352,171 @@ func (c *Coordinator) executePredictionWithPath(ctx context.Context, gridID, tim
 func (c *Coordinator) executePrediction(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
 	pm25, _, err := c.executePredictionWithPath(ctx, gridID, timestampHour, requestID)
 	return pm25, err
+}
+
+// readPredictionFromCache reads pre-computed predictions from Redis → DuckDB
+// DOES NOT compute - fails loudly with 404 if prediction not found
+// This is the read-only path: orchestrator computes, coordinator serves
+func (c *Coordinator) readPredictionFromCache(
+	ctx context.Context,
+	gridID,
+	timestampHour,
+	requestID string,
+) (float64, string, error) { // Returns: (pm25, source, error)
+
+	// Step 1: Try Redis cache (hot cache, 2-hour TTL)
+	redisKey := fmt.Sprintf("%s:%s", gridID, timestampHour)
+	pm25Str, err := c.redisClient.Get(ctx, redisKey).Result()
+	if err == nil {
+		pm25, parseErr := strconv.ParseFloat(pm25Str, 64)
+		if parseErr == nil {
+			log.Printf("[%s] Redis cache HIT for %s:%s (pm25=%.2f)", requestID, gridID, timestampHour, pm25)
+			return pm25, "redis", nil
+		}
+		log.Printf("[%s] Redis cache value parse error: %v", requestID, parseErr)
+	}
+
+	log.Printf("[%s] Redis cache MISS for %s:%s", requestID, gridID, timestampHour)
+
+	// Step 2: Try DuckDB predictions table (persistent cache)
+	query := `
+		SELECT pm25_prediction 
+		FROM predictions 
+		WHERE grid_id = ? AND timestamp_hour = ?
+		LIMIT 1
+	`
+
+	var pm25 float64
+	row := c.duckdbConn.QueryRowContext(ctx, query, gridID, timestampHour)
+	if err := row.Scan(&pm25); err == nil {
+		log.Printf("[%s] DuckDB cache HIT for %s:%s (pm25=%.2f)", requestID, gridID, timestampHour, pm25)
+
+		// Populate Redis for next request (async, fire-and-forget)
+		go func() {
+			bgCtx := context.Background()
+			c.redisClient.Set(bgCtx, redisKey, pm25, 2*time.Hour)
+		}()
+
+		return pm25, "duckdb", nil
+	}
+
+	// Step 3: On-demand inference via orchestrator
+	log.Printf("[%s] Prediction NOT FOUND - requesting on-demand inference for %s:%s", requestID, gridID, timestampHour)
+
+	pm25, err = c.requestInferenceFromOrchestrator(ctx, gridID, timestampHour, requestID)
+	if err == nil {
+		log.Printf("[%s] On-demand inference SUCCEEDED (pm25=%.2f)", requestID, pm25)
+		return pm25, "inference", nil
+	}
+
+	// Step 4: FAIL LOUDLY - on-demand inference failed
+	log.Printf("[%s] On-demand inference FAILED: %v", requestID, err)
+	return 0, "", NewPredictionNotAvailableError(gridID, timestampHour)
+}
+
+// requestInferenceFromOrchestrator sends on-demand inference request to orchestrator
+// Orchestrator spawns worker asynchronously, coordinator polls Redis for result
+func (c *Coordinator) requestInferenceFromOrchestrator(
+	ctx context.Context,
+	gridID,
+	timestampHour,
+	requestID string,
+) (float64, error) {
+
+	// Build request payload
+	cycleID := uuid.New().String()
+	reqBody := map[string]interface{}{
+		"grids":          []string{gridID},
+		"timestamp_hour": timestampHour,
+		"request_id":     requestID,
+		"cycle_id":       cycleID,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Send POST request to orchestrator
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		c.orchestratorURL+"/inference",
+		bytes.NewReader(jsonBody),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	log.Printf("[%s] Sending on-demand inference request to orchestrator (cycle_id=%s)", requestID, cycleID)
+
+	resp, err := c.orchestratorClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("orchestrator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("orchestrator returned status %d", resp.StatusCode)
+	}
+
+	// Parse response
+	var orchResp struct {
+		Status  string `json:"status"`
+		CycleID string `json:"cycle_id"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&orchResp); err != nil {
+		return 0, fmt.Errorf("failed to decode orchestrator response: %w", err)
+	}
+
+	log.Printf("[%s] Orchestrator response: %s (cycle_id=%s)", requestID, orchResp.Status, orchResp.CycleID)
+
+	// Poll Redis for result (worker writes to cache asynchronously)
+	return c.pollRedisForResult(ctx, gridID, timestampHour, requestID, 90*time.Second)
+}
+
+// pollRedisForResult polls Redis cache every 200ms until result appears or timeout
+func (c *Coordinator) pollRedisForResult(
+	ctx context.Context,
+	gridID,
+	timestampHour,
+	requestID string,
+	timeout time.Duration,
+) (float64, error) {
+
+	redisKey := fmt.Sprintf("%s:%s", gridID, timestampHour)
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	log.Printf("[%s] Polling Redis for result (timeout=%v)", requestID, timeout)
+
+	for {
+		select {
+		case <-ticker.C:
+			// Check Redis cache
+			pm25Str, err := c.redisClient.Get(ctx, redisKey).Result()
+			if err == nil && pm25Str != "" {
+				pm25, parseErr := strconv.ParseFloat(pm25Str, 64)
+				if parseErr == nil {
+					log.Printf("[%s] Poll SUCCESS - found result in Redis (pm25=%.2f)", requestID, pm25)
+					return pm25, nil
+				}
+			}
+
+			// Check timeout
+			if time.Now().After(deadline) {
+				log.Printf("[%s] Poll TIMEOUT after %v", requestID, timeout)
+				return 0, fmt.Errorf("inference timed out after %v", timeout)
+			}
+
+		case <-ctx.Done():
+			log.Printf("[%s] Poll CANCELLED (context done)", requestID)
+			return 0, ctx.Err()
+		}
+	}
 }
 
 // executeComputation submits job to worker pool and waits for result
@@ -378,8 +615,7 @@ func (c *Coordinator) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (c *Coordinator) Shutdown() {
 	log.Println("Shutting down coordinator...")
 	c.pool.Shutdown()
-	c.predictionCache.Stop()
-	log.Println("Prediction cache stopped")
+	log.Println("Coordinator shutdown complete")
 }
 
 func main() {

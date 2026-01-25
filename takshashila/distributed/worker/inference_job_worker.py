@@ -406,14 +406,20 @@ def main():
     parser.add_argument(
         "--grid-batch-start",
         type=int,
-        required=True,
+        required=False,
         help="Starting grid index for this batch"
     )
     parser.add_argument(
         "--grid-batch-end",
         type=int,
-        required=True,
+        required=False,
         help="Ending grid index for this batch (exclusive)"
+    )
+    parser.add_argument(
+        "--grid-ids",
+        type=str,
+        required=False,
+        help="Comma-separated list of specific grid IDs for on-demand inference (e.g., '12345,67890')"
     )
     parser.add_argument(
         "--cache-host",
@@ -445,7 +451,18 @@ def main():
     logger.info("InferenceJob worker starting")
     logger.info(f"Cycle ID: {args.cycle_id}")
     logger.info(f"Timestamp: {args.timestamp_hour}")
-    logger.info(f"Grid batch: [{args.grid_batch_start}, {args.grid_batch_end})")
+    
+    # Determine mode: grid-ids (on-demand) or batch range (scheduled)
+    if args.grid_ids:
+        logger.info(f"Mode: On-demand (grid-ids)")
+        logger.info(f"Grid IDs: {args.grid_ids}")
+    else:
+        if args.grid_batch_start is None or args.grid_batch_end is None:
+            logger.error("Either --grid-ids or both --grid-batch-start and --grid-batch-end must be provided")
+            return 1
+        logger.info(f"Mode: Scheduled (batch range)")
+        logger.info(f"Grid batch: [{args.grid_batch_start}, {args.grid_batch_end})")
+    
     logger.info(f"Cache: {args.cache_host}:{args.cache_port}")
     
     try:
@@ -518,12 +535,23 @@ def main():
         # MAIN PROCESSING LOOP - BATCH PREDICTION WITH METRICS
         # ========================================================================
         
-        logger.info(f"Starting batch inference for grid range [{args.grid_batch_start}, {args.grid_batch_end})")
+        # Determine grid IDs based on mode
+        if args.grid_ids:
+            # On-demand mode: parse comma-separated grid IDs
+            grid_indices = [int(gid) for gid in args.grid_ids.split(',')]
+            logger.info(f"Starting on-demand inference for {len(grid_indices)} specific grids")
+            total_grids = len(grid_indices)
+        else:
+            # Scheduled mode: use batch range
+            grid_indices = list(range(args.grid_batch_start, args.grid_batch_end))
+            logger.info(f"Starting batch inference for grid range [{args.grid_batch_start}, {args.grid_batch_end})")
+            total_grids = args.grid_batch_end - args.grid_batch_start
+        
         logger.info(f"Batch size: {BATCH_SIZE} grids per predict_batch() call")
         
         # Initialize metrics
         metrics = Metrics(
-            total_grids_requested=args.grid_batch_end - args.grid_batch_start
+            total_grids_requested=total_grids
         )
         
         time_job_start = time.time()
@@ -536,16 +564,16 @@ def main():
             return 1
         
         # Process grids in batches
-        batch_start = args.grid_batch_start
-        total_grids = args.grid_batch_end - args.grid_batch_start
+        idx = 0
         
-        while batch_start < args.grid_batch_end:
-            batch_end = min(batch_start + BATCH_SIZE, args.grid_batch_end)
-            batch_grid_ids = [f"g{i:08d}" for i in range(batch_start, batch_end)]
+        while idx < len(grid_indices):
+            batch_end_idx = min(idx + BATCH_SIZE, len(grid_indices))
+            batch_indices = grid_indices[idx:batch_end_idx]
+            batch_grid_ids = [f"g{i:08d}" for i in batch_indices]
             
             time_batch_start = time.time()
             
-            logger.debug(f"Processing batch: grids {batch_start}-{batch_end-1} ({len(batch_grid_ids)} grids)")
+            logger.debug(f"Processing batch: {len(batch_grid_ids)} grids (indices {batch_indices[0]}-{batch_indices[-1]})")
             
             try:
                 # Stage 1: Feature assembly + model inference
@@ -610,19 +638,19 @@ def main():
                 metrics.time_total_ms += time_batch_elapsed
                 
                 logger.info(
-                    f"Processed batch [{batch_start}, {batch_end}): "
+                    f"Processed batch (indices {batch_indices[0]}-{batch_indices[-1]}): "
                     f"{len(batch_predictions)} predictions, "
                     f"total progress: {metrics.grids_predicted_success}/{total_grids}, "
                     f"batch time: {time_batch_elapsed:.0f}ms"
                 )
             
             except Exception as e:
-                logger.error(f"Batch prediction failed for range [{batch_start}, {batch_end}): {e}")
+                logger.error(f"Batch prediction failed for range [{idx}, {batch_end_idx}): {e}")
                 # Count all grids in failed batch as errors
-                grids_in_failed_batch = batch_end - batch_start
+                grids_in_failed_batch = batch_end_idx - idx
                 metrics.grids_skipped_errors += grids_in_failed_batch
             
-            batch_start = batch_end
+            idx = batch_end_idx
         
         # Calculate total time
         metrics.time_total_ms = (time.time() - time_job_start) * 1000
