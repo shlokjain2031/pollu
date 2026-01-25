@@ -440,6 +440,12 @@ class Orchestrator:
         
         WriterJob: Scheduled @ t=-2m (2 minutes before hour)
         InferenceJob: Scheduled @ t=0m (top of hour)
+        
+        TODO: Once WriterJob is implemented, ensure:
+        - WriterJob completes within 120 seconds
+        - Retry logic if WriterJob fails (up to 2 retries)
+        - Fall back to warm cache if WriterJob fails
+        - Track metrics (duration, grids updated, errors)
         """
         schedule_hour = self.config["schedule_hour"]
         schedule_minute = self.config["schedule_minute"]
@@ -481,8 +487,21 @@ class Orchestrator:
         self.logger.info("Orchestrator shutdown complete")
     
     def run_writer_job(self):
-        """Execute WriterJob (placeholder, implements TODO)."""
-        # TODO: Implement run_writer_job() function
+        """Execute WriterJob (placeholder, implements TODO).
+        
+        TODO: Implement run_writer_job() - should fetch from 4 data sources:
+        1. Grid manifest (grid locations, metadata)
+        2. Meteorological data (OpenMeteo API, 40+ variables)
+        3. Satellite data (Sentinel-2, MODIS, Landsat-8)
+        4. PM2.5 observations (ground truth for training)
+        
+        Expected flow:
+        - Load grid coordinates from grid.duckdb
+        - For each grid, fetch meteo/satellite/pm2.5 data
+        - Transform to feature space
+        - Write to DuckDB feature tables
+        - Timeout: 120 seconds (must complete by t=-1m)
+        """
         pass
     
     def run_inference_job(self):
@@ -636,6 +655,18 @@ def main():
     
     Configuration comes from takshashila/core/config.py with optional
     environment variable overrides (KASHI_*).
+    
+    TODO: Make orchestrator a subprocess of Go Coordinator
+    - Coordinator spawns: subprocess.Popen(['python3', '-m', 'takshashila.distributed.worker.orchestrator'])
+    - Coordinator monitors orchestrator process health
+    - Coordinator restarts orchestrator on failure
+    - Orchestrator communicates back via HTTP (already implemented)
+    
+    TODO: Integrate WriterJob into scheduler
+    - Register run_writer_job() with APScheduler @ t=-2m (2 min before hour)
+    - Wait for WriterJob completion with timeout
+    - If WriterJob fails, log error but continue (warm cache fallback)
+    - Track WriterJob metrics (duration, grids updated, errors)
     """
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -710,16 +741,3 @@ Environment Variables:
 
 if __name__ == "__main__":
     main()
-
-
-# TODO: Implement run_writer_job() function
-# TODO: Implement hot cache worker spawning and waiting
-# TODO: Implement warm cache workers (async)
-# TODO: Implement cold cache workers (async, background)
-# TODO: Initialize shared components (Redis, PersistenceQueue)
-# TODO: Implement error handling and retries
-# TODO: Implement graceful shutdown (SIGTERM)
-# TODO: Implement logging with cycle_id
-# TODO: Implement cycle state tracking
-# TODO: Implement timeout handling for subprocesses
-# TODO: Implement health monitoring for workers
