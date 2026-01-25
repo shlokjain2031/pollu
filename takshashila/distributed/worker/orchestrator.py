@@ -185,6 +185,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Thread
 import pytz
+from flask import Flask, request, jsonify
 
 # APScheduler imports
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -199,6 +200,16 @@ from takshashila.core.config import (
     GRID_BATCH_SIZE_HOT, GRID_BATCH_SIZE_WARM, GRID_BATCH_SIZE_COLD,
     REDIS_HOST, REDIS_PORT, DUCKDB_GRID_PATH, ORCHESTRATOR_LOG_FILE, WORKER_LOG_DIR
 )
+
+
+# ============================================================================
+# FLASK APP SETUP
+# ============================================================================
+
+app = Flask(__name__)
+
+# Global orchestrator instance for Flask endpoints
+orchestrator_instance = None
 
 
 # ============================================================================
@@ -271,6 +282,135 @@ def setup_logging(log_file=None, cycle_id=None):
     )
     
     return logging.getLogger(__name__)
+
+
+# ============================================================================
+# FLASK ENDPOINTS
+# ============================================================================
+
+@app.route('/inference', methods=['POST'])
+def on_demand_inference():
+    """Handle on-demand inference requests from Go Coordinator.
+    
+    Request JSON:
+    {
+        "grids": [12345, 67890, ...],
+        "timestamp_hour": "2026-01-25T14:00:00Z",
+        "request_id": "req-uuid",
+        "cycle_id": "cycle-uuid"  // optional
+    }
+    
+    Response JSON:
+    {
+        "status": "accepted",
+        "request_id": "req-uuid",
+        "grids_count": 2,
+        "message": "Worker spawned for on-demand inference"
+    }
+    
+    On error:
+    {
+        "status": "error",
+        "request_id": "req-uuid",
+        "error": "error message"
+    }
+    """
+    global orchestrator_instance
+    
+    try:
+        # Parse request
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "status": "error",
+                "error": "Missing JSON body"
+            }), 400
+        
+        grids = data.get("grids", [])
+        timestamp_hour = data.get("timestamp_hour")
+        request_id = data.get("request_id")
+        cycle_id = data.get("cycle_id") or str(uuid.uuid4())
+        
+        # Validate
+        if not grids:
+            return jsonify({
+                "status": "error",
+                "request_id": request_id,
+                "error": "Missing 'grids' array"
+            }), 400
+        
+        if not timestamp_hour:
+            return jsonify({
+                "status": "error",
+                "request_id": request_id,
+                "error": "Missing 'timestamp_hour'"
+            }), 400
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f"[{request_id}] On-demand inference request received: {len(grids)} grids @ {timestamp_hour}")
+        
+        # Spawn worker asynchronously (non-blocking)
+        # For on-demand requests, we process all grids in a single batch
+        def spawn_on_demand_worker():
+            try:
+                # Convert grid IDs (e.g., "g00491999") to numeric indices (e.g., "491999")
+                grid_indices = []
+                for grid_id in grids:
+                    if isinstance(grid_id, str) and grid_id.startswith('g'):
+                        grid_indices.append(grid_id[1:])  # Strip 'g' prefix
+                    else:
+                        grid_indices.append(str(grid_id))  # Already numeric
+                
+                cmd = [
+                    sys.executable, "-m", "takshashila.distributed.worker.inference_job_worker",
+                    "--cycle-id", cycle_id,
+                    "--timestamp-hour", timestamp_hour,
+                    "--grid-ids", ",".join(grid_indices),  # Pass numeric indices
+                    "--cache-host", orchestrator_instance.config.get("cache_host", "localhost"),
+                    "--cache-port", str(orchestrator_instance.config.get("cache_port", 6379))
+                ]
+                
+                logger.info(f"[{request_id}] Spawning on-demand worker: {' '.join(cmd)}")
+                
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                logger.info(f"[{request_id}] On-demand worker spawned (PID: {process.pid})")
+                
+                # Don't wait - let worker finish asynchronously
+                # Worker will write results to Redis when done
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] Failed to spawn on-demand worker: {e}")
+        
+        # Spawn in background thread
+        Thread(target=spawn_on_demand_worker, daemon=True).start()
+        
+        # Return immediately
+        return jsonify({
+            "status": "accepted",
+            "request_id": request_id,
+            "grids_count": len(grids),
+            "message": "Worker spawned for on-demand inference"
+        }), 200
+    
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"On-demand inference endpoint error: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint."""
+    return jsonify({"status": "healthy", "service": "orchestrator"}), 200
 
 
 # ============================================================================
@@ -541,13 +681,24 @@ Environment Variables:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
+    # Set global orchestrator instance for Flask endpoints
+    global orchestrator_instance
+    orchestrator_instance = orchestrator
+    
     # Start scheduler
     try:
         orchestrator.start()
+        logger.info("Orchestrator APScheduler started")
+        
+        # Start Flask server in main thread
+        flask_port = int(os.environ.get("KASHI_ORCHESTRATOR_PORT", 9999))
+        flask_host = os.environ.get("KASHI_ORCHESTRATOR_HOST", "0.0.0.0")
+        
+        logger.info(f"Starting Flask server on {flask_host}:{flask_port}")
         logger.info("Orchestrator running, press Ctrl+C to stop")
-        # Keep running until interrupted
-        while True:
-            signal.pause()
+        
+        # Run Flask (blocking call)
+        app.run(host=flask_host, port=flask_port, debug=False, use_reloader=False)
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
         orchestrator.shutdown()

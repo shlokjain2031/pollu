@@ -14,6 +14,7 @@ const (
 	ErrorTypeDataMissing
 	ErrorTypeComputationTimeout
 	ErrorTypeWorkerError
+	ErrorTypePredictionNotAvailable
 	ErrorTypeUnknown
 )
 
@@ -30,6 +31,8 @@ func (e ErrorType) String() string {
 		return "ComputationTimeout"
 	case ErrorTypeWorkerError:
 		return "WorkerError"
+	case ErrorTypePredictionNotAvailable:
+		return "PredictionNotAvailable"
 	case ErrorTypeUnknown:
 		return "Unknown"
 	default:
@@ -122,6 +125,20 @@ func NewDataMissingError(message string) PredictionError {
 		retryable:  true,
 		cacheable:  true,
 		cacheTTL:   45 * time.Second, // 45s as middle ground
+	}
+}
+
+// NewPredictionNotAvailableError creates a 404 retryable error for missing predictions
+// Used when prediction doesn't exist in Redis or DuckDB (orchestrator hasn't computed yet)
+// Retryable because orchestrator may still be computing, cacheable for brief period to avoid hammering
+func NewPredictionNotAvailableError(gridID, timestampHour string) PredictionError {
+	return &predictionError{
+		errType:    ErrorTypePredictionNotAvailable,
+		message:    fmt.Sprintf("Prediction not available for grid_id=%s, timestamp_hour=%s. Orchestrator may still be computing, retry in 30-60 seconds.", gridID, timestampHour),
+		httpStatus: 404,
+		retryable:  true,
+		cacheable:  true,
+		cacheTTL:   30 * time.Second, // Cache miss briefly to avoid hammering DB
 	}
 }
 
