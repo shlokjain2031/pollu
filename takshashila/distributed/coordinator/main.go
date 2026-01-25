@@ -401,6 +401,9 @@ func (c *Coordinator) readPredictionFromCache(
 	}
 
 	// Step 3: On-demand inference via orchestrator
+	// TODO: Test on-demand inference with grids that have complete feature data
+	// Current blockers: Feature tables incomplete for most grids
+	// Test case: Find grid with all 64 required features populated in feature tables
 	log.Printf("[%s] Prediction NOT FOUND - requesting on-demand inference for %s:%s", requestID, gridID, timestampHour)
 
 	pm25, err = c.requestInferenceFromOrchestrator(ctx, gridID, timestampHour, requestID)
@@ -628,6 +631,14 @@ func main() {
 	config := DefaultConfig()
 	log.Printf("Starting coordinator with config: port=%s, workers=%d, queue_capacity=%d",
 		config.ServerPort, config.NumWorkers, config.QueueCapacity)
+
+	// TODO: Spawn orchestrator as subprocess
+	// Currently orchestrator is started manually. Should:
+	// 1. Spawn: subprocess.Popen(['python3', '-m', 'takshashila.distributed.worker.orchestrator'])
+	// 2. Monitor orchestrator health via /health endpoint
+	// 3. Restart orchestrator if it crashes
+	// 4. Kill orchestrator on coordinator shutdown
+	// 5. Log orchestrator output for debugging
 
 	// Create coordinator
 	coordinator, err := NewCoordinator(config)
