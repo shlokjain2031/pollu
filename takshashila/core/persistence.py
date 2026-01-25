@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Import pool manager if available (optional for backward compatibility)
 try:
-    from kashi.db_pool import PoolManager
+    from takshashila.core.db_pool import PoolManager
     POOL_AVAILABLE = True
 except ImportError:
     PoolManager = None
