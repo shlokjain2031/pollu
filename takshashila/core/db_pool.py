@@ -214,6 +214,7 @@ class PoolManager:
     Manage all pools across Kashi.
     
     Pools:
+    - grid: 2 connections (static data, rarely accessed)
     - meteo: 4 connections
     - pm25_observations: 4 connections
     - landsat8: 4 connections
@@ -225,6 +226,10 @@ class PoolManager:
         """Initialize all pools."""
         self.base_path = base_path
         self.pools: Dict[str, DuckDBConnectionPool] = {}
+        
+        # Grid pool (2 connections - rarely used, mostly static data)
+        db_path = f"{base_path}/grid.duckdb"
+        self.pools['grid'] = DuckDBConnectionPool(db_path, pool_size=2, file_name='grid')
         
         # Feature table pools (4 connections each)
         for table in ['meteo', 'pm25_observations', 'landsat8', 'sentinel2']:

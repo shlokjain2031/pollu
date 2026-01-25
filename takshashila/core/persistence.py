@@ -9,6 +9,7 @@ TIMESTAMP POLICY:
 import duckdb
 import threading
 import time
+import queue
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -343,3 +344,229 @@ class PersistenceLayer:
                 timestamp_hour=None,
                 reason=str(e)
             )
+
+
+# ============================================================================
+# PERSISTENCE QUEUE - ASYNC SEQUENTIAL DUCKDB WRITER
+# ============================================================================
+
+class PersistenceQueue:
+    """Minimal thread-safe FIFO queue for sequential DuckDB writes.
+    
+    Purpose:
+    - Accept predictions from multiple worker threads (non-blocking)
+    - Batch predictions for efficient DuckDB inserts
+    - Write sequentially to predictions table
+    - Background writer thread handles all I/O
+    
+    Flow:
+    ```
+    Worker 1: queue.put(grid_id=g001, pm25=45.2)  [returns immediately]
+    Worker 2: queue.put(grid_id=g002, pm25=48.1)  [returns immediately]
+    Worker 3: queue.put(grid_id=g003, pm25=42.5)  [returns immediately]
+    
+    Background writer thread:
+      Every batch_size items or batch_timeout_seconds:
+        UPSERT INTO predictions VALUES (g001, ...), (g002, ...), ...
+    ```
+    """
+    
+    def __init__(self, db_path: str, batch_size: int = 100, batch_timeout_seconds: float = 1.0):
+        """Initialize queue.
+        
+        Args:
+            db_path: Path to predictions.duckdb
+            batch_size: Write N predictions per batch (efficient for DuckDB)
+            batch_timeout_seconds: Flush batch after timeout even if not full
+        """
+        self.db_path = Path(db_path)
+        self.batch_size = batch_size
+        self.batch_timeout_seconds = batch_timeout_seconds
+        
+        # Thread-safe FIFO queue (maxsize prevents unbounded memory growth)
+        self.queue = queue.Queue(maxsize=10000)
+        
+        # Control flag for graceful shutdown
+        self.running = True
+        
+        # Persistent write connection (shared across batches, created on first use)
+        self._write_conn = None
+        self._write_conn_lock = threading.RLock()
+        
+        # Start background writer thread
+        self.writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
+        self.writer_thread.start()
+        
+        logger.info(
+            f"PersistenceQueue initialized (batch_size={batch_size}, "
+            f"timeout={batch_timeout_seconds}s, db={db_path})"
+        )
+    
+    def put(
+        self,
+        grid_id: str,
+        timestamp_hour: datetime,
+        pm25_value: float,
+        model_version: str,
+        schema_hash: str
+    ) -> None:
+        """Add prediction to queue (non-blocking).
+        
+        Returns immediately. Write happens in background.
+        
+        Args:
+            grid_id: Grid cell identifier
+            timestamp_hour: Prediction timestamp
+            pm25_value: PM2.5 prediction
+            model_version: Model version
+            schema_hash: Feature schema hash
+        
+        Raises:
+            queue.Full: If queue is full (backpressure - slows workers)
+        """
+        item = {
+            'grid_id': grid_id,
+            'timestamp_hour': timestamp_hour,
+            'pm25_value': pm25_value,
+            'model_version': model_version,
+            'schema_hash': schema_hash
+        }
+        
+        try:
+            self.queue.put(item, block=True)  # Block if queue full (backpressure)
+        except queue.Full:
+            logger.error(f"PersistenceQueue full, dropping prediction for {grid_id}")
+    
+    def _writer_loop(self) -> None:
+        """Background thread: read from queue, batch, write to DuckDB.
+        
+        Collects predictions into batches and writes to DB every batch_size items
+        or after batch_timeout_seconds, whichever comes first.
+        """
+        while self.running:
+            batch = []
+            deadline = time.time() + self.batch_timeout_seconds
+            
+            # Collect batch_size items or until timeout
+            while len(batch) < self.batch_size:
+                timeout = deadline - time.time()
+                
+                if timeout <= 0:
+                    break
+                
+                try:
+                    # Get next item with timeout
+                    item = self.queue.get(timeout=timeout)
+                    batch.append(item)
+                except queue.Empty:
+                    break
+            
+            # Write batch if not empty
+            if batch:
+                self._write_batch(batch)
+    
+    def _get_write_connection(self) -> duckdb.DuckDBPyConnection:
+        """Get or create persistent write connection with WAL enabled.
+        
+        Creates connection once and reuses it for all batch writes to avoid
+        connection pool exhaustion and "different configuration" errors.
+        
+        Returns:
+            DuckDB connection in write mode with WAL enabled
+        """
+        self._write_conn_lock.acquire()
+        try:
+            if self._write_conn is None:
+                self._write_conn = duckdb.connect(str(self.db_path), read_only=False)
+                
+                # Enable WAL (Write-Ahead Logging) for concurrent read/write access
+                try:
+                    self._write_conn.execute("PRAGMA journal_mode = WAL")
+                    logger.debug(f"WAL mode enabled for {self.db_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to enable WAL mode: {e}")
+                
+                # Enable object cache for better performance
+                try:
+                    self._write_conn.execute("PRAGMA enable_object_cache = true")
+                except:
+                    pass
+            
+            return self._write_conn
+        finally:
+            self._write_conn_lock.release()
+    
+    def _write_batch(self, batch: list) -> None:
+        """Write batch of predictions to DuckDB in single transaction using UPSERT.
+        
+        Uses persistent connection and WAL mode to avoid connection conflicts.
+        Idempotent: if prediction already exists, updates it.
+        
+        Args:
+            batch: List of prediction dicts
+        """
+        try:
+            conn = self._get_write_connection()
+            
+            # UPSERT: insert or replace if exists (idempotent)
+            # DuckDB: INSERT OR REPLACE requires unique constraint on (grid_id, timestamp_hour)
+            for item in batch:
+                conn.execute("""
+                    INSERT OR REPLACE INTO predictions 
+                        (grid_id, timestamp_hour, pm25_prediction, model_version, schema_hash)
+                    VALUES (?, ?, ?, ?, ?)
+                """, [
+                    item['grid_id'],
+                    item['timestamp_hour'],
+                    item['pm25_value'],
+                    item['model_version'],
+                    item['schema_hash']
+                ])
+            
+            conn.commit()
+            logger.info(f"PersistenceQueue wrote {len(batch)} predictions to DuckDB")
+        
+        except Exception as e:
+            logger.error(f"PersistenceQueue write failed for batch of {len(batch)}: {e}")
+    
+    def _close_write_connection(self) -> None:
+        """Close persistent write connection."""
+        self._write_conn_lock.acquire()
+        try:
+            if self._write_conn is not None:
+                try:
+                    self._write_conn.close()
+                except:
+                    pass
+                self._write_conn = None
+        finally:
+            self._write_conn_lock.release()
+    
+    def shutdown(self, timeout_seconds: int = 5) -> None:
+        """Gracefully shutdown queue and flush remaining items.
+        
+        Args:
+            timeout_seconds: Max time to wait for writer thread
+        """
+        logger.info("PersistenceQueue shutting down...")
+        
+        self.running = False
+        self.writer_thread.join(timeout=timeout_seconds)
+        
+        # Flush any remaining items
+        if not self.queue.empty():
+            logger.info(f"Flushing {self.queue.qsize()} remaining items...")
+            batch = []
+            while True:
+                try:
+                    batch.append(self.queue.get_nowait())
+                except queue.Empty:
+                    break
+            
+            if batch:
+                self._write_batch(batch)
+        
+        # Close persistent connection
+        self._close_write_connection()
+        
+        logger.info("PersistenceQueue shutdown complete")
