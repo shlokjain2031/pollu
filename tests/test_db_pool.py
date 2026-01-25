@@ -17,7 +17,7 @@ import time
 import tempfile
 import os
 import duckdb
-from kashi.db_pool import DuckDBConnectionPool, PoolManager
+from takshashila.core.db_pool import DuckDBConnectionPool, PoolManager
 
 
 @pytest.fixture
