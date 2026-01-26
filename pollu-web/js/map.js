@@ -181,13 +181,23 @@ searchInput.addEventListener('input', (e) => {
     searchTimeout = setTimeout(() => {
         // Search within Mumbai bbox
         const bbox = '72.7763,18.8939,72.9797,19.2701';
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&bounded=1&viewbox=${bbox}&limit=5`;
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&bounded=1&viewbox=${bbox}&limit=5&accept-language=en`;
         
-        fetch(url)
-            .then(response => response.json())
+        fetch(url, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Pollu-Web (https://github.com/shlokjain/pollu)'
+            }
+        })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status}`);
+                }
+                return response.json();
+            })
             .then(data => {
                 searchResults.innerHTML = '';
-                if (data.length === 0) {
+                if (!Array.isArray(data) || data.length === 0) {
                     searchResults.innerHTML = '<li>No results found</li>';
                     return;
                 }
@@ -209,7 +219,7 @@ searchInput.addEventListener('input', (e) => {
             })
             .catch(error => {
                 console.error('Search error:', error);
-                searchResults.innerHTML = '<li>Search error</li>';
+                searchResults.innerHTML = '<li style="color: #d32f2f;">Search error - please try again</li>';
             });
     }, 300);
 });
