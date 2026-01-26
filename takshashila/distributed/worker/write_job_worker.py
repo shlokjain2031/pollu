@@ -500,6 +500,10 @@ class LandsatFetcher:
             # Ensure parent directory exists
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Round timestamp to ceiling of hour (UTC)
+            df = df.copy()
+            df['timestamp'] = df['timestamp'].dt.ceil('H')
+            
             conn = duckdb.connect(str(self.db_path))
             
             # Create table if doesn't exist
@@ -837,6 +841,10 @@ class Sentinel2Fetcher:
             # Ensure parent directory exists
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Round timestamp to ceiling of hour (UTC)
+            df = df.copy()
+            df['timestamp'] = df['timestamp'].dt.ceil('H')
+            
             conn = duckdb.connect(str(self.db_path))
             
             # Create table if doesn't exist
@@ -1170,6 +1178,10 @@ class MeteoFetcher:
             # Ensure parent directory exists
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Round timestamp to ceiling of hour (UTC)
+            df = df.copy()
+            df['timestamp'] = df['timestamp'].dt.ceil('H')
+            
             conn = duckdb.connect(str(self.db_path))
             
             # Create table if doesn't exist (match schema.py)
@@ -1482,6 +1494,10 @@ class PM25Fetcher:
             # Ensure parent directory exists
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Round timestamp to ceiling of hour (UTC)
+            df = df.copy()
+            df['timestamp'] = df['timestamp'].dt.ceil('H')
+            
             conn = duckdb.connect(str(self.db_path))
             
             # Create table if doesn't exist
@@ -1512,12 +1528,6 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="WriterJob worker for batch inference")
-    parser.add_argument(
-        "--current-date",
-        type=str,
-        default=None,
-        help="Override current date (YYYY-MM-DD HH:MM:SS) for testing",
-    )
     args = parser.parse_args()
     
     logging.basicConfig(
@@ -1530,13 +1540,7 @@ def main():
     logger.info("WriterJob worker spawned successfully")
     
     # Get current UTC time
-    if args.current_date:
-        current_date = datetime.fromisoformat(args.current_date.replace(" ", "T"))
-        if current_date.tzinfo is None:
-            current_date = current_date.replace(tzinfo=timezone.utc)
-        logger.info(f"Using test date: {current_date.isoformat()}")
-    else:
-        current_date = datetime.now(timezone.utc)
+    current_date = datetime.now(timezone.utc)
     
     logger.info(f"Current UTC time: {current_date.isoformat()}")
     

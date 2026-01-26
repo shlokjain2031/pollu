@@ -156,7 +156,7 @@ N_GRID_CELLS = 509209  # Expected grid count
 
 # Feature table names (raw data)
 TABLE_GRID = "grid"
-TABLE_PM25_OBSERVATION = "pm25_observation"
+TABLE_PM25_OBSERVATION = "pm25_observations"
 TABLE_METEO = "meteo"
 TABLE_LANDSAT8 = "landsat8"
 TABLE_SENTINEL2 = "sentinel2"
