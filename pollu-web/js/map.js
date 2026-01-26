@@ -181,21 +181,26 @@ searchInput.addEventListener('input', (e) => {
     searchTimeout = setTimeout(() => {
         // Search within Mumbai bbox
         const bbox = '72.7763,18.8939,72.9797,19.2701';
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&bounded=1&viewbox=${bbox}&limit=5&accept-language=en`;
+        const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&bounded=1&viewbox=${bbox}&limit=5&accept-language=en`;
         
-        fetch(url, {
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Pollu-Web (https://github.com/shlokjain/pollu)'
-            }
-        })
+        // Use CORS proxy to bypass browser restrictions
+        const corsProxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(nominatimUrl)}`;
+        
+        fetch(corsProxyUrl)
             .then(response => {
                 if (!response.ok) {
                     throw new Error(`API error: ${response.status}`);
                 }
                 return response.json();
             })
-            .then(data => {
+            .then(result => {
+                let data;
+                try {
+                    data = JSON.parse(result.contents);
+                } catch (e) {
+                    throw new Error('Failed to parse API response');
+                }
+                
                 searchResults.innerHTML = '';
                 if (!Array.isArray(data) || data.length === 0) {
                     searchResults.innerHTML = '<li>No results found</li>';
