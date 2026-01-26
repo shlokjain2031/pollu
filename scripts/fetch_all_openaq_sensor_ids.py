@@ -1,107 +1,154 @@
 #!/usr/bin/env python3
 """
-Fetch all OpenAQ sensor IDs in a bounding box and save to cache/openaq_sensor_ids.parquet.
+Fetch all OpenAQ sensor IDs in a bounding box and save to cache/openaq_sensor_ids.json.
+
+OpenAQ API v3 Reference:
+- Locations endpoint: GET https://api.openaq.org/v3/locations
+- Parameters: bbox (bounding box), parameter (pollutant name), limit, offset
+- Response: {results: [{id, name, coordinates: {latitude, longitude}, sensors: [{id, parameter: {name}}]}]}
 """
 import requests
 import pandas as pd
 import json
+import time
 from pathlib import Path
 
-API_TOKEN = "5881288ec6eee8a04c8029d8aa1ff991cf7a91c7d10537f8c3288ab5918700cc"  # Replace with your token or pass as argument
-BBOX = "72.7763,18.8939,72.9797,19.2701"  # Mumbai region
-OUT_PATH = "cache/openaq_sensor_ids.parquet"
+API_TOKEN = None  # OpenAQ v3 works without API key for basic queries
+BBOX = "72.7763,18.8939,72.9797,19.2701"  # Mumbai region (west,south,east,north)
 OUT_JSON = "cache/openaq_sensor_ids.json"
 
-headers = {"X-API-Key": API_TOKEN}
+# Session for connection pooling and retry
+session = requests.Session()
+if API_TOKEN:
+    session.headers.update({"X-API-Key": API_TOKEN})
+
 sensor_rows = []
-page = 1
+offset = 0
 limit = 100
+consecutive_empty = 0
 
+print("Fetching PM2.5 sensors from OpenAQ API v3...")
+print(f"Region: bbox={BBOX}")
+print()
 
-
-while True:
-    params = {"bbox": BBOX, "limit": limit, "page": page}
-    r = requests.get("https://api.openaq.org/v3/locations", params=params, headers=headers, timeout=30)
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    if not results:
-        break
-    for s in results:
-        loc_id = s.get("id")
-        if loc_id is None:
+while consecutive_empty < 2:
+    try:
+        # Query: locations with PM2.5 parameter in Mumbai bbox
+        params = {
+            "bbox": BBOX,
+            "parameter": "pm25",  # Filter for PM2.5 only
+            "limit": limit,
+            "offset": offset,
+        }
+        
+        url = "https://api.openaq.org/v3/locations"
+        print(f"Fetching offset={offset}, limit={limit}...")
+        
+        response = session.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        results = data.get("results", [])
+        
+        if not results:
+            consecutive_empty += 1
+            print(f"  ✓ No results at offset {offset} (consecutive empty: {consecutive_empty})")
+            offset += limit
+            time.sleep(0.5)
             continue
-        # Fetch detailed location info to check sensors
-        detail_url = f"https://api.openaq.org/v3/locations/{loc_id}"
-        detail_r = requests.get(detail_url, headers=headers, timeout=30)
-        detail_r.raise_for_status()
-        detail_results = detail_r.json().get("results", [])
-        if not detail_results:
-            continue
-        loc = detail_results[0]
-        sensors = loc.get("sensors", [])
-        # extract location name and coordinates (robust to several key names)
-        loc_name = loc.get("name") or loc.get("location") or loc.get("city") or None
-        coords = loc.get("coordinates") or {}
-        lat = coords.get("latitude") or coords.get("lat") or loc.get("latitude") or loc.get("lat")
-        lon = coords.get("longitude") or coords.get("lon") or loc.get("longitude") or loc.get("lon")
-
-        for sensor in sensors:
-            # parameter may be a dict or a string depending on API
-            param = sensor.get("parameter")
-            if isinstance(param, dict):
-                param_name = param.get("name") or param.get("parameter")
-            else:
-                param_name = param
-
-            sensor_id = sensor.get("id")
-            if sensor_id is None:
+        
+        consecutive_empty = 0
+        
+        print(f"  ✓ Found {len(results)} locations with PM2.5 sensors")
+        
+        for loc in results:
+            loc_id = loc.get("id")
+            loc_name = loc.get("name")
+            
+            coords = loc.get("coordinates", {})
+            lat = coords.get("latitude")
+            lon = coords.get("longitude")
+            
+            # Skip if missing coordinates
+            if lat is None or lon is None:
                 continue
-            try:
-                sid = int(sensor_id)
-            except Exception:
-                # skip non-integer ids
-                continue
-
-            if isinstance(param_name, str) and param_name.lower() == "pm25":
-                sensor_rows.append(
-                    {
-                        "sensor_id": sid,
-                        "location_id": loc_id,
-                        "location_name": loc_name,
-                        "latitude": lat,
-                        "longitude": lon,
-                    }
-                )
-    if len(results) < limit:
+            
+            # Extract PM2.5 sensors
+            sensors = loc.get("sensors", [])
+            
+            for sensor in sensors:
+                # Parameter can be string or dict
+                param = sensor.get("parameter", {})
+                if isinstance(param, dict):
+                    param_name = param.get("name", "").lower()
+                else:
+                    param_name = str(param).lower()
+                
+                # Only PM2.5 sensors
+                if "pm25" not in param_name and "pm2.5" not in param_name:
+                    continue
+                
+                sensor_id = sensor.get("id")
+                if sensor_id is None:
+                    continue
+                
+                try:
+                    sensor_id = int(sensor_id)
+                except (ValueError, TypeError):
+                    continue
+                
+                sensor_rows.append({
+                    "sensor_id": sensor_id,
+                    "location_id": loc_id,
+                    "location_name": loc_name,
+                    "latitude": float(lat),
+                    "longitude": float(lon),
+                })
+        
+        offset += limit
+        time.sleep(0.5)  # Rate limiting
+        
+    except requests.exceptions.RequestException as e:
+        print(f"  ✗ Request failed: {e}")
+        print(f"  Retrying in 5 seconds...")
+        time.sleep(5)
+        continue
+    except json.JSONDecodeError as e:
+        print(f"  ✗ JSON decode error: {e}")
+        print(f"  Skipping this batch...")
+        offset += limit
+        time.sleep(1)
+        continue
+    except Exception as e:
+        print(f"  ✗ Unexpected error: {e}")
         break
-    page += 1
 
-print(f"Found {len(sensor_rows)} sensor records (including duplicates by sensor id).")
-Path(OUT_PATH).parent.mkdir(parents=True, exist_ok=True)
-df = pd.DataFrame(sensor_rows)
-if not df.empty:
-    # Keep only records with coordinates
-    df = df.dropna(subset=["latitude", "longitude"])
-    # Ensure numeric coords
-    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df = df.dropna(subset=["latitude", "longitude"]) 
-    # Deduplicate by rounded lat/lon pairs (unique sensor locations)
-    df["latitude"] = df["latitude"].astype(float)
-    df["longitude"] = df["longitude"].astype(float)
-    df["lat_round"] = df["latitude"].round(6)
-    df["lon_round"] = df["longitude"].round(6)
-    df["latlon_key"] = df["lat_round"].astype(str) + "_" + df["lon_round"].astype(str)
-    # keep the record with the lowest sensor_id for each unique lat/lon
-    df = df.sort_values(["latlon_key", "sensor_id"]).drop_duplicates(subset=["latlon_key"]).reset_index(drop=True)
-    df = df.drop(columns=["lat_round", "lon_round", "latlon_key"])
+print()
+print(f"Found {len(sensor_rows)} total sensor records")
+
+# Deduplicate by sensor_id (keep one copy of each unique sensor)
+if sensor_rows:
+    df = pd.DataFrame(sensor_rows)
+    
+    # Drop duplicates by sensor_id, keeping first occurrence
+    df = df.drop_duplicates(subset=["sensor_id"], keep="first")
+    
+    print(f"After deduplication: {len(df)} unique sensors")
+    print()
+    print("Sample sensors:")
+    for idx, row in df.head(10).iterrows():
+        print(f"  {row['location_name']:<40} ({row['latitude']:.4f}, {row['longitude']:.4f})")
+    
+    # Write JSON
+    Path(OUT_JSON).parent.mkdir(parents=True, exist_ok=True)
+    with open(OUT_JSON, "w") as f:
+        json.dump(df.to_dict(orient="records"), f, indent=2)
+    
+    print()
+    print(f"✓ Wrote {len(df)} sensors to {OUT_JSON}")
 else:
-    df = pd.DataFrame(columns=["sensor_id", "location_id", "location_name", "latitude", "longitude"])
+    print("✗ No sensors found!")
+    Path(OUT_JSON).parent.mkdir(parents=True, exist_ok=True)
+    with open(OUT_JSON, "w") as f:
+        json.dump([], f)
 
-df.to_parquet(OUT_PATH, index=False)
-# Also write JSON (array of records) for easy inspection
-out_json_path = Path(OUT_JSON)
-with out_json_path.open("w") as jf:
-    json.dump(df.to_dict(orient="records"), jf, indent=2)
-print(f"Wrote sensor info to {OUT_PATH} ({len(df)} unique sensors)")
-print(f"Wrote sensor info JSON to {OUT_JSON}")
