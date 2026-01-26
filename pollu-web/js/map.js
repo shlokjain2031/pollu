@@ -77,29 +77,29 @@ function placeMarker(lat, lon, locationName = null) {
     // Update search input with lat/long
     searchInput.value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
     
-    // TODO: Show loading state in PM2.5 info box while fetching from API
-    // Display "Loading..." or spinner in the heading until API response is received
-    
-    // TODO: Send /predict request to API with lat/lon coordinates
-    // Example: fetch('/predict', { method: 'POST', body: JSON.stringify({ lat, lon }) })
-    //   .then(response => response.json())
-    //   .then(data => {
-    //     const pm25Value = data.pm25; // or appropriate field from API response
-    //     updatePM25Display(pm25Value);
-    //   })
-    //   .catch(error => {
-    //     // TODO: Show error message in PM2.5 info box if API request fails
-    //     // Display error text like "Failed to fetch data" in the heading
-    //     console.error('API Error:', error);
-    //   })
-    // For now, using random PM2.5 value as placeholder
-    const randomPM25 = Math.floor(Math.random() * 400) + 10; // 10-410
-    
-    // Update PM2.5 display
-    updatePM25Display(randomPM25);
-    
-    // Show PM2.5 info box
+    // Show PM2.5 info box with loading state
     pm25Info.style.display = 'block';
+    document.getElementById('pm25-value').innerHTML = 'Loading PM<sub>2.5</sub> data...';
+    document.getElementById('pm25-category').textContent = 'Please wait';
+    
+    // Fetch PM2.5 prediction from API
+    getPM25ForLocation(lat, lon)
+        .then(result => {
+            console.log('PM2.5 prediction received:', result);
+            updatePM25Display(result.pm25);
+            
+            // Log additional info
+            console.log(`Grid ID: ${result.grid_id}, Source: ${result.source}, Timestamp: ${result.timestamp}`);
+        })
+        .catch(error => {
+            console.error('Failed to fetch PM2.5 prediction:', error);
+            
+            // Show error in UI
+            document.getElementById('pm25-value').innerHTML = 'Failed to load PM<sub>2.5</sub> data';
+            document.getElementById('pm25-category').textContent = error.message || 'API Error';
+            document.getElementById('pm25-value').style.color = '#d32f2f';
+            document.getElementById('pm25-category').style.color = '#d32f2f';
+        });
     
     // Clear search results
     searchResults.innerHTML = '';

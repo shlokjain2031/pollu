@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Prediction API</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #1976D2;
+        }
+        .result {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        .error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .success {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+    </style>
+</head>
+<body>
+    <h1>Pollu Prediction API Test</h1>
+    
+    <div class="test-section">
+        <h2>Test 1: Direct API Call</h2>
+        <p>Test the /predict endpoint directly</p>
+        <button onclick="testDirectAPI()">Test Direct API</button>
+        <div id="result1" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Test 2: Get PM2.5 for Mumbai Central</h2>
+        <p>Lat: 19.0176, Lon: 72.8562 (Mumbai Central Station)</p>
+        <button onclick="testMumbaiCentral()">Test Mumbai Central</button>
+        <div id="result2" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Test 3: Get PM2.5 for Bandra</h2>
+        <p>Lat: 19.0596, Lon: 72.8295 (Bandra)</p>
+        <button onclick="testBandra()">Test Bandra</button>
+        <div id="result3" class="result"></div>
+    </div>
+
+    <script src="js/prediction-api.js"></script>
+    <script>
+        async function testDirectAPI() {
+            const result = document.getElementById('result1');
+            result.className = 'result';
+            result.textContent = 'Loading...';
+            
+            try {
+                const timestamp = getCurrentHourUTC();
+                const response = await fetchPrediction('g00000001', timestamp);
+                
+                result.className = 'result success';
+                result.textContent = JSON.stringify(response, null, 2);
+            } catch (error) {
+                result.className = 'result error';
+                result.textContent = `Error: ${error.message}`;
+            }
+        }
+        
+        async function testMumbaiCentral() {
+            const result = document.getElementById('result2');
+            result.className = 'result';
+            result.textContent = 'Loading...';
+            
+            try {
+                const response = await getPM25ForLocation(19.0176, 72.8562);
+                
+                result.className = 'result success';
+                result.textContent = JSON.stringify(response, null, 2);
+            } catch (error) {
+                result.className = 'result error';
+                result.textContent = `Error: ${error.message}`;
+            }
+        }
+        
+        async function testBandra() {
+            const result = document.getElementById('result3');
+            result.className = 'result';
+            result.textContent = 'Loading...';
+            
+            try {
+                const response = await getPM25ForLocation(19.0596, 72.8295);
+                
+                result.className = 'result success';
+                result.textContent = JSON.stringify(response, null, 2);
+            } catch (error) {
+                result.className = 'result error';
+                result.textContent = `Error: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,9 +55,29 @@ type OrchestratorManager struct {
 func NewOrchestratorManager() *OrchestratorManager {
 	pythonPath := os.Getenv("PYTHON_PATH")
 	if pythonPath == "" {
-		// Use venv Python if it exists, otherwise fallback to system python3
-		pythonPath = "/Users/shlokjain/pollu/.venv/bin/python3"
-		if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
+		// Try venv in POLLU_ROOT, then fallback to system python3
+		polluRoot := os.Getenv("POLLU_ROOT")
+		if polluRoot == "" {
+			// Get project root relative to this binary location
+			ex, err := os.Executable()
+			if err == nil {
+				// Binary is at /home/shlokjain/pollu/takshashila/distributed/coordinator/coordinator
+				// We need /home/shlokjain/pollu
+				polluRoot = filepath.Join(filepath.Dir(ex), "..", "..", "..")
+				if abs, err := filepath.Abs(polluRoot); err == nil {
+					polluRoot = abs
+				}
+			}
+		}
+		
+		if polluRoot != "" {
+			venvPython := filepath.Join(polluRoot, ".venv", "bin", "python3")
+			if _, err := os.Stat(venvPython); err == nil {
+				pythonPath = venvPython
+			}
+		}
+		
+		if pythonPath == "" {
 			pythonPath = "python3"
 		}
 	}
@@ -114,8 +135,20 @@ func (om *OrchestratorManager) spawnProcess() error {
 		}
 	}
 	if !pythonPathSet {
-		// Add /Users/shlokjain/pollu to PYTHONPATH
-		env = append(env, "PYTHONPATH=/Users/shlokjain/pollu")
+		// Determine POLLU_ROOT
+		polluRoot := os.Getenv("POLLU_ROOT")
+		if polluRoot == "" {
+			ex, err := os.Executable()
+			if err == nil {
+				polluRoot = filepath.Join(filepath.Dir(ex), "..", "..", "..")
+				if abs, err := filepath.Abs(polluRoot); err == nil {
+					polluRoot = abs
+				}
+			}
+		}
+		if polluRoot != "" {
+			env = append(env, fmt.Sprintf("PYTHONPATH=%s", polluRoot))
+		}
 	}
 	om.cmd.Env = env
 
@@ -405,7 +438,22 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 	// NEW: Initialize DuckDB PM2.5 observations connection
 	duckdbPath := os.Getenv("DUCKDB_PREDICTIONS_PATH")
 	if duckdbPath == "" {
-		duckdbPath = "/Users/shlokjain/pollu/takshashila/duckdb/pm25_observations.duckdb" // Default
+		// Determine POLLU_ROOT
+		polluRoot := os.Getenv("POLLU_ROOT")
+		if polluRoot == "" {
+			ex, err := os.Executable()
+			if err == nil {
+				polluRoot = filepath.Join(filepath.Dir(ex), "..", "..", "..")
+				if abs, err := filepath.Abs(polluRoot); err == nil {
+					polluRoot = abs
+				}
+			}
+		}
+		if polluRoot != "" {
+			duckdbPath = filepath.Join(polluRoot, "takshashila", "duckdb", "pm25_observations.duckdb")
+		} else {
+			duckdbPath = "./takshashila/duckdb/pm25_observations.duckdb"
+		}
 	}
 	duckdbConn, err := sql.Open("duckdb", duckdbPath)
 	if err != nil {
@@ -446,6 +494,17 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 // Orchestrates: Cache Check → Dedup → Compute → Cache Store
 // Part 3b: Instruments with request_latency_seconds and path/status labels
 func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
+	// Set CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	
+	// Handle preflight requests
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -841,6 +900,11 @@ func (c *Coordinator) convertWorkerError(result WorkerResult) error {
 
 // handleHealth handles GET /health requests
 func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Set CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	
 	dedupStats := c.dedup.Stats()
 	cacheStats := c.cache.Stats()
 
@@ -887,11 +951,12 @@ func main() {
 		config.ServerPort, config.NumWorkers, config.QueueCapacity)
 
 	// Start orchestrator subprocess manager
-	orchManager := NewOrchestratorManager()
-	if err := orchManager.Start(); err != nil {
-		log.Fatalf("Failed to start orchestrator: %v", err)
-	}
-	defer orchManager.Shutdown()
+	// DISABLED: Orchestrator requires Python dependencies (pytz, apscheduler, flask)
+	// orchManager := NewOrchestratorManager()
+	// if err := orchManager.Start(); err != nil {
+	// 	log.Fatalf("Failed to start orchestrator: %v", err)
+	// }
+	// defer orchManager.Shutdown()
 
 	// Create coordinator
 	coordinator, err := NewCoordinator(config)
@@ -899,16 +964,35 @@ func main() {
 		log.Fatalf("Failed to create coordinator: %v", err)
 	}
 
-	// Setup HTTP handlers
-	http.HandleFunc("/predict", coordinator.handlePredict)
-	http.HandleFunc("/health", coordinator.handleHealth)
-	http.HandleFunc("/metrics", coordinator.handleMetrics)
+	// CORS middleware
+	corsHandler := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			
+			// Handle preflight requests
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			
+			next.ServeHTTP(w, r)
+		})
+	}
 
-	// Create HTTP server
+	// Setup HTTP handlers
+	mux := http.NewServeMux()
+	mux.HandleFunc("/predict", coordinator.handlePredict)
+	mux.HandleFunc("/health", coordinator.handleHealth)
+	mux.HandleFunc("/metrics", coordinator.handleMetrics)
+
+	// Create HTTP server with CORS middleware
 	server := &http.Server{
 		Addr:         ":" + config.ServerPort,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
+		Handler:      corsHandler(mux),
 	}
 
 	// Start server in background
@@ -935,7 +1019,7 @@ func main() {
 	}
 
 	coordinator.Shutdown()
-	orchManager.Shutdown()
+	// orchManager.Shutdown()  // Disabled: orchestrator is not running
 
 	log.Println("Shutdown complete")
 }
