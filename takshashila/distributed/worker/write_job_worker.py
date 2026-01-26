@@ -203,6 +203,7 @@ from takshashila.core.config import (
     GEE_PROJECT,
     GRID_PARQUET_PATH,
     DUCKDB_LANDSAT8_PATH,
+    DUCKDB_SENTINEL2_PATH,
 )
 
 
@@ -528,6 +529,337 @@ class LandsatFetcher:
             return False
 
 
+class Sentinel2Fetcher:
+    """Fetch Sentinel2 band values for all grid cells via Google Earth Engine.
+    
+    Checks if latest DB record is >5 days old before fetching.
+    If no new Sentinel2 data available, silently skips insert.
+    Fetches for just one date (current date).
+    """
+    
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.db_path = DUCKDB_SENTINEL2_PATH
+        self.grid_path = GRID_PARQUET_PATH
+        self.collection_name = "COPERNICUS/S2_SR_HARMONIZED"
+        self.bands = ["B2", "B4", "B8", "AOT", "QA10"]
+        
+    def should_fetch(self, current_date: datetime) -> bool:
+        """Check if latest record in DB is >5 days old.
+        
+        Args:
+            current_date: Current UTC datetime to use for comparison
+            
+        Returns:
+            True if should fetch (latest record >5 days or no data), False otherwise
+        """
+        try:
+            conn = duckdb.connect(str(self.db_path), read_only=True)
+            
+            # Check if table exists
+            table_exists = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'sentinel2'"
+            ).fetchone()[0] > 0
+            
+            if not table_exists:
+                conn.close()
+                self.logger.info("  Sentinel2 table doesn't exist, will create and fetch")
+                return True
+            
+            # Get latest timestamp
+            result = conn.execute(
+                "SELECT MAX(timestamp) FROM sentinel2"
+            ).fetchone()
+            conn.close()
+            
+            if result[0] is None:
+                self.logger.info("  No Sentinel2 records found, will fetch")
+                return True
+            
+            # Convert to timezone-aware UTC datetime
+            latest_timestamp = pd.to_datetime(result[0])
+            if latest_timestamp.tzinfo is None:
+                latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+            
+            # Compare dates only (not time component)
+            latest_date = latest_timestamp.date()
+            current_date_only = current_date.date()
+            
+            days_diff = (current_date_only - latest_date).days
+            
+            if days_diff > 5:
+                self.logger.info(f"  Latest Sentinel2 record is {days_diff} days old (>5), will fetch")
+                return True
+            else:
+                self.logger.info(f"  Latest Sentinel2 record is {days_diff} days old (<=5), skip fetch")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"  Error checking Sentinel2 DB: {e}, will attempt fetch")
+            return True
+    
+    def get_sentinel2_image(self, date_str: str, bbox: tuple) -> Optional[ee.Image]:
+        """Query Sentinel-2 for given date and bbox.
+        
+        Args:
+            date_str: Date in YYYY-MM-DD format
+            bbox: (west, south, east, north) in EPSG:4326
+            
+        Returns:
+            ee.Image if found, None if no image available
+        """
+        west, south, east, north = bbox
+        geometry = ee.Geometry.Rectangle([west, south, east, north])
+        
+        collection = (
+            ee.ImageCollection(self.collection_name)
+            .filterBounds(geometry)
+            .filterDate(date_str, ee.Date(date_str).advance(1, "day"))
+            .sort("system:time_start")
+        )
+        
+        count = collection.size().getInfo()
+        if count == 0:
+            return None
+        
+        if count == 1:
+            image = collection.first()
+        else:
+            # Multiple scenes (tiles): mosaic
+            image = collection.mosaic()
+        
+        return image.select(self.bands)
+    
+    def fetch_band_values_batched(
+        self,
+        image: ee.Image,
+        grid_gdf: gpd.GeoDataFrame,
+        batch_size: int = 500,
+        max_workers: int = 4,
+        tile_scale: int = 2,
+    ) -> pd.DataFrame:
+        """Fetch band values for all grid cells using batched reduceRegions.
+        
+        Args:
+            image: Sentinel-2 image with bands B2, B4, B8, AOT, QA10
+            grid_gdf: Grid with columns: grid_id, geometry (Point)
+            batch_size: Number of cells per EE request
+            max_workers: Number of concurrent workers
+            tile_scale: Earth Engine tileScale
+            
+        Returns:
+            DataFrame with columns: grid_id, B2, B4, B8, AOT, QA10
+        """
+        # Ensure WGS84
+        if grid_gdf.crs and grid_gdf.crs.to_string() != "EPSG:4326":
+            grid_wgs84 = grid_gdf.to_crs("EPSG:4326")
+        else:
+            grid_wgs84 = grid_gdf
+        
+        total_batches = (len(grid_wgs84) + batch_size - 1) // batch_size
+        self.logger.info(f"  Fetching {len(grid_wgs84):,} cells in {total_batches} batches")
+        
+        def fetch_batch(batch_idx: int) -> tuple[int, list[dict]]:
+            """Fetch a single batch."""
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(grid_wgs84))
+            batch_gdf = grid_wgs84.iloc[start_idx:end_idx]
+            
+            # Convert to EE FeatureCollection
+            features = []
+            for idx, row in batch_gdf.iterrows():
+                pt = row.geometry
+                feat = ee.Feature(ee.Geometry.Point([pt.x, pt.y]))
+                feat = feat.set({"grid_id": row["grid_id"]})
+                features.append(feat)
+            
+            fc = ee.FeatureCollection(features)
+            
+            # Reduce regions at 30m scale (aggregates 3x3 10m pixels → mean per 30m cell)
+            reduced = image.reduceRegions(
+                collection=fc,
+                reducer=ee.Reducer.mean(),
+                scale=30,
+                tileScale=tile_scale,
+            )
+            
+            # Fetch with retry
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    result_list = reduced.getInfo()["features"]
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise RuntimeError(f"EE getInfo failed after {max_retries} attempts: {e}")
+                    time.sleep(2 ** attempt)
+            
+            batch_results = [feat["properties"] for feat in result_list]
+            return (batch_idx, batch_results)
+        
+        # Fetch all batches concurrently
+        all_results = []
+        effective_workers = min(max_workers, total_batches if total_batches > 0 else 1, 8)
+        
+        completed_batches = 0
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(fetch_batch, batch_idx): batch_idx
+                for batch_idx in range(total_batches)
+            }
+            
+            for future in as_completed(futures):
+                batch_idx, batch_results = future.result()
+                all_results.extend(batch_results)
+                completed_batches += 1
+                if completed_batches % max(1, total_batches // 10) == 0:  # Log every 10%
+                    self.logger.info(f"  Progress: {completed_batches}/{total_batches} batches completed ({100*completed_batches//total_batches}%)")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(all_results)
+        
+        # Rescale AOT if needed (Sentinel-2 stores AOT as x1000 integer)
+        if "AOT" in df.columns:
+            try:
+                aot_max = float(df["AOT"].dropna().max())
+                if aot_max > 10.0:
+                    # AOT stored as per-thousand (x1000)
+                    df["AOT"] = df["AOT"] / 1000.0
+                    self.logger.info("  ⚑ Rescaled AOT by /1000 to convert to unit range (~0-2)")
+            except Exception:
+                pass
+        
+        # Sort bands: B-bands numerically, then AOT, then QA10
+        def band_sort_key(col: str) -> tuple:
+            if col.startswith("B") and col[1:].isdigit():
+                return (0, int(col[1:]))
+            elif col == "AOT":
+                return (1, 0)
+            elif col == "QA10":
+                return (2, 0)
+            else:
+                return (3, 0)
+        
+        band_cols = [c for c in df.columns if c in self.bands]
+        band_cols = sorted(band_cols, key=band_sort_key)
+        
+        keep_cols = ["grid_id"] + band_cols
+        df = df[keep_cols]
+        
+        # Reindex to match grid order
+        grid_order = grid_gdf[["grid_id"]].copy()
+        grid_order["_order"] = range(len(grid_order))
+        df = grid_order.merge(df, on="grid_id", how="left").sort_values("_order").drop(columns=["_order"])
+        
+        self.logger.info(f"  ✓ Fetched {len(df):,} cells with {len(band_cols)} bands")
+        return df
+    
+    def fetch(self, current_date: datetime, bbox: tuple = (72.7763, 18.8939, 72.9797, 19.2701)) -> Optional[pd.DataFrame]:
+        """Fetch Sentinel2 data for current date if needed.
+        
+        Args:
+            current_date: Current UTC datetime
+            bbox: Mumbai bounding box (west, south, east, north)
+            
+        Returns:
+            DataFrame with fetched data, or None if skip
+        """
+        # Check if we should fetch
+        if not self.should_fetch(current_date):
+            return None
+        
+        # Initialize Earth Engine with service account credentials
+        try:
+            service_account = '771194812335-compute@developer.gserviceaccount.com'
+            key_path = '/Users/shlokjain/pollu/takshashila/distributed/worker/pollu-485506-73502dcc4936.json'
+            credentials = ee.ServiceAccountCredentials(service_account, key_path)
+            ee.Initialize(credentials=credentials, project=GEE_PROJECT)
+            self.logger.info(f"  ✓ Earth Engine initialized (project: {GEE_PROJECT})")
+        except Exception as e:
+            self.logger.error(f"  ✗ Failed to initialize Earth Engine: {e}")
+            return None
+        
+        # Load grid
+        try:
+            grid_gdf = gpd.read_parquet(self.grid_path)
+            self.logger.info(f"  ✓ Loaded {len(grid_gdf):,} grid cells from {self.grid_path}")
+        except Exception as e:
+            self.logger.error(f"  ✗ Failed to load grid: {e}")
+            return None
+        
+        # Query Sentinel-2 for current date
+        date_str = current_date.strftime("%Y-%m-%d")
+        self.logger.info(f"  Querying Sentinel-2 for {date_str}...")
+        
+        try:
+            image = self.get_sentinel2_image(date_str, bbox)
+            if image is None:
+                self.logger.info(f"  No Sentinel-2 image available for {date_str} (expected - ~every 4-5 days)")
+                return None
+            
+            self.logger.info(f"  ✓ Found Sentinel-2 image for {date_str}")
+        except Exception as e:
+            self.logger.error(f"  ✗ Error querying Sentinel-2: {e}")
+            return None
+        
+        # Fetch band values
+        try:
+            df = self.fetch_band_values_batched(image, grid_gdf, batch_size=500, max_workers=4)
+            
+            # Add timestamp column
+            df['timestamp'] = current_date
+            
+            # Reorder: grid_id, timestamp, B2, B4, B8, AOT, QA10
+            cols = ['grid_id', 'timestamp'] + self.bands
+            df = df[cols]
+            
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error fetching band values: {e}")
+            return None
+    
+    def write_to_db(self, df: pd.DataFrame) -> bool:
+        """Write fetched data to DuckDB.
+        
+        Args:
+            df: DataFrame with Sentinel2 data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Ensure parent directory exists
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            conn = duckdb.connect(str(self.db_path))
+            
+            # Create table if doesn't exist
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS sentinel2 (
+                    grid_id VARCHAR,
+                    timestamp TIMESTAMP,
+                    B2 DOUBLE,
+                    B4 DOUBLE,
+                    B8 DOUBLE,
+                    AOT DOUBLE,
+                    QA10 DOUBLE
+                )
+            """)
+            
+            # Insert data
+            conn.execute("INSERT INTO sentinel2 SELECT * FROM df")
+            conn.close()
+            
+            self.logger.info(f"  ✓ Written {len(df):,} rows to {self.db_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error writing to DuckDB: {e}")
+            return False
+
+
+
 def main():
     """Main entry point for WriterJob worker."""
     import argparse
@@ -575,6 +907,21 @@ def main():
             logger.error("✗ Landsat8 write failed")
     else:
         logger.info("Landsat8 fetch skipped (no new data or not needed)")
+    
+    # Initialize and run Sentinel2Fetcher
+    logger.info("Starting Sentinel2 fetch...")
+    sentinel2_fetcher = Sentinel2Fetcher(logger)
+    
+    sentinel2_df = sentinel2_fetcher.fetch(current_date)
+    
+    if sentinel2_df is not None:
+        success = sentinel2_fetcher.write_to_db(sentinel2_df)
+        if success:
+            logger.info("✓ Sentinel2 fetch and write completed")
+        else:
+            logger.error("✗ Sentinel2 write failed")
+    else:
+        logger.info("Sentinel2 fetch skipped (no new data or not needed)")
     
     logger.info("WriterJob worker completed")
     sys.exit(0)
