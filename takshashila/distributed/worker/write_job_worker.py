@@ -205,6 +205,7 @@ from takshashila.core.config import (
     DUCKDB_LANDSAT8_PATH,
     DUCKDB_SENTINEL2_PATH,
     DUCKDB_METEO_PATH,
+    DUCKDB_PM25_PATH,
 )
 
 import requests
@@ -1191,6 +1192,295 @@ class MeteoFetcher:
             
             # Insert data (DuckDB will auto-populate created_at)
             conn.execute("INSERT INTO meteo (grid_id, timestamp, temperature_2m, relative_humidity_2m, dewpoint_2m, surface_pressure, wind_speed_10m, wind_direction_10m, precipitation, cloud_cover) SELECT * FROM df")
+            conn.close()
+            
+            self.logger.info(f"  ✓ Written {len(df):,} rows to {self.db_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error writing to DuckDB: {e}")
+            return False
+
+
+class PM25Fetcher:
+    """Fetch PM2.5 observations from CPCB API and interpolate to grid cells using IDW.
+    
+    Checks if latest DB record is >1 hour old before fetching.
+    Uses Inverse Distance Weighting (IDW) with p=2 to interpolate from ~26 sensors to all grid cells.
+    """
+    
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.db_path = DUCKDB_PM25_PATH
+        self.grid_path = GRID_PARQUET_PATH
+        self.cpcb_api_url = "https://api.data.gov.in/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
+        self.api_key = "579b464db66ec23bdd000001cdd3946e44ce4aad7209ff7b23ac571b"  # Public API key
+        
+    def should_fetch(self, current_date: datetime) -> bool:
+        """Check if latest record in DB is >1 hour old.
+        
+        Args:
+            current_date: Current UTC datetime to use for comparison
+            
+        Returns:
+            True if should fetch (latest record >1 hour or no data), False otherwise
+        """
+        try:
+            conn = duckdb.connect(str(self.db_path), read_only=True)
+            
+            # Check if table exists
+            table_exists = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'pm25_observations'"
+            ).fetchone()[0] > 0
+            
+            if not table_exists:
+                conn.close()
+                self.logger.info("  PM2.5 table doesn't exist, will create and fetch")
+                return True
+            
+            # Get latest timestamp
+            result = conn.execute(
+                "SELECT MAX(timestamp) FROM pm25_observations"
+            ).fetchone()
+            conn.close()
+            
+            if result[0] is None:
+                self.logger.info("  No PM2.5 records found, will fetch")
+                return True
+            
+            # Convert to timezone-aware UTC datetime
+            latest_timestamp = pd.to_datetime(result[0])
+            if latest_timestamp.tzinfo is None:
+                latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+            
+            # Compare hours (round to hour)
+            latest_hour = latest_timestamp.replace(minute=0, second=0, microsecond=0)
+            current_hour = current_date.replace(minute=0, second=0, microsecond=0)
+            
+            hours_diff = (current_hour - latest_hour).total_seconds() / 3600
+            
+            if hours_diff >= 1:
+                self.logger.info(f"  Latest PM2.5 record is {hours_diff:.1f} hours old (>=1), will fetch")
+                return True
+            else:
+                self.logger.info(f"  Latest PM2.5 record is {hours_diff:.1f} hours old (<1), skip fetch")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"  Error checking PM2.5 DB: {e}, will attempt fetch")
+            return True
+    
+    def fetch_from_cpcb_api(self) -> Optional[gpd.GeoDataFrame]:
+        """Fetch latest PM2.5 observations from CPCB API.
+        
+        Returns:
+            GeoDataFrame with columns: latitude, longitude, pm25, geometry
+            None if API call fails or returns no data
+        """
+        params = {
+            "api-key": self.api_key,
+            "format": "json",
+            "filters[city]": "Mumbai",
+            "filters[pollutant_id]": "PM2.5",
+            "limit": 30,  # Fetch up to 100 stations
+        }
+        
+        # Retry with exponential backoff
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(self.cpcb_api_url, params=params, timeout=750)
+                response.raise_for_status()
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    self.logger.error(f"  ✗ CPCB API failed after {max_retries} attempts: {e}")
+                    return None
+                time.sleep(2 ** attempt)
+        
+        try:
+            data = response.json()
+            
+            # Extract records
+            if "records" not in data or len(data["records"]) == 0:
+                self.logger.warning("  No PM2.5 data returned from CPCB API")
+                return None
+            
+            records = data["records"]
+            self.logger.info(f"  ✓ Fetched {len(records)} sensor records from CPCB API")
+            
+            # Parse into DataFrame
+            sensors = []
+            for record in records:
+                try:
+                    lat = float(record.get("latitude", 0))
+                    lon = float(record.get("longitude", 0))
+                    pm25_avg = float(record.get("avg", 0))
+                    
+                    # Validate coordinates (Mumbai bounding box)
+                    if not (18.8 <= lat <= 19.3 and 72.7 <= lon <= 73.0):
+                        continue
+                    
+                    # Validate PM2.5 value
+                    if pm25_avg <= 0 or pm25_avg > 1000:
+                        continue
+                    
+                    sensors.append({
+                        "latitude": lat,
+                        "longitude": lon,
+                        "pm25": pm25_avg,
+                    })
+                except (ValueError, KeyError, TypeError):
+                    continue
+            
+            if len(sensors) == 0:
+                self.logger.warning("  No valid PM2.5 sensors after filtering")
+                return None
+            
+            # Convert to GeoDataFrame
+            df = pd.DataFrame(sensors)
+            gdf = gpd.GeoDataFrame(
+                df,
+                geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
+                crs="EPSG:4326"
+            )
+            
+            self.logger.info(f"  ✓ Validated {len(gdf)} sensors with valid PM2.5 data")
+            return gdf
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error parsing CPCB API response: {e}")
+            return None
+    
+    def interpolate_idw(
+        self,
+        sensor_gdf: gpd.GeoDataFrame,
+        grid_gdf: gpd.GeoDataFrame,
+        power: float = 2.0
+    ) -> pd.DataFrame:
+        """Interpolate PM2.5 values to grid cells using Inverse Distance Weighting.
+        
+        Args:
+            sensor_gdf: Sensors with columns [latitude, longitude, pm25, geometry]
+            grid_gdf: Grid cells with columns [grid_id, geometry]
+            power: IDW power parameter (default=2 for distance-squared weighting)
+            
+        Returns:
+            DataFrame with columns [grid_id, pm25]
+        """
+        self.logger.info(f"  Interpolating {len(sensor_gdf)} sensors to {len(grid_gdf):,} grid cells (IDW p={power})...")
+        
+        # Project to UTM 43N for accurate distance calculation
+        sensor_utm = sensor_gdf.to_crs("EPSG:32643")
+        grid_utm = grid_gdf.to_crs("EPSG:32643")
+        
+        # Extract coordinates as numpy arrays
+        sensor_coords = np.array([[pt.x, pt.y] for pt in sensor_utm.geometry])  # Shape: (n_sensors, 2)
+        grid_coords = np.array([[pt.x, pt.y] for pt in grid_utm.geometry])      # Shape: (n_grids, 2)
+        sensor_values = sensor_gdf["pm25"].values  # Shape: (n_sensors,)
+        
+        # Compute pairwise distances: distance from each grid cell to each sensor
+        # Using vectorized broadcasting for efficiency
+        # Shape: (n_grids, n_sensors)
+        from scipy.spatial.distance import cdist
+        distances = cdist(grid_coords, sensor_coords, metric='euclidean')
+        
+        # Handle zero distances (grid cell exactly at sensor location)
+        # Set to small value to avoid division by zero
+        distances = np.maximum(distances, 1.0)  # Minimum 1 meter
+        
+        # Compute IDW weights: w_i = 1 / d_i^p
+        weights = 1.0 / (distances ** power)  # Shape: (n_grids, n_sensors)
+        
+        # Compute weighted average: PM2.5 = sum(w_i * PM2.5_i) / sum(w_i)
+        weighted_sum = np.sum(weights * sensor_values, axis=1)  # Shape: (n_grids,)
+        weight_sum = np.sum(weights, axis=1)                     # Shape: (n_grids,)
+        pm25_interpolated = weighted_sum / weight_sum
+        
+        # Create result DataFrame
+        result_df = pd.DataFrame({
+            "grid_id": grid_gdf["grid_id"].values,
+            "pm25": pm25_interpolated
+        })
+        
+        self.logger.info(f"  ✓ Interpolated PM2.5 for {len(result_df):,} grid cells")
+        self.logger.info(f"    PM2.5 range: {pm25_interpolated.min():.2f} - {pm25_interpolated.max():.2f} µg/m³")
+        
+        return result_df
+    
+    def fetch(self, current_date: datetime) -> Optional[pd.DataFrame]:
+        """Fetch PM2.5 data for current hour if needed.
+        
+        Args:
+            current_date: Current UTC datetime
+            
+        Returns:
+            DataFrame with fetched data, or None if skip
+        """
+        # Check if we should fetch
+        if not self.should_fetch(current_date):
+            return None
+        
+        # Fetch sensor data from CPCB API
+        self.logger.info("  Querying CPCB API for PM2.5 data...")
+        sensor_gdf = self.fetch_from_cpcb_api()
+        
+        if sensor_gdf is None or len(sensor_gdf) == 0:
+            self.logger.warning("  No sensor data available, skipping PM2.5 fetch")
+            return None
+        
+        # Load grid
+        try:
+            grid_gdf = gpd.read_parquet(self.grid_path)
+            self.logger.info(f"  ✓ Loaded {len(grid_gdf):,} grid cells from {self.grid_path}")
+        except Exception as e:
+            self.logger.error(f"  ✗ Failed to load grid: {e}")
+            return None
+        
+        # Interpolate PM2.5 to all grid cells
+        try:
+            df = self.interpolate_idw(sensor_gdf, grid_gdf, power=2.0)
+            
+            # Add timestamp column
+            df['timestamp'] = current_date
+            
+            # Reorder: grid_id, timestamp, pm25
+            df = df[['grid_id', 'timestamp', 'pm25']]
+            
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error interpolating PM2.5: {e}")
+            return None
+    
+    def write_to_db(self, df: pd.DataFrame) -> bool:
+        """Write fetched data to DuckDB.
+        
+        Args:
+            df: DataFrame with PM2.5 data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Ensure parent directory exists
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            conn = duckdb.connect(str(self.db_path))
+            
+            # Create table if doesn't exist
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS pm25_observations (
+                    grid_id VARCHAR NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    pm25 DOUBLE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (grid_id, timestamp)
+                )
+            """)
+            
+            # Insert data (DuckDB will auto-populate created_at)
+            conn.execute("INSERT INTO pm25_observations (grid_id, timestamp, pm25) SELECT * FROM df")
             conn.close()
             
             self.logger.info(f"  ✓ Written {len(df):,} rows to {self.db_path}")
