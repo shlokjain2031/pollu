@@ -568,7 +568,6 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(predErr.HTTPStatus())
 	json.NewEncoder(w).Encode(map[string]interface{}{"error": errorResp})
 	log.Printf("[%s] [END] Cache miss (no data within ±1 hour) in %dms", requestID, elapsed)
-	return
 }
 
 // executePredictionWithPath orchestrates cache check, dedup, and computation
