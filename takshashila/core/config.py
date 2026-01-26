@@ -126,8 +126,8 @@ import os
 # API Credentials (read from environment with fallbacks)
 OPENMETEO_API_KEY = os.environ.get("OPENMETEO_API_KEY", "")  # Optional for some OpenMeteo endpoints
 CPCB_API_KEY = os.environ.get("CPCB_API_KEY", "579b464db66ec23bdd0000017036fe535e9c47d146f13453e9cd266b")
-GOOGLE_EARTH_ENGINE_SERVICE_ACCOUNT = os.environ.get("GEE_SERVICE_ACCOUNT", None)
-GEE_PROJECT = os.environ.get("GEE_PROJECT", "pollu-dev")
+GOOGLE_EARTH_ENGINE_SERVICE_ACCOUNT = os.environ.get("GEE_SERVICE_ACCOUNT", "771194812335-compute@developer.gserviceaccount.com")
+GEE_PROJECT = os.environ.get("GEE_PROJECT", "pollu-485506")
 
 # API Endpoints
 OPENMETEO_API_ENDPOINT = "https://archive-api.open-meteo.com/v1/archive"

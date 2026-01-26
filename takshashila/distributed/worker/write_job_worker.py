@@ -177,7 +177,6 @@ Future Enhancements:
 
 # TODO: Implement MeteoFetcher class
 # TODO: Implement PM25Fetcher class (CPCB API)
-# TODO: Implement LandsatFetcher class (GEE API)
 # TODO: Implement SentinelFetcher class (GEE API)
 # TODO: Implement parallel fetch with ThreadPoolExecutor
 # TODO: Implement DuckDB schema creation if tables don't exist
@@ -189,9 +188,359 @@ Future Enhancements:
 
 import sys
 import logging
+import duckdb
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
+import time
+
+import ee
+import geopandas as gpd
+import pandas as pd
+
+from takshashila.core.config import (
+    GEE_PROJECT,
+    GRID_PARQUET_PATH,
+    DUCKDB_LANDSAT8_PATH,
+)
+
+
+class LandsatFetcher:
+    """Fetch Landsat8 band values for all grid cells via Google Earth Engine.
+    
+    Checks if latest DB record is >16 days old before fetching.
+    If no new Landsat data available, silently skips insert.
+    """
+    
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.db_path = DUCKDB_LANDSAT8_PATH
+        self.grid_path = GRID_PARQUET_PATH
+        self.collection_name = "LANDSAT/LC08/C02/T1_TOA"
+        self.bands = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11"]
+        
+    def should_fetch(self, current_date: datetime) -> bool:
+        """Check if latest record in DB is >16 days old.
+        
+        Args:
+            current_date: Current UTC datetime to use for comparison
+            
+        Returns:
+            True if should fetch (latest record >16 days or no data), False otherwise
+        """
+        try:
+            conn = duckdb.connect(str(self.db_path), read_only=True)
+            
+            # Check if table exists
+            table_exists = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'landsat8'"
+            ).fetchone()[0] > 0
+            
+            if not table_exists:
+                conn.close()
+                self.logger.info("  Landsat8 table doesn't exist, will create and fetch")
+                return True
+            
+            # Get latest timestamp
+            result = conn.execute(
+                "SELECT MAX(timestamp) FROM landsat8"
+            ).fetchone()
+            conn.close()
+            
+            if result[0] is None:
+                self.logger.info("  No Landsat8 records found, will fetch")
+                return True
+            
+            # Convert to timezone-aware UTC datetime
+            latest_timestamp = pd.to_datetime(result[0])
+            if latest_timestamp.tzinfo is None:
+                latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+            
+            # Compare dates only (not time component)
+            latest_date = latest_timestamp.date()
+            current_date_only = current_date.date()
+            
+            days_diff = (current_date_only - latest_date).days
+            
+            if days_diff > 16:
+                self.logger.info(f"  Latest Landsat8 record is {days_diff} days old (>16), will fetch")
+                return True
+            else:
+                self.logger.info(f"  Latest Landsat8 record is {days_diff} days old (<=16), skip fetch")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"  Error checking Landsat8 DB: {e}, will attempt fetch")
+            return True
+    
+    def get_landsat8_image(self, date_str: str, bbox: tuple) -> Optional[ee.Image]:
+        """Query Landsat-8 for given date and bbox.
+        
+        Args:
+            date_str: Date in YYYY-MM-DD format
+            bbox: (west, south, east, north) in EPSG:4326
+            
+        Returns:
+            ee.Image if found, None if no image available
+        """
+        west, south, east, north = bbox
+        geometry = ee.Geometry.Rectangle([west, south, east, north])
+        
+        collection = (
+            ee.ImageCollection(self.collection_name)
+            .filterBounds(geometry)
+            .filterDate(date_str, ee.Date(date_str).advance(1, "day"))
+            .sort("system:time_start")
+        )
+        
+        count = collection.size().getInfo()
+        if count == 0:
+            return None
+        
+        if count == 1:
+            image = collection.first()
+            scene_cloud_cover = image.get('CLOUD_COVER')
+        else:
+            image = collection.mosaic()
+            scene_cloud_cover = collection.aggregate_mean('CLOUD_COVER')
+        
+        image = image.set('scene_cloud_cover', scene_cloud_cover)
+        image = image.set('scene_count', count)
+        
+        return image.select(self.bands)
+    
+    def fetch_band_values_batched(
+        self,
+        image: ee.Image,
+        grid_gdf: gpd.GeoDataFrame,
+        batch_size: int = 500,
+        max_workers: int = 4,
+        tile_scale: int = 2,
+    ) -> pd.DataFrame:
+        """Fetch band values for all grid cells using batched reduceRegions.
+        
+        Args:
+            image: Landsat-8 image with bands B1-B11
+            grid_gdf: Grid with columns: grid_id, geometry (Point)
+            batch_size: Number of cells per EE request
+            max_workers: Number of concurrent workers
+            tile_scale: Earth Engine tileScale
+            
+        Returns:
+            DataFrame with columns: grid_id, B1, B2, ..., B11, scene_cloud_cover
+        """
+        # Ensure WGS84
+        if grid_gdf.crs and grid_gdf.crs.to_string() != "EPSG:4326":
+            grid_wgs84 = grid_gdf.to_crs("EPSG:4326")
+        else:
+            grid_wgs84 = grid_gdf
+        
+        total_batches = (len(grid_wgs84) + batch_size - 1) // batch_size
+        self.logger.info(f"  Fetching {len(grid_wgs84):,} cells in {total_batches} batches")
+        
+        def fetch_batch(batch_idx: int) -> tuple[int, list[dict]]:
+            """Fetch a single batch."""
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(grid_wgs84))
+            batch_gdf = grid_wgs84.iloc[start_idx:end_idx]
+            
+            # Convert to EE FeatureCollection
+            features = []
+            for idx, row in batch_gdf.iterrows():
+                pt = row.geometry
+                feat = ee.Feature(ee.Geometry.Point([pt.x, pt.y]))
+                feat = feat.set({
+                    "grid_id": row["grid_id"],
+                    "scene_cloud_cover": image.get("scene_cloud_cover"),
+                })
+                features.append(feat)
+            
+            fc = ee.FeatureCollection(features)
+            
+            # Reduce regions at 30m scale
+            reduced = image.reduceRegions(
+                collection=fc,
+                reducer=ee.Reducer.mean(),
+                scale=30,
+                tileScale=tile_scale,
+            )
+            
+            # Fetch with retry
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    result_list = reduced.getInfo()["features"]
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise RuntimeError(f"EE getInfo failed after {max_retries} attempts: {e}")
+                    time.sleep(2 ** attempt)
+            
+            batch_results = [feat["properties"] for feat in result_list]
+            return (batch_idx, batch_results)
+        
+        # Fetch all batches concurrently
+        all_results = []
+        effective_workers = min(max_workers, total_batches if total_batches > 0 else 1, 8)
+        
+        completed_batches = 0
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(fetch_batch, batch_idx): batch_idx
+                for batch_idx in range(total_batches)
+            }
+            
+            for future in as_completed(futures):
+                batch_idx, batch_results = future.result()
+                all_results.extend(batch_results)
+                completed_batches += 1
+                if completed_batches % max(1, total_batches // 10) == 0:  # Log every 10%
+                    self.logger.info(f"  Progress: {completed_batches}/{total_batches} batches completed ({100*completed_batches//total_batches}%)")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(all_results)
+        
+        # Sort bands numerically
+        band_cols = [c for c in df.columns if c.startswith("B") and c[1:].isdigit()]
+        band_cols = sorted(band_cols, key=lambda c: int(c[1:]))
+        
+        keep_cols = ["grid_id", "scene_cloud_cover"] + band_cols
+        df = df[keep_cols]
+        
+        # Reindex to match grid order
+        grid_order = grid_gdf[["grid_id"]].copy()
+        grid_order["_order"] = range(len(grid_order))
+        df = grid_order.merge(df, on="grid_id", how="left").sort_values("_order").drop(columns=["_order"])
+        
+        self.logger.info(f"  ✓ Fetched {len(df):,} cells with {len(band_cols)} bands")
+        return df
+    
+    def fetch(self, current_date: datetime, bbox: tuple = (72.7763, 18.8939, 72.9797, 19.2701)) -> Optional[pd.DataFrame]:
+        """Fetch Landsat8 data for current date if needed.
+        
+        Args:
+            current_date: Current UTC datetime
+            bbox: Mumbai bounding box (west, south, east, north)
+            
+        Returns:
+            DataFrame with fetched data, or None if skip
+        """
+        # Check if we should fetch
+        if not self.should_fetch(current_date):
+            return None
+        
+        # Initialize Earth Engine with service account credentials
+        try:
+            service_account = '771194812335-compute@developer.gserviceaccount.com'
+            key_path = '/Users/shlokjain/pollu/takshashila/distributed/worker/pollu-485506-73502dcc4936.json'
+            credentials = ee.ServiceAccountCredentials(service_account, key_path)
+            ee.Initialize(credentials=credentials, project=GEE_PROJECT)
+            self.logger.info(f"  ✓ Earth Engine initialized (project: {GEE_PROJECT})")
+        except Exception as e:
+            self.logger.error(f"  ✗ Failed to initialize Earth Engine: {e}")
+            return None
+        
+        # Load grid
+        try:
+            grid_gdf = gpd.read_parquet(self.grid_path)
+            self.logger.info(f"  ✓ Loaded {len(grid_gdf):,} grid cells from {self.grid_path}")
+        except Exception as e:
+            self.logger.error(f"  ✗ Failed to load grid: {e}")
+            return None
+        
+        # Query Landsat for current date
+        date_str = current_date.strftime("%Y-%m-%d")
+        self.logger.info(f"  Querying Landsat-8 for {date_str}...")
+        
+        try:
+            image = self.get_landsat8_image(date_str, bbox)
+            if image is None:
+                self.logger.info(f"  No Landsat-8 image available for {date_str} (expected - ~1 per 16 days)")
+                return None
+            
+            self.logger.info(f"  ✓ Found Landsat-8 image for {date_str}")
+        except Exception as e:
+            self.logger.error(f"  ✗ Error querying Landsat: {e}")
+            return None
+        
+        # Fetch band values
+        try:
+            df = self.fetch_band_values_batched(image, grid_gdf, batch_size=500, max_workers=4)
+            
+            # Add timestamp column
+            df['timestamp'] = current_date
+            
+            # Reorder: grid_id, timestamp, B1-B11, scene_cloud_cover
+            cols = ['grid_id', 'timestamp'] + self.bands + ['scene_cloud_cover']
+            df = df[cols]
+            
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error fetching band values: {e}")
+            return None
+    
+    def write_to_db(self, df: pd.DataFrame) -> bool:
+        """Write fetched data to DuckDB.
+        
+        Args:
+            df: DataFrame with Landsat data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Ensure parent directory exists
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            conn = duckdb.connect(str(self.db_path))
+            
+            # Create table if doesn't exist
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS landsat8 (
+                    grid_id VARCHAR,
+                    timestamp TIMESTAMP,
+                    B1 DOUBLE,
+                    B2 DOUBLE,
+                    B3 DOUBLE,
+                    B4 DOUBLE,
+                    B5 DOUBLE,
+                    B6 DOUBLE,
+                    B7 DOUBLE,
+                    B8 DOUBLE,
+                    B9 DOUBLE,
+                    B10 DOUBLE,
+                    B11 DOUBLE,
+                    scene_cloud_cover DOUBLE
+                )
+            """)
+            
+            # Insert data
+            conn.execute("INSERT INTO landsat8 SELECT * FROM df")
+            conn.close()
+            
+            self.logger.info(f"  ✓ Written {len(df):,} rows to {self.db_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error writing to DuckDB: {e}")
+            return False
+
 
 def main():
     """Main entry point for WriterJob worker."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="WriterJob worker for batch inference")
+    parser.add_argument(
+        "--current-date",
+        type=str,
+        default=None,
+        help="Override current date (YYYY-MM-DD HH:MM:SS) for testing",
+    )
+    args = parser.parse_args()
+    
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] [%(levelname)s] %(message)s",
@@ -200,7 +549,36 @@ def main():
     logger = logging.getLogger(__name__)
     
     logger.info("WriterJob worker spawned successfully")
+    
+    # Get current UTC time
+    if args.current_date:
+        current_date = datetime.fromisoformat(args.current_date.replace(" ", "T"))
+        if current_date.tzinfo is None:
+            current_date = current_date.replace(tzinfo=timezone.utc)
+        logger.info(f"Using test date: {current_date.isoformat()}")
+    else:
+        current_date = datetime.now(timezone.utc)
+    
+    logger.info(f"Current UTC time: {current_date.isoformat()}")
+    
+    # Initialize and run LandsatFetcher
+    logger.info("Starting Landsat8 fetch...")
+    landsat_fetcher = LandsatFetcher(logger)
+    
+    landsat_df = landsat_fetcher.fetch(current_date)
+    
+    if landsat_df is not None:
+        success = landsat_fetcher.write_to_db(landsat_df)
+        if success:
+            logger.info("✓ Landsat8 fetch and write completed")
+        else:
+            logger.error("✗ Landsat8 write failed")
+    else:
+        logger.info("Landsat8 fetch skipped (no new data or not needed)")
+    
+    logger.info("WriterJob worker completed")
     sys.exit(0)
 
 if __name__ == "__main__":
     main()
+
