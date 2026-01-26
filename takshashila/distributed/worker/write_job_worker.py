@@ -1203,18 +1203,23 @@ class MeteoFetcher:
 
 
 class PM25Fetcher:
-    """Fetch PM2.5 observations from CPCB API and interpolate to grid cells using IDW.
+    """Fetch PM2.5 observations from WAQI API and interpolate to grid cells using IDW.
+    
+    Note: Currently uses WAQI API (returns AQI values treated as PM2.5) as temporary replacement.
     
     Checks if latest DB record is >1 hour old before fetching.
-    Uses Inverse Distance Weighting (IDW) with p=2 to interpolate from ~26 sensors to all grid cells.
+    Uses Inverse Distance Weighting (IDW) with p=2 to interpolate from ~20-30 sensors to all grid cells.
     """
     
     def __init__(self, logger: logging.Logger):
         self.logger = logger
         self.db_path = DUCKDB_PM25_PATH
         self.grid_path = GRID_PARQUET_PATH
-        self.cpcb_api_url = "https://api.data.gov.in/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
-        self.api_key = "579b464db66ec23bdd000001cdd3946e44ce4aad7209ff7b23ac571b"  # Public API key
+        # WAQI API: https://waqi.info/
+        self.waqi_api_url = "https://api.waqi.info/v2/map/bounds"
+        self.waqi_token = "5c88c4c3a4397350d3afdd1e47115fa2b1a3878e"
+        # Mumbai bbox: south=18.8939, west=72.7763, north=19.2701, east=72.9797
+        self.bbox_latlng = "18.8939,72.7763,19.2701,72.9797"  # south,west,north,east
         
     def should_fetch(self, current_date: datetime) -> bool:
         """Check if latest record in DB is >1 hour old.
@@ -1271,64 +1276,75 @@ class PM25Fetcher:
             return True
     
     def fetch_from_cpcb_api(self) -> Optional[gpd.GeoDataFrame]:
-        """Fetch latest PM2.5 observations from CPCB API.
+        """Fetch latest PM2.5 observations from WAQI API (temporary replacement for CPCB).
+        
+        WAQI returns AQI values which we treat as PM2.5 for now.
         
         Returns:
             GeoDataFrame with columns: latitude, longitude, pm25, geometry
             None if API call fails or returns no data
         """
         params = {
-            "api-key": self.api_key,
-            "format": "json",
-            "filters[city]": "Mumbai",
-            "filters[pollutant_id]": "PM2.5",
-            "limit": 30,  # Fetch up to 100 stations
+            "latlng": self.bbox_latlng,  # south,west,north,east
+            "networks": "all",
+            "token": self.waqi_token,
         }
         
         # Retry with exponential backoff
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = requests.get(self.cpcb_api_url, params=params, timeout=750)
+                response = requests.get(self.waqi_api_url, params=params, timeout=15)
                 response.raise_for_status()
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
-                    self.logger.error(f"  ✗ CPCB API failed after {max_retries} attempts: {e}")
+                    self.logger.error(f"  ✗ WAQI API failed after {max_retries} attempts: {e}")
                     return None
                 time.sleep(2 ** attempt)
         
         try:
             data = response.json()
             
-            # Extract records
-            if "records" not in data or len(data["records"]) == 0:
-                self.logger.warning("  No PM2.5 data returned from CPCB API")
+            # Check API response status
+            if data.get("status") != "ok":
+                self.logger.warning(f"  WAQI API returned status: {data.get('status')}")
                 return None
             
-            records = data["records"]
-            self.logger.info(f"  ✓ Fetched {len(records)} sensor records from CPCB API")
+            # Extract data
+            results = data.get("data", [])
+            if len(results) == 0:
+                self.logger.warning("  No PM2.5 data returned from WAQI API")
+                return None
+            
+            self.logger.info(f"  ✓ Fetched {len(results)} sensor records from WAQI API")
             
             # Parse into DataFrame
             sensors = []
-            for record in records:
+            for result in results:
                 try:
-                    lat = float(record.get("latitude", 0))
-                    lon = float(record.get("longitude", 0))
-                    pm25_avg = float(record.get("avg", 0))
+                    lat = float(result.get("lat", 0))
+                    lon = float(result.get("lon", 0))
+                    aqi_str = result.get("aqi", "0")
+                    
+                    # AQI value comes as string, convert to float
+                    try:
+                        pm25_value = float(aqi_str)
+                    except (ValueError, TypeError):
+                        continue
                     
                     # Validate coordinates (Mumbai bounding box)
                     if not (18.8 <= lat <= 19.3 and 72.7 <= lon <= 73.0):
                         continue
                     
-                    # Validate PM2.5 value
-                    if pm25_avg <= 0 or pm25_avg > 1000:
+                    # Validate PM2.5 value (AQI typically 0-500)
+                    if pm25_value < 0 or pm25_value > 1000:
                         continue
                     
                     sensors.append({
                         "latitude": lat,
                         "longitude": lon,
-                        "pm25": pm25_avg,
+                        "pm25": pm25_value,
                     })
                 except (ValueError, KeyError, TypeError):
                     continue
