@@ -96,7 +96,7 @@ function placeMarker(lat, lon, locationName = null) {
             
             // Show error in UI
             document.getElementById('pm25-value').innerHTML = 'Failed to load PM<sub>2.5</sub> data';
-            document.getElementById('pm25-category').textContent = error.message || 'API Error';
+            document.getElementById('pm25-category').textContent = 'Error';
             document.getElementById('pm25-value').style.color = '#d32f2f';
             document.getElementById('pm25-category').style.color = '#d32f2f';
         });

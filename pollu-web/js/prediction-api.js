@@ -178,7 +178,7 @@ async function getPM25ForLocation(lat, lon) {
     const result = await fetchPrediction(gridId, timestamp);
     
     return {
-        pm25: result.pm25,
+        pm25: Math.round(result.pm25),
         source: result.source,
         grid_id: gridId,
         timestamp: timestamp,
