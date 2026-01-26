@@ -204,7 +204,11 @@ from takshashila.core.config import (
     GRID_PARQUET_PATH,
     DUCKDB_LANDSAT8_PATH,
     DUCKDB_SENTINEL2_PATH,
+    DUCKDB_METEO_PATH,
 )
+
+import requests
+import numpy as np
 
 
 class LandsatFetcher:
@@ -264,7 +268,7 @@ class LandsatFetcher:
             
             days_diff = (current_date_only - latest_date).days
             
-            if days_diff > 16:
+            if days_diff >= 16:
                 self.logger.info(f"  Latest Landsat8 record is {days_diff} days old (>16), will fetch")
                 return True
             else:
@@ -467,7 +471,7 @@ class LandsatFetcher:
         
         # Fetch band values
         try:
-            df = self.fetch_band_values_batched(image, grid_gdf, batch_size=500, max_workers=4)
+            df = self.fetch_band_values_batched(image, grid_gdf, batch_size=500, max_workers=6)
             
             # Add timestamp column
             df['timestamp'] = current_date
@@ -587,7 +591,7 @@ class Sentinel2Fetcher:
             
             days_diff = (current_date_only - latest_date).days
             
-            if days_diff > 5:
+            if days_diff >= 5:
                 self.logger.info(f"  Latest Sentinel2 record is {days_diff} days old (>5), will fetch")
                 return True
             else:
@@ -804,7 +808,7 @@ class Sentinel2Fetcher:
         
         # Fetch band values
         try:
-            df = self.fetch_band_values_batched(image, grid_gdf, batch_size=500, max_workers=4)
+            df = self.fetch_band_values_batched(image, grid_gdf, batch_size=500, max_workers=6)
             
             # Add timestamp column
             df['timestamp'] = current_date
@@ -859,6 +863,343 @@ class Sentinel2Fetcher:
             return False
 
 
+class MeteoFetcher:
+    """Fetch meteorology from Open-Meteo API and map to grid cells.
+    
+    Checks if latest DB record is >1 hour old before fetching.
+    Uses tile-based mapping for efficiency (Mumbai = ~3-6 tiles at 9km resolution).
+    Fetches for just one hour (current hour).
+    """
+    
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.db_path = DUCKDB_METEO_PATH
+        self.grid_path = GRID_PARQUET_PATH
+        self.tile_size_m = 9000  # ECMWF IFS resolution
+        self.variables = [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "dewpoint_2m",
+            "surface_pressure",
+            "wind_speed_10m",
+            "wind_direction_10m",
+            "precipitation",
+            "cloud_cover",
+        ]
+        
+    def should_fetch(self, current_date: datetime) -> bool:
+        """Check if latest record in DB is >1 hour old.
+        
+        Args:
+            current_date: Current UTC datetime to use for comparison
+            
+        Returns:
+            True if should fetch (latest record >1 hour or no data), False otherwise
+        """
+        try:
+            conn = duckdb.connect(str(self.db_path), read_only=True)
+            
+            # Check if table exists
+            table_exists = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'meteo'"
+            ).fetchone()[0] > 0
+            
+            if not table_exists:
+                conn.close()
+                self.logger.info("  Meteo table doesn't exist, will create and fetch")
+                return True
+            
+            # Get latest timestamp
+            result = conn.execute(
+                "SELECT MAX(timestamp) FROM meteo"
+            ).fetchone()
+            conn.close()
+            
+            if result[0] is None:
+                self.logger.info("  No Meteo records found, will fetch")
+                return True
+            
+            # Convert to timezone-aware UTC datetime
+            latest_timestamp = pd.to_datetime(result[0])
+            if latest_timestamp.tzinfo is None:
+                latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+            
+            # Compare hours (round to hour)
+            latest_hour = latest_timestamp.replace(minute=0, second=0, microsecond=0)
+            current_hour = current_date.replace(minute=0, second=0, microsecond=0)
+            
+            hours_diff = (current_hour - latest_hour).total_seconds() / 3600
+            
+            if hours_diff >= 1:
+                self.logger.info(f"  Latest Meteo record is {hours_diff:.1f} hours old (>1), will fetch")
+                return True
+            else:
+                self.logger.info(f"  Latest Meteo record is {hours_diff:.1f} hours old (<=1), skip fetch")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"  Error checking Meteo DB: {e}, will attempt fetch")
+            return True
+    
+    def compute_meteo_tile_id(self, x_m: float, y_m: float) -> tuple[int, int]:
+        """Compute meteo tile ID by snapping coordinates to tile grid."""
+        tile_col = int(x_m // self.tile_size_m)
+        tile_row = int(y_m // self.tile_size_m)
+        return (tile_col, tile_row)
+    
+    def assign_meteo_tiles(self, grid_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
+        """Assign each grid cell to a meteo tile."""
+        # Project to UTM if needed
+        if grid_gdf.crs and grid_gdf.crs.to_string() == "EPSG:4326":
+            grid_proj = grid_gdf.to_crs("EPSG:32643")  # UTM 43N for Mumbai
+            x_coords = grid_proj.geometry.x
+            y_coords = grid_proj.geometry.y
+        else:
+            x_coords = grid_gdf.geometry.x
+            y_coords = grid_gdf.geometry.y
+        
+        # Compute tile IDs
+        tile_cols = (x_coords // self.tile_size_m).astype(int)
+        tile_rows = (y_coords // self.tile_size_m).astype(int)
+        tile_ids = tile_cols.astype(str) + "_" + tile_rows.astype(str)
+        
+        # Create result DataFrame
+        result = grid_gdf[["grid_id"]].copy()
+        result["meteo_tile_id"] = tile_ids.values
+        result["x_m"] = x_coords.values
+        result["y_m"] = y_coords.values
+        
+        return result
+    
+    def get_unique_tile_centroids(self, grid_with_tiles: pd.DataFrame) -> dict[str, tuple[float, float]]:
+        """Get unique meteo tile centroids in WGS84."""
+        from pyproj import Transformer
+        
+        unique_tiles = grid_with_tiles["meteo_tile_id"].unique()
+        transformer = Transformer.from_crs("EPSG:32643", "EPSG:4326", always_xy=True)
+        
+        tile_centroids = {}
+        for tile_id in unique_tiles:
+            parts = tile_id.split("_")
+            tile_col = int(parts[0])
+            tile_row = int(parts[1])
+            
+            # Compute tile centroid in projected coords
+            centroid_x = (tile_col + 0.5) * self.tile_size_m
+            centroid_y = (tile_row + 0.5) * self.tile_size_m
+            
+            # Transform to WGS84
+            lon, lat = transformer.transform(centroid_x, centroid_y)
+            tile_centroids[tile_id] = (lat, lon)
+        
+        return tile_centroids
+    
+    def fetch_openmeteo_hourly(
+        self,
+        date_str: str,
+        hour: int,
+        latitude: float,
+        longitude: float,
+    ) -> dict:
+        """Fetch hourly meteorology from Open-Meteo for a single location and hour.
+        
+        Args:
+            date_str: Date in YYYY-MM-DD format
+            hour: Hour in UTC (0-23)
+            latitude: Latitude in degrees
+            longitude: Longitude in degrees
+            
+        Returns:
+            Dict with meteorology variables
+        """
+        url = "https://archive-api.open-meteo.com/v1/archive"
+        
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "start_date": date_str,
+            "end_date": date_str,
+            "hourly": ",".join(self.variables),
+            "timezone": "UTC",
+            "models": "ecmwf_ifs",
+        }
+        
+        # Retry with exponential backoff
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"Open-Meteo fetch failed after {max_retries} attempts: {e}")
+                time.sleep(2 ** attempt)
+        
+        data = response.json()
+        hourly = data["hourly"]
+        
+        # Extract values for the specific hour
+        if hour < len(hourly["time"]):
+            result = {}
+            for var in self.variables:
+                if var in hourly:
+                    result[var] = hourly[var][hour]
+            return result
+        
+        # Return NaN if hour not found
+        return {var: np.nan for var in self.variables}
+    
+    def fetch_all_tiles(
+        self,
+        tile_centroids: dict[str, tuple[float, float]],
+        date_str: str,
+        hour: int,
+    ) -> dict[str, dict]:
+        """Fetch meteorology for all unique tiles."""
+        self.logger.info(f"  Fetching hourly data for {len(tile_centroids)} tiles...")
+        
+        tile_data = {}
+        for i, (tile_id, (lat, lon)) in enumerate(tile_centroids.items(), 1):
+            self.logger.info(f"    [{i}/{len(tile_centroids)}] Tile {tile_id} at ({lat:.4f}, {lon:.4f})")
+            
+            values = self.fetch_openmeteo_hourly(
+                date_str=date_str,
+                hour=hour,
+                latitude=lat,
+                longitude=lon,
+            )
+            tile_data[tile_id] = values
+        
+        return tile_data
+    
+    def build_grid_meteo_dataframe(
+        self,
+        grid_with_tiles: pd.DataFrame,
+        tile_data: dict[str, dict],
+    ) -> pd.DataFrame:
+        """Build per-grid-cell meteorology DataFrame."""
+        records = []
+        for _, row in grid_with_tiles.iterrows():
+            grid_id = row["grid_id"]
+            tile_id = row["meteo_tile_id"]
+            
+            record = {"grid_id": grid_id}
+            
+            if tile_id in tile_data:
+                record.update(tile_data[tile_id])
+            
+            records.append(record)
+        
+        return pd.DataFrame(records)
+    
+    def fetch(self, current_date: datetime) -> Optional[pd.DataFrame]:
+        """Fetch Meteo data for current hour if needed.
+        
+        Args:
+            current_date: Current UTC datetime
+            
+        Returns:
+            DataFrame with fetched data, or None if skip
+        """
+        # Check if we should fetch
+        if not self.should_fetch(current_date):
+            return None
+        
+        # Load grid
+        try:
+            grid_gdf = gpd.read_parquet(self.grid_path)
+            self.logger.info(f"  ✓ Loaded {len(grid_gdf):,} grid cells from {self.grid_path}")
+        except Exception as e:
+            self.logger.error(f"  ✗ Failed to load grid: {e}")
+            return None
+        
+        # Assign meteo tiles
+        self.logger.info(f"  Assigning meteo tiles (tile size: {self.tile_size_m}m)...")
+        grid_with_tiles = self.assign_meteo_tiles(grid_gdf)
+        unique_tiles = grid_with_tiles["meteo_tile_id"].nunique()
+        self.logger.info(f"  ✓ Grid spans {unique_tiles} unique meteo tiles")
+        
+        # Get tile centroids
+        tile_centroids = self.get_unique_tile_centroids(grid_with_tiles)
+        self.logger.info(f"  ✓ Computed {len(tile_centroids)} tile centroids")
+        
+        # Fetch data for current hour
+        date_str = current_date.strftime("%Y-%m-%d")
+        hour = current_date.hour
+        self.logger.info(f"  Querying Open-Meteo for {date_str} hour {hour}...")
+        
+        try:
+            tile_data = self.fetch_all_tiles(tile_centroids, date_str, hour)
+            self.logger.info(f"  ✓ Fetched data for {len(tile_data)} tiles")
+        except Exception as e:
+            self.logger.error(f"  ✗ Error fetching from Open-Meteo: {e}")
+            return None
+        
+        # Build grid DataFrame
+        try:
+            df = self.build_grid_meteo_dataframe(
+                grid_with_tiles[["grid_id", "meteo_tile_id"]],
+                tile_data,
+            )
+            
+            # Add timestamp column
+            df['timestamp'] = current_date
+            
+            # Reorder: grid_id, timestamp, then all meteo variables
+            cols = ['grid_id', 'timestamp'] + self.variables
+            df = df[cols]
+            
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error building grid DataFrame: {e}")
+            return None
+    
+    def write_to_db(self, df: pd.DataFrame) -> bool:
+        """Write fetched data to DuckDB.
+        
+        Args:
+            df: DataFrame with Meteo data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Ensure parent directory exists
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            conn = duckdb.connect(str(self.db_path))
+            
+            # Create table if doesn't exist (match schema.py)
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS meteo (
+                    grid_id VARCHAR NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    temperature_2m DOUBLE,
+                    relative_humidity_2m DOUBLE,
+                    dewpoint_2m DOUBLE,
+                    surface_pressure DOUBLE,
+                    wind_speed_10m DOUBLE,
+                    wind_direction_10m DOUBLE,
+                    precipitation DOUBLE,
+                    cloud_cover DOUBLE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (grid_id, timestamp)
+                )
+            """)
+            
+            # Insert data (DuckDB will auto-populate created_at)
+            conn.execute("INSERT INTO meteo (grid_id, timestamp, temperature_2m, relative_humidity_2m, dewpoint_2m, surface_pressure, wind_speed_10m, wind_direction_10m, precipitation, cloud_cover) SELECT * FROM df")
+            conn.close()
+            
+            self.logger.info(f"  ✓ Written {len(df):,} rows to {self.db_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"  ✗ Error writing to DuckDB: {e}")
+            return False
+
 
 def main():
     """Main entry point for WriterJob worker."""
@@ -892,6 +1233,21 @@ def main():
         current_date = datetime.now(timezone.utc)
     
     logger.info(f"Current UTC time: {current_date.isoformat()}")
+    
+    # Initialize and run MeteoFetcher
+    logger.info("Starting Meteo fetch...")
+    meteo_fetcher = MeteoFetcher(logger)
+    
+    meteo_df = meteo_fetcher.fetch(current_date)
+    
+    if meteo_df is not None:
+        success = meteo_fetcher.write_to_db(meteo_df)
+        if success:
+            logger.info("✓ Meteo fetch and write completed")
+        else:
+            logger.error("✗ Meteo write failed")
+    else:
+        logger.info("Meteo fetch skipped (no new data or not needed)")
     
     # Initialize and run LandsatFetcher
     logger.info("Starting Landsat8 fetch...")
