@@ -31,7 +31,7 @@ if __name__ == "__main__":
     print(f"Running: {' '.join(cmd_fetch)}")
     print()
     
-    result = subprocess.run(cmd_fetch, cwd="/Users/shlokjain/pollu")
+    result = subprocess.run(cmd_fetch, cwd="/home/shlokjain/pollu")
     if result.returncode != 0:
         print(f"ERROR: Failed to fetch Landsat data from {fetch_date}")
         sys.exit(1)
