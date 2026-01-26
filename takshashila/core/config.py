@@ -48,11 +48,14 @@ WRITE_LOCK_TIMEOUT_SEC = 2.0
 # ORCHESTRATOR & BATCH JOB CONFIGURATION (Phase 2b & 3)
 # ============================================================================
 
-# Orchestrator Scheduling (cron times)
-SCHEDULE_HOUR = 0  # UTC hour when cycle runs (0-23)
-SCHEDULE_MINUTE = 0  # UTC minute when cycle runs (0-59)
-WRITER_START_OFFSET_MINUTES = 2  # WriterJob starts 2m before hour (t=-2m)
-INFERENCE_START_DELAY_SECONDS = 120  # InferenceJob starts at t=0m (+ 2 min after hour)
+# Orchestrator Scheduling (runs EVERY HOUR at specified minute)
+SCHEDULE_HOUR = 10  # DEPRECATED: Previously used for single-hour scheduling, now unused
+SCHEDULE_MINUTE = 20  # UTC minute when jobs run EVERY HOUR (0-59)
+#                      e.g., SCHEDULE_MINUTE=9 means:
+#                      - WriterJob @ XX:07 every hour (9-2)
+#                      - InferenceJob @ XX:09 every hour
+WRITER_START_OFFSET_MINUTES = 2  # WriterJob offset from SCHEDULE_MINUTE (t=-2m)
+INFERENCE_START_DELAY_SECONDS = 120  # InferenceJob delay after hour (for future use)
 
 # Job Execution Timeouts
 WRITER_JOB_TIMEOUT_SECONDS = 300  # 5 minutes for WriterJob (generous for satellites)

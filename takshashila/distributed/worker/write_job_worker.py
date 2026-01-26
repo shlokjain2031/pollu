@@ -175,15 +175,32 @@ Future Enhancements:
 - Distributed fetching across multiple machines
 """
 
-# TODO: Implement main entry point and argument parsing
 # TODO: Implement MeteoFetcher class
 # TODO: Implement PM25Fetcher class (CPCB API)
 # TODO: Implement LandsatFetcher class (GEE API)
 # TODO: Implement SentinelFetcher class (GEE API)
 # TODO: Implement parallel fetch with ThreadPoolExecutor
 # TODO: Implement DuckDB schema creation if tables don't exist
-# TODO: Implement sequential DuckDB writes
+# TODO: Implement Parallel DuckDB writes, each thread owns one database file
 # TODO: Implement error handling and logging
 # TODO: Implement timeout budgets per fetcher
 # TODO: Implement graceful degradation (partial success)
 # TODO: Implement exit codes and final logging
+
+import sys
+import logging
+
+def main():
+    """Main entry point for WriterJob worker."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    logger = logging.getLogger(__name__)
+    
+    logger.info("WriterJob worker spawned successfully")
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
