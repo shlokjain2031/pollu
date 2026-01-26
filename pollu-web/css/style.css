@@ -186,3 +186,11 @@ body {
     color: #aaa;
     font-style: italic;
 }
+
+.pm25-tagline {
+    margin: 10px 0 0 0;
+    font-size: 13px;
+    color: #666;
+    font-style: italic;
+    font-weight: 500;
+}
