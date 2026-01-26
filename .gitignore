@@ -39,3 +39,8 @@ cache/**
 .vscode/
 tmp_test.db
 tests/fixtures/observations.parquet
+# Binary executables and large files
+coordinator
+dump.rdb
+*.rdb
+takshashila/distributed/coordinator/coordinator
