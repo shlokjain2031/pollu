@@ -502,11 +502,11 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	predErr := ClassifyError(err)
 	errorResp := NewErrorResponse(predErr)
 	elapsed := time.Since(startTime).Milliseconds()
-	
+
 	if globalMetrics != nil {
 		globalMetrics.RequestsTotal.WithLabelValues("cache_miss", "not_found", c.modelVersion, c.featureVersion).Inc()
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(predErr.HTTPStatus())
 	json.NewEncoder(w).Encode(map[string]interface{}{"error": errorResp})
