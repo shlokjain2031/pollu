@@ -9,8 +9,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +22,265 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
+
+// utcLogWriter wraps os.Stderr and formats all output with UTC timestamps
+type utcLogWriter struct{}
+
+func (w *utcLogWriter) Write(p []byte) (n int, err error) {
+	// Get current UTC time in the format: 2026/01/26 16:08:51
+	now := time.Now().UTC()
+	timestamp := now.Format("2006/01/02 15:04:05")
+
+	// Prepend timestamp to output
+	output := fmt.Sprintf("%s UTC %s", timestamp, string(p))
+	return os.Stderr.WriteString(output)
+}
+
+// OrchestratorManager manages the Python orchestrator subprocess lifecycle
+type OrchestratorManager struct {
+	cmd          *exec.Cmd
+	stopChan     chan struct{}
+	restartChan  chan struct{}
+	pythonPath   string
+	modulePath   string
+	healthURL    string
+	maxRestarts  int
+	restartDelay time.Duration
+	restartCount int
+	shutdownOnce sync.Once
+}
+
+// NewOrchestratorManager creates a new orchestrator manager
+func NewOrchestratorManager() *OrchestratorManager {
+	pythonPath := os.Getenv("PYTHON_PATH")
+	if pythonPath == "" {
+		// Use venv Python if it exists, otherwise fallback to system python3
+		pythonPath = "/Users/shlokjain/pollu/.venv/bin/python3"
+		if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
+			pythonPath = "python3"
+		}
+	}
+
+	orchURL := os.Getenv("KASHI_ORCHESTRATOR_URL")
+	if orchURL == "" {
+		orchURL = "http://localhost:9999"
+	}
+
+	return &OrchestratorManager{
+		stopChan:     make(chan struct{}),
+		restartChan:  make(chan struct{}, 1),
+		pythonPath:   pythonPath,
+		modulePath:   "takshashila.distributed.worker.orchestrator",
+		healthURL:    orchURL + "/health",
+		maxRestarts:  10,              // Max 10 restarts before giving up
+		restartDelay: 5 * time.Second, // Wait 5 seconds between restarts
+	}
+}
+
+// Start spawns the orchestrator subprocess and monitors it
+func (om *OrchestratorManager) Start() error {
+	log.Println("[Orchestrator] Starting Python orchestrator subprocess...")
+
+	// Spawn orchestrator process
+	if err := om.spawnProcess(); err != nil {
+		return fmt.Errorf("failed to spawn orchestrator: %w", err)
+	}
+
+	log.Printf("[Orchestrator] Started subprocess (PID: %d)", om.cmd.Process.Pid)
+
+	// Give orchestrator 3 seconds to start Flask server before health monitoring
+	time.Sleep(3 * time.Second)
+
+	// Start health monitoring in background
+	go om.monitorHealth()
+
+	// Start restart handler in background
+	go om.handleRestarts()
+
+	return nil
+}
+
+// spawnProcess spawns the Python orchestrator subprocess
+func (om *OrchestratorManager) spawnProcess() error {
+	om.cmd = exec.Command(om.pythonPath, "-m", om.modulePath)
+
+	// Pass environment variables and ensure PYTHONPATH is set
+	env := os.Environ()
+	pythonPathSet := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "PYTHONPATH=") {
+			pythonPathSet = true
+			break
+		}
+	}
+	if !pythonPathSet {
+		// Add /Users/shlokjain/pollu to PYTHONPATH
+		env = append(env, "PYTHONPATH=/Users/shlokjain/pollu")
+	}
+	om.cmd.Env = env
+
+	// Redirect stdout/stderr to coordinator logs with [Orchestrator] prefix
+	om.cmd.Stdout = &prefixedWriter{prefix: "[Orchestrator] [STDOUT] "}
+	om.cmd.Stderr = &prefixedWriter{prefix: "[Orchestrator] [STDERR] "}
+
+	// Start process
+	if err := om.cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start process: %w", err)
+	}
+
+	return nil
+}
+
+// monitorHealth periodically checks orchestrator health and triggers restart on failure
+func (om *OrchestratorManager) monitorHealth() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	// Wait 15 seconds before first health check (allow orchestrator to start)
+	time.Sleep(15 * time.Second)
+
+	for {
+		select {
+		case <-om.stopChan:
+			log.Println("[Orchestrator] Health monitor stopped")
+			return
+
+		case <-ticker.C:
+			// Check process is still running
+			if om.cmd == nil || om.cmd.Process == nil {
+				log.Println("[Orchestrator] Process not running, triggering restart")
+				om.triggerRestart()
+				continue
+			}
+
+			// Check process state
+			if om.cmd.ProcessState != nil && om.cmd.ProcessState.Exited() {
+				log.Printf("[Orchestrator] Process exited (exit code: %d), triggering restart", om.cmd.ProcessState.ExitCode())
+				om.triggerRestart()
+				continue
+			}
+
+			// Ping health endpoint
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, "GET", om.healthURL, nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil || (resp != nil && resp.StatusCode != http.StatusOK) {
+				log.Printf("[Orchestrator] Health check failed (err=%v), triggering restart", err)
+				om.triggerRestart()
+				if resp != nil {
+					resp.Body.Close()
+				}
+				continue
+			}
+
+			if resp != nil {
+				resp.Body.Close()
+			}
+		}
+	}
+}
+
+// triggerRestart sends restart signal (non-blocking)
+func (om *OrchestratorManager) triggerRestart() {
+	select {
+	case om.restartChan <- struct{}{}:
+		// Restart signal sent
+	default:
+		// Already pending restart
+	}
+}
+
+// handleRestarts processes restart requests with rate limiting
+func (om *OrchestratorManager) handleRestarts() {
+	for {
+		select {
+		case <-om.stopChan:
+			log.Println("[Orchestrator] Restart handler stopped")
+			return
+
+		case <-om.restartChan:
+			if om.restartCount >= om.maxRestarts {
+				log.Printf("[Orchestrator] Max restarts (%d) exceeded, giving up", om.maxRestarts)
+				return
+			}
+
+			om.restartCount++
+			log.Printf("[Orchestrator] Restarting subprocess (attempt %d/%d)", om.restartCount, om.maxRestarts)
+
+			// Kill existing process if still running
+			if om.cmd != nil && om.cmd.Process != nil {
+				log.Printf("[Orchestrator] Killing existing process (PID: %d)", om.cmd.Process.Pid)
+				om.cmd.Process.Kill()
+				om.cmd.Wait() // Wait for process to exit
+			}
+
+			// Wait before restarting
+			log.Printf("[Orchestrator] Waiting %v before restart...", om.restartDelay)
+			time.Sleep(om.restartDelay)
+
+			// Spawn new process
+			if err := om.spawnProcess(); err != nil {
+				log.Printf("[Orchestrator] Restart failed: %v", err)
+				// Retry after delay
+				time.AfterFunc(om.restartDelay, func() {
+					om.triggerRestart()
+				})
+				continue
+			}
+
+			log.Printf("[Orchestrator] Restart successful (PID: %d)", om.cmd.Process.Pid)
+		}
+	}
+}
+
+// Shutdown gracefully stops the orchestrator subprocess
+func (om *OrchestratorManager) Shutdown() {
+	om.shutdownOnce.Do(func() {
+		log.Println("[Orchestrator] Shutting down subprocess...")
+
+		// Stop monitors
+		close(om.stopChan)
+
+		// Send SIGTERM to orchestrator
+		if om.cmd != nil && om.cmd.Process != nil {
+			log.Printf("[Orchestrator] Sending SIGTERM to PID %d", om.cmd.Process.Pid)
+			om.cmd.Process.Signal(syscall.SIGTERM)
+
+			// Wait up to 10 seconds for graceful shutdown
+			done := make(chan error, 1)
+			go func() {
+				done <- om.cmd.Wait()
+			}()
+
+			select {
+			case <-time.After(10 * time.Second):
+				log.Println("[Orchestrator] Graceful shutdown timeout, killing process")
+				om.cmd.Process.Kill()
+				om.cmd.Wait()
+			case err := <-done:
+				if err != nil {
+					log.Printf("[Orchestrator] Process exited with error: %v", err)
+				} else {
+					log.Println("[Orchestrator] Process exited gracefully")
+				}
+			}
+		}
+
+		log.Println("[Orchestrator] Shutdown complete")
+	})
+}
+
+// prefixedWriter wraps log output with a prefix
+type prefixedWriter struct {
+	prefix string
+}
+
+func (pw *prefixedWriter) Write(p []byte) (n int, err error) {
+	log.Print(pw.prefix + string(p))
+	return len(p), nil
+}
 
 // Coordinator is the main coordinator service
 // Item 26: Stores model/feature versions read at startup from environment
@@ -662,7 +924,9 @@ func (c *Coordinator) Shutdown() {
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	// Configure logger to use UTC timestamps only
+	log.SetFlags(log.Lmicroseconds)
+	log.SetOutput(&utcLogWriter{})
 
 	// Initialize metrics globally
 	globalMetrics = NewMetricsWithLabels()
@@ -672,8 +936,12 @@ func main() {
 	log.Printf("Starting coordinator with config: port=%s, workers=%d, queue_capacity=%d",
 		config.ServerPort, config.NumWorkers, config.QueueCapacity)
 
-	// Note: Orchestrator is started separately as a standalone service
-	// This separation ensures independent lifecycle management and easier debugging
+	// Start orchestrator subprocess manager
+	orchManager := NewOrchestratorManager()
+	if err := orchManager.Start(); err != nil {
+		log.Fatalf("Failed to start orchestrator: %v", err)
+	}
+	defer orchManager.Shutdown()
 
 	// Create coordinator
 	coordinator, err := NewCoordinator(config)
@@ -717,6 +985,7 @@ func main() {
 	}
 
 	coordinator.Shutdown()
+	orchManager.Shutdown()
 
 	log.Println("Shutdown complete")
 }

@@ -181,6 +181,7 @@ import json
 import uuid
 import signal
 import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Thread
@@ -265,23 +266,34 @@ def setup_logging(log_file=None, cycle_id=None):
     log_file = Path(log_file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # Configure logging format
+    # Configure logging format with UTC timestamps
     if cycle_id:
-        fmt = f"[{cycle_id}] [%(asctime)s] [%(levelname)s] %(message)s"
+        fmt = f"[{cycle_id}] [%(asctime)s UTC] [%(levelname)s] %(message)s"
     else:
-        fmt = "[%(asctime)s] [%(levelname)s] %(message)s"
+        fmt = "[%(asctime)s UTC] [%(levelname)s] %(message)s"
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format=fmt,
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.StreamHandler(sys.stderr),  # Always log to stderr
-            logging.FileHandler(log_file)  # Also log to file
-        ]
-    )
+    # Custom formatter that forces UTC timezone
+    class UTCFormatter(logging.Formatter):
+        converter = time.gmtime
     
-    return logging.getLogger(__name__)
+    formatter = UTCFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
+    
+    # Configure logging with UTC formatter
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()  # Clear any existing handlers
+    
+    # Stream handler (stderr)
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    return logger
 
 
 # ============================================================================
@@ -413,6 +425,52 @@ def health_check():
     return jsonify({"status": "healthy", "service": "orchestrator"}), 200
 
 
+@app.route('/test/trigger-writer-job', methods=['POST'])
+def trigger_writer_job_test():
+    """Test endpoint to manually trigger WriterJob immediately."""
+    try:
+        if orchestrator_instance is None:
+            return jsonify({"status": "error", "error": "Orchestrator not initialized"}), 500
+        
+        orchestrator_instance.logger.info("[TEST] Manually triggering WriterJob via /test/trigger-writer-job")
+        orchestrator_instance.run_writer_job()
+        
+        return jsonify({
+            "status": "success",
+            "message": "WriterJob triggered successfully",
+            "cycle_state": orchestrator_instance.cycle_state.get("writer_job", {})
+        }), 200
+    except Exception as e:
+        orchestrator_instance.logger.exception(f"[TEST] Error triggering WriterJob: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@app.route('/test/trigger-inference-job', methods=['POST'])
+def trigger_inference_job_test():
+    """Test endpoint to manually trigger InferenceJob immediately."""
+    try:
+        if orchestrator_instance is None:
+            return jsonify({"status": "error", "error": "Orchestrator not initialized"}), 500
+        
+        orchestrator_instance.logger.info("[TEST] Manually triggering InferenceJob via /test/trigger-inference-job")
+        orchestrator_instance.run_inference_job()
+        
+        return jsonify({
+            "status": "success",
+            "message": "InferenceJob triggered successfully",
+            "cycle_state": orchestrator_instance.cycle_state.get("inference_job", {})
+        }), 200
+    except Exception as e:
+        orchestrator_instance.logger.exception(f"[TEST] Error triggering InferenceJob: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
 # ============================================================================
 # ORCHESTRATOR CLASS
 # ============================================================================
@@ -438,46 +496,80 @@ class Orchestrator:
     def register_jobs(self):
         """Register WriterJob and InferenceJob with scheduler.
         
-        WriterJob: Scheduled @ t=-2m (2 minutes before hour)
-        InferenceJob: Scheduled @ t=0m (top of hour)
+        WriterJob: Scheduled EVERY HOUR @ t=-2m (2 minutes before hour)
+        InferenceJob: Scheduled EVERY HOUR @ t=0m (at specified minute)
         
-        TODO: Once WriterJob is implemented, ensure:
-        - WriterJob completes within 120 seconds
-        - Retry logic if WriterJob fails (up to 2 retries)
-        - Fall back to warm cache if WriterJob fails
-        - Track metrics (duration, grids updated, errors)
+        Both jobs run EVERY HOUR at their respective times.
+        For example, if schedule_minute=35:
+        - WriterJob runs @ XX:33 every hour (e.g., 00:33, 01:33, 02:33, ...)
+        - InferenceJob runs @ XX:35 every hour (e.g., 00:35, 01:35, 02:35, ...)
         """
-        schedule_hour = self.config["schedule_hour"]
         schedule_minute = self.config["schedule_minute"]
         
-        # WriterJob @ t=-2m
-        writer_hour = schedule_hour
+        # WriterJob @ t=-2m (every hour at minute-2)
         writer_minute = (schedule_minute - 2) % 60
-        if schedule_minute < 2:
-            writer_hour = (schedule_hour - 1) % 24
         
+        self.logger.info(f"[REGISTER] WriterJob: minute={writer_minute}, trigger=CronTrigger(minute={writer_minute})")
         self.scheduler.add_job(
             self.run_writer_job,
-            CronTrigger(hour=writer_hour, minute=writer_minute, timezone=pytz.UTC),
+            CronTrigger(minute=writer_minute, timezone=pytz.UTC),
             id="writer_job",
-            name="WriterJob (t=-2m)"
+            name="WriterJob (t=-2m)",
+            misfire_grace_time=30
         )
-        self.logger.info(f"Registered WriterJob @ {writer_hour:02d}:{writer_minute:02d} UTC")
+        self.logger.info(f"✓ Registered WriterJob to run EVERY HOUR @ XX:{writer_minute:02d} UTC (schedule_minute={schedule_minute})")
         
-        # InferenceJob @ t=0m
+        # InferenceJob @ t=0m (every hour at schedule_minute)
+        self.logger.info(f"[REGISTER] InferenceJob: minute={schedule_minute}, trigger=CronTrigger(minute={schedule_minute})")
         self.scheduler.add_job(
             self.run_inference_job,
-            CronTrigger(hour=schedule_hour, minute=schedule_minute, timezone=pytz.UTC),
+            CronTrigger(minute=schedule_minute, timezone=pytz.UTC),
             id="inference_job",
-            name="InferenceJob (t=0m)"
+            name="InferenceJob (t=0m)",
+            misfire_grace_time=30
         )
-        self.logger.info(f"Registered InferenceJob @ {schedule_hour:02d}:{schedule_minute:02d} UTC")
+        self.logger.info(f"✓ Registered InferenceJob to run EVERY HOUR @ XX:{schedule_minute:02d} UTC (schedule_minute={schedule_minute})")
     
     def start(self):
         """Start the scheduler."""
         if not self.scheduler.running:
+            self.logger.info(f"[START] Starting scheduler with {len(self.scheduler.get_jobs())} jobs registered")
+            for job in self.scheduler.get_jobs():
+                self.logger.info(f"[START] Job: {job.id} | Name: {job.name} | Trigger: {job.trigger}")
+            
+            # Check if we should run WriterJob immediately (if we're past the scheduled time this hour)
+            now = datetime.now(pytz.UTC)
+            schedule_minute = self.config.get("schedule_minute", SCHEDULE_MINUTE)
+            writer_minute = (schedule_minute - 2) % 60
+            
+            self.logger.info(f"[START] Current UTC time: {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+            self.logger.info(f"[START] WriterJob scheduled for minute={writer_minute}, InferenceJob for minute={schedule_minute}")
+            
+            # If we're past the WriterJob time but before next hour's WriterJob time, run it now
+            if now.minute >= writer_minute:
+                self.logger.warning(f"[START] ⚠️  We're past WriterJob time ({now.minute:02d} >= {writer_minute:02d})")
+                self.logger.warning(f"[START] Running WriterJob immediately since it was missed this hour")
+                # Run in background thread to avoid blocking scheduler startup
+                def run_immediately():
+                    try:
+                        self.run_writer_job()
+                    except Exception as e:
+                        self.logger.exception(f"[START] Error running WriterJob immediately: {e}")
+                Thread(target=run_immediately, daemon=True).start()
+            
+            # Same for InferenceJob
+            if now.minute >= schedule_minute:
+                self.logger.warning(f"[START] ⚠️  We're past InferenceJob time ({now.minute:02d} >= {schedule_minute:02d})")
+                self.logger.warning(f"[START] Running InferenceJob immediately since it was missed this hour")
+                def run_inference_immediately():
+                    try:
+                        self.run_inference_job()
+                    except Exception as e:
+                        self.logger.exception(f"[START] Error running InferenceJob immediately: {e}")
+                Thread(target=run_inference_immediately, daemon=True).start()
+            
             self.scheduler.start()
-            self.logger.info("Orchestrator started, waiting for scheduled jobs")
+            self.logger.info("✓ Scheduler started, now listening for job triggers")
     
     def shutdown(self):
         """Gracefully shutdown the scheduler."""
@@ -487,25 +579,212 @@ class Orchestrator:
         self.logger.info("Orchestrator shutdown complete")
     
     def run_writer_job(self):
-        """Execute WriterJob (placeholder, implements TODO).
+        """Execute WriterJob - spawns write_job_worker.py subprocess.
         
-        TODO: Implement run_writer_job() - should fetch from 4 data sources:
-        1. Grid manifest (grid locations, metadata)
-        2. Meteorological data (OpenMeteo API, 40+ variables)
-        3. Satellite data (Sentinel-2, MODIS, Landsat-8)
-        4. PM2.5 observations (ground truth for training)
+        Responsibilities:
+        - Generate cycle_id for traceability
+        - Spawn write_job_worker.py subprocess @ t=-2m
+        - Wait for completion with timeout
+        - Implement retry logic (up to MAX_WRITER_JOB_RETRIES)
+        - Track metrics: duration, grids updated, errors
+        - Handle failures gracefully (log but continue, warm cache fallback)
+        - Store result in cycle_state for reference by InferenceJob
         
-        Expected flow:
-        - Load grid coordinates from grid.duckdb
-        - For each grid, fetch meteo/satellite/pm2.5 data
-        - Transform to feature space
-        - Write to DuckDB feature tables
-        - Timeout: 120 seconds (must complete by t=-1m)
+        Timing:
+        - Starts @ t=-2m (2 minutes before hour)
+        - Must finish by t=-1m (1 minute before hour)
+        - Timeout: 120 seconds
+        - Typical duration: 20-40 seconds
+        
+        Returns:
+        - Updates self.cycle_state["writer_job"] with result:
+          {
+            "cycle_id": str,
+            "timestamp": datetime,
+            "success": bool,
+            "exit_code": int,
+            "duration_seconds": float,
+            "grids_updated": dict (count by source: meteo, pm25, landsat8, sentinel2),
+            "errors": list of str,
+            "retry_count": int
+          }
         """
-        pass
+        cycle_id = str(uuid.uuid4())
+        now_utc = datetime.now(pytz.UTC)
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info(f"[JOB_FIRED] WriterJob TRIGGERED at {now_utc.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC")
+        self.logger.info(f"[JOB_FIRED] Cycle ID: {cycle_id}")
+        self.logger.info("=" * 80)
+        
+        timestamp_hour = now_utc.replace(minute=0, second=0, microsecond=0)
+        start_time = now_utc
+        retry_count = 0
+        max_retries = self.config.get("max_writer_retries", MAX_WRITER_JOB_RETRIES)
+        timeout_seconds = self.config.get("writer_timeout_seconds", WRITER_JOB_TIMEOUT_SECONDS)
+        self.logger.info(f"[JOB_CONFIG] Timeout: {timeout_seconds}s, Max retries: {max_retries}")
+        
+        self.logger.info(f"WriterJob scheduled @ t=-2m (cycle_id: {cycle_id})")
+        
+        while retry_count <= max_retries:
+            try:
+                # Spawn write_job_worker subprocess
+                cmd = [
+                    sys.executable, "-m", "takshashila.distributed.worker.write_job_worker",
+                    "--cycle-id", cycle_id,
+                    "--timestamp-to-write", timestamp_hour.isoformat(),
+                ]
+                
+                self.logger.info(f"WriterJob attempt {retry_count + 1}/{max_retries + 1}: spawning worker (PID: TBD)")
+                
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    
+                    self.logger.info(f"WriterJob worker started (PID: {process.pid})")
+                    
+                    # Wait for completion with timeout
+                    try:
+                        stdout, stderr = process.communicate(timeout=timeout_seconds)
+                        exit_code = process.returncode
+                        
+                        # Parse metrics from worker output
+                        grids_updated = self._parse_writer_metrics(stderr or stdout)
+                        duration_seconds = (datetime.now(pytz.UTC) - start_time).total_seconds()
+                        
+                        if exit_code == 0:
+                            self.logger.info(
+                                f"WriterJob completed successfully (duration: {duration_seconds:.1f}s, "
+                                f"meteo: {grids_updated.get('meteo', 0)}, "
+                                f"pm25: {grids_updated.get('pm25', 0)}, "
+                                f"landsat8: {grids_updated.get('landsat8', 0)}, "
+                                f"sentinel2: {grids_updated.get('sentinel2', 0)})"
+                            )
+                            
+                            # Store successful result
+                            self.cycle_state["writer_job"] = {
+                                "cycle_id": cycle_id,
+                                "timestamp": timestamp_hour,
+                                "success": True,
+                                "exit_code": 0,
+                                "duration_seconds": duration_seconds,
+                                "grids_updated": grids_updated,
+                                "errors": [],
+                                "retry_count": retry_count
+                            }
+                            return
+                        
+                        else:
+                            # Worker failed with non-zero exit code
+                            self.logger.warning(
+                                f"WriterJob worker exited with code {exit_code} (attempt {retry_count + 1}/{max_retries + 1})"
+                            )
+                            if stderr:
+                                self.logger.debug(f"WriterJob stderr:\n{stderr}")
+                            
+                            # Retry if we haven't exhausted retries
+                            if retry_count < max_retries:
+                                retry_count += 1
+                                self.logger.info(f"WriterJob retrying (attempt {retry_count + 1}/{max_retries + 1})")
+                                continue
+                            else:
+                                # Max retries exhausted
+                                duration_seconds = (datetime.now(pytz.UTC) - start_time).total_seconds()
+                                error_msg = f"WriterJob failed after {max_retries + 1} attempts (last exit code: {exit_code})"
+                                self.logger.error(error_msg)
+                                
+                                self.cycle_state["writer_job"] = {
+                                    "cycle_id": cycle_id,
+                                    "timestamp": timestamp_hour,
+                                    "success": False,
+                                    "exit_code": exit_code,
+                                    "duration_seconds": duration_seconds,
+                                    "grids_updated": {},
+                                    "errors": [error_msg],
+                                    "retry_count": retry_count
+                                }
+                                return
+                    
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        timeout_error = f"WriterJob timeout after {timeout_seconds} seconds (attempt {retry_count + 1}/{max_retries + 1})"
+                        self.logger.warning(timeout_error)
+                        
+                        # Retry if we haven't exhausted retries
+                        if retry_count < max_retries:
+                            retry_count += 1
+                            self.logger.info(f"WriterJob retrying (attempt {retry_count + 1}/{max_retries + 1})")
+                            continue
+                        else:
+                            # Max retries exhausted
+                            duration_seconds = (datetime.now(pytz.UTC) - start_time).total_seconds()
+                            error_msg = f"WriterJob failed: {timeout_error}"
+                            self.logger.error(error_msg)
+                            
+                            self.cycle_state["writer_job"] = {
+                                "cycle_id": cycle_id,
+                                "timestamp": timestamp_hour,
+                                "success": False,
+                                "exit_code": 1,
+                                "duration_seconds": duration_seconds,
+                                "grids_updated": {},
+                                "errors": [error_msg],
+                                "retry_count": retry_count
+                            }
+                            return
+                
+                except Exception as e:
+                    spawn_error = f"Failed to spawn WriterJob worker: {e}"
+                    self.logger.error(spawn_error)
+                    
+                    # Retry if we haven't exhausted retries
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        self.logger.info(f"WriterJob retrying (attempt {retry_count + 1}/{max_retries + 1})")
+                        continue
+                    else:
+                        # Max retries exhausted
+                        duration_seconds = (datetime.now(pytz.UTC) - start_time).total_seconds()
+                        self.logger.error(f"WriterJob failed after {max_retries + 1} attempts: {spawn_error}")
+                        
+                        self.cycle_state["writer_job"] = {
+                            "cycle_id": cycle_id,
+                            "timestamp": timestamp_hour,
+                            "success": False,
+                            "exit_code": 1,
+                            "duration_seconds": duration_seconds,
+                            "grids_updated": {},
+                            "errors": [spawn_error],
+                            "retry_count": retry_count
+                        }
+                        return
+            
+            except Exception as e:
+                duration_seconds = (datetime.now(pytz.UTC) - start_time).total_seconds()
+                error_msg = f"Unexpected error in WriterJob: {e}"
+                self.logger.exception(error_msg)
+                
+                self.cycle_state["writer_job"] = {
+                    "cycle_id": cycle_id,
+                    "timestamp": timestamp_hour,
+                    "success": False,
+                    "exit_code": 1,
+                    "duration_seconds": duration_seconds,
+                    "grids_updated": {},
+                    "errors": [error_msg],
+                    "retry_count": retry_count
+                }
+                return
     
     def run_inference_job(self):
         """Execute InferenceJob - spawns workers in stages (hot → warm → cold).
+        
+        Only runs if WriterJob succeeded. If WriterJob failed, logs warning and
+        uses stale cache (warm cache fallback).
         
         Stage 1 (Hot Cache, Synchronous):
         - Spawn 1 worker for first 5K grids
@@ -521,7 +800,27 @@ class Orchestrator:
         - Return immediately after spawning
         """
         cycle_id = str(uuid.uuid4())
-        self.logger.info(f"InferenceJob starting (cycle_id: {cycle_id})")
+        now_utc = datetime.now(pytz.UTC)
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info(f"[JOB_FIRED] InferenceJob TRIGGERED at {now_utc.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC")
+        self.logger.info(f"[JOB_FIRED] Cycle ID: {cycle_id}")
+        self.logger.info("=" * 80)
+        
+        # Check if WriterJob succeeded
+        writer_job_result = self.cycle_state.get("writer_job", {})
+        if not writer_job_result.get("success", False):
+            writer_cycle_id = writer_job_result.get("cycle_id", "unknown")
+            self.logger.warning(
+                f"WriterJob failed (cycle_id: {writer_cycle_id}), "
+                f"using stale cache for InferenceJob (warm cache fallback)"
+            )
+        else:
+            self.logger.info(
+                f"WriterJob succeeded (cycle_id: {writer_job_result.get('cycle_id')}, "
+                f"duration: {writer_job_result.get('duration_seconds', 0):.1f}s), "
+                f"proceeding with InferenceJob"
+            )
         
         try:
             # Get current timestamp (rounded to hour)
@@ -580,6 +879,67 @@ class Orchestrator:
         
         except Exception as e:
             self.logger.exception(f"InferenceJob failed: {e}")
+    
+    
+    def _parse_writer_metrics(self, output):
+        """Parse WriterJob metrics from worker output.
+        
+        Looks for log lines like:
+        - "Fetched meteo: 500000 rows"
+        - "Fetched PM2.5: 26 rows"
+        - "Fetched Landsat8: 500000 rows"
+        - "Fetched Sentinel2: 500000 rows"
+        
+        Args:
+            output: Combined stdout/stderr from WriterJob worker
+        
+        Returns:
+            dict: Parsed metrics {meteo: int, pm25: int, landsat8: int, sentinel2: int}
+        """
+        metrics = {
+            "meteo": 0,
+            "pm25": 0,
+            "landsat8": 0,
+            "sentinel2": 0
+        }
+        
+        if not output:
+            return metrics
+        
+        for line in output.split("\n"):
+            if "Fetched meteo:" in line or "Written meteo:" in line:
+                try:
+                    parts = line.split(":")
+                    count_str = parts[-1].strip().split()[0]
+                    metrics["meteo"] = int(count_str)
+                except (IndexError, ValueError):
+                    pass
+            
+            elif "Fetched PM2.5:" in line or "Written PM2.5:" in line or "Fetched pm25:" in line or "Written pm25:" in line:
+                try:
+                    parts = line.split(":")
+                    count_str = parts[-1].strip().split()[0]
+                    metrics["pm25"] = int(count_str)
+                except (IndexError, ValueError):
+                    pass
+            
+            elif "Fetched Landsat8:" in line or "Written Landsat8:" in line or "Fetched landsat8:" in line or "Written landsat8:" in line:
+                try:
+                    parts = line.split(":")
+                    count_str = parts[-1].strip().split()[0]
+                    metrics["landsat8"] = int(count_str)
+                except (IndexError, ValueError):
+                    pass
+            
+            elif "Fetched Sentinel2:" in line or "Written Sentinel2:" in line or "Fetched sentinel2:" in line or "Written sentinel2:" in line:
+                try:
+                    parts = line.split(":")
+                    count_str = parts[-1].strip().split()[0]
+                    metrics["sentinel2"] = int(count_str)
+                except (IndexError, ValueError):
+                    pass
+        
+        return metrics
     
     def _spawn_inference_worker(self, cycle_id, timestamp_hour, grid_batch_start, grid_batch_end, wait=True, timeout=None):
         """Spawn a single inference worker subprocess.
@@ -656,17 +1016,21 @@ def main():
     Configuration comes from takshashila/core/config.py with optional
     environment variable overrides (KASHI_*).
     
-    TODO: Make orchestrator a subprocess of Go Coordinator
-    - Coordinator spawns: subprocess.Popen(['python3', '-m', 'takshashila.distributed.worker.orchestrator'])
-    - Coordinator monitors orchestrator process health
-    - Coordinator restarts orchestrator on failure
-    - Orchestrator communicates back via HTTP (already implemented)
+    Orchestrator Subprocess Management: IMPLEMENTED
+    - Coordinator spawns: exec.Command(python3, '-m', 'takshashila.distributed.worker.orchestrator') ✓
+    - Coordinator monitors orchestrator process health via /health endpoint ✓
+    - Coordinator restarts orchestrator on failure (max 10 retries, 5s delay) ✓
+    - Orchestrator communicates back via HTTP (already implemented) ✓
+    - Graceful shutdown: SIGTERM forwarding with 10s timeout ✓
+    - Process output: Redirected to coordinator logs with [Orchestrator] prefix ✓
     
-    TODO: Integrate WriterJob into scheduler
-    - Register run_writer_job() with APScheduler @ t=-2m (2 min before hour)
-    - Wait for WriterJob completion with timeout
-    - If WriterJob fails, log error but continue (warm cache fallback)
-    - Track WriterJob metrics (duration, grids updated, errors)
+    WriterJob Integration: IMPLEMENTED
+    - Register run_writer_job() with APScheduler @ t=-2m (2 min before hour) ✓
+    - Wait for WriterJob completion with timeout ✓
+    - If WriterJob fails, log error but continue (warm cache fallback) ✓
+    - Track WriterJob metrics (duration, grids updated, errors) ✓
+    - Retry logic with configurable max retries ✓
+    - Graceful degradation: InferenceJob proceeds with stale cache if WriterJob fails ✓
     """
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
