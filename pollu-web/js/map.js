@@ -77,12 +77,20 @@ function placeMarker(lat, lon, locationName = null) {
     // Update search input with lat/long
     searchInput.value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
     
+    // TODO: Show loading state in PM2.5 info box while fetching from API
+    // Display "Loading..." or spinner in the heading until API response is received
+    
     // TODO: Send /predict request to API with lat/lon coordinates
     // Example: fetch('/predict', { method: 'POST', body: JSON.stringify({ lat, lon }) })
     //   .then(response => response.json())
     //   .then(data => {
     //     const pm25Value = data.pm25; // or appropriate field from API response
     //     updatePM25Display(pm25Value);
+    //   })
+    //   .catch(error => {
+    //     // TODO: Show error message in PM2.5 info box if API request fails
+    //     // Display error text like "Failed to fetch data" in the heading
+    //     console.error('API Error:', error);
     //   })
     // For now, using random PM2.5 value as placeholder
     const randomPM25 = Math.floor(Math.random() * 400) + 10; // 10-410
