@@ -478,19 +478,7 @@ class PersistenceQueue:
         try:
             if self._write_conn is None:
                 self._write_conn = duckdb.connect(str(self.db_path), read_only=False)
-                
-                # Enable WAL (Write-Ahead Logging) for concurrent read/write access
-                try:
-                    self._write_conn.execute("PRAGMA journal_mode = WAL")
-                    logger.debug(f"WAL mode enabled for {self.db_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to enable WAL mode: {e}")
-                
-                # Enable object cache for better performance
-                try:
-                    self._write_conn.execute("PRAGMA enable_object_cache = true")
-                except:
-                    pass
+                logger.debug(f"DuckDB write connection created for {self.db_path}")
             
             return self._write_conn
         finally:

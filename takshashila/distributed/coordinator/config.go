@@ -20,7 +20,7 @@ type Config struct {
 	// NEW: Redis configuration
 	RedisAddr string
 
-	// NEW: DuckDB predictions path
+	// NEW: DuckDB PM2.5 observations path
 	DuckDBPredictionsPath string
 }
 
@@ -33,6 +33,6 @@ func DefaultConfig() *Config {
 		QueueCapacity:         100,
 		RequestTimeout:        1 * time.Second,
 		RedisAddr:             "localhost:6379",
-		DuckDBPredictionsPath: "takshashila/duckdb/predictions.duckdb",
+		DuckDBPredictionsPath: "takshashila/duckdb/pm25_observations.duckdb",
 	}
 }

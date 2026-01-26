@@ -330,12 +330,11 @@ func normalizeGridID(gridID string) string {
 	return fmt.Sprintf("g%08d", gridNum)
 }
 
-// constructRedisCacheKey builds the cache key to match inference_job_worker format
+// constructRedisCacheKey builds the cache key to match simplify_job_worker format
 // Format: "prediction:{grid_id}:{timestamp_hour_iso}"
-// The inference worker writes with timestamp.isoformat() which produces "+00:00" format
+// The simplify worker writes with .strftime('%Y-%m-%dT%H:%M:%SZ') which produces Z suffix
 func constructRedisCacheKey(gridID, timestampHourStr string) string {
 	// Parse the incoming timestamp (typically "2026-01-25T13:00:00Z")
-	// and convert to ISO format with +00:00
 	parsedTime, err := time.Parse("2006-01-02T15:04:05Z", timestampHourStr)
 	if err != nil {
 		// Fallback: try without Z
@@ -344,10 +343,12 @@ func constructRedisCacheKey(gridID, timestampHourStr string) string {
 			// If parsing fails, use as-is (shouldn't happen)
 			return fmt.Sprintf("prediction:%s:%s", gridID, timestampHourStr)
 		}
+		// Convert naive time to UTC
+		parsedTime = parsedTime.UTC()
 	}
 
-	// Convert to ISO format with +00:00 (matching Python's isoformat())
-	isoTimeStr := parsedTime.Format("2006-01-02T15:04:05-07:00")
+	// Format with Z suffix to match SimplifyJob worker format
+	isoTimeStr := parsedTime.UTC().Format("2006-01-02T15:04:05Z")
 	return fmt.Sprintf("prediction:%s:%s", gridID, isoTimeStr)
 }
 
@@ -401,14 +402,14 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 		log.Printf("WARNING: Redis connection failed: %v (predictions will fallback to DuckDB)", err)
 	}
 
-	// NEW: Initialize DuckDB predictions connection
+	// NEW: Initialize DuckDB PM2.5 observations connection
 	duckdbPath := os.Getenv("DUCKDB_PREDICTIONS_PATH")
 	if duckdbPath == "" {
-		duckdbPath = "/Users/shlokjain/pollu/takshashila/duckdb/predictions.duckdb" // Default
+		duckdbPath = "/Users/shlokjain/pollu/takshashila/duckdb/pm25_observations.duckdb" // Default
 	}
 	duckdbConn, err := sql.Open("duckdb", duckdbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open DuckDB predictions: %w", err)
+		return nil, fmt.Errorf("failed to open DuckDB PM2.5 observations: %w", err)
 	}
 
 	// Test DuckDB connection
@@ -450,7 +451,7 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record request entry time for end-to-end latency
+	// Record request entry time for end-to-end latency (duration measurement)
 	startTime := time.Now()
 
 	// Parse request
@@ -476,13 +477,13 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[%s] [START] Received prediction request (grid_id=%s → %s, timestamp=%s, model=%s, feature=%s)",
 		requestID, req.GridID, normalizedGridID, req.TimestampHour, c.modelVersion, c.featureVersion)
 
-	// Try to read from cache FIRST (Redis → DuckDB → on-demand inference)
-	// Use 120-second timeout to allow on-demand inference to complete
-	cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Try to read from cache FIRST (Redis → DuckDB within ±1 hour)
+	// Use 10-second timeout for cache reads
+	cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cacheCancel()
 	pm25, source, err := c.readPredictionFromCache(cacheCtx, normalizedGridID, req.TimestampHour, requestID)
 
-	// If found in cache, return immediately (no workers needed)
+	// If found in cache (within ±1 hour), return immediately
 	if err == nil {
 		elapsed := time.Since(startTime).Milliseconds()
 		resp := PredictResponse{
@@ -496,66 +497,21 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache miss - now check if workers are available for on-demand inference
-	if c.pool.healthChecker.HealthyWorkerCount() == 0 {
-		// No workers - return cached error (PredictionNotAvailableError)
-		log.Printf("[%s] No healthy workers available and cache miss", requestID)
-		predErr := ClassifyError(err)
-		errorResp := NewErrorResponse(predErr)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(predErr.HTTPStatus())
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": errorResp})
-		return
-	}
-
-	// Create context with 1-second timeout (Part 2)
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	// Execute prediction with dedup + cache (workers ARE healthy)
-	pm25, path, err := c.executePredictionWithPath(ctx, req.GridID, req.TimestampHour, requestID)
-
-	// Record end-to-end latency
+	// Cache miss (no data within ±1 hour) - return not found error
+	log.Printf("[%s] No data found within ±1 hour of %s", requestID, req.TimestampHour)
+	predErr := ClassifyError(err)
+	errorResp := NewErrorResponse(predErr)
+	elapsed := time.Since(startTime).Milliseconds()
+	
 	if globalMetrics != nil {
-		elapsed := time.Since(startTime).Seconds()
-		globalMetrics.RequestLatencySeconds.Observe(elapsed)
+		globalMetrics.RequestsTotal.WithLabelValues("cache_miss", "not_found", c.modelVersion, c.featureVersion).Inc()
 	}
-
-	// Build response
-	resp := PredictResponse{
-		RequestID: requestID,
-	}
-
-	if err != nil {
-		// Classify error and build structured response
-		predErr := ClassifyError(err)
-		errorResp := NewErrorResponse(predErr)
-		resp.Error = &errorResp
-
-		// Item 26: Record metrics with path, status, model_version, feature_version labels
-		// request_id is NOT included (forbidden by Item 27, but logged above for structured logs)
-		if globalMetrics != nil {
-			globalMetrics.RequestsTotal.WithLabelValues(path, "error", c.modelVersion, c.featureVersion).Inc()
-			globalMetrics.ErrorsTotal.WithLabelValues(predErr.Type().String(), c.modelVersion, c.featureVersion).Inc()
-		}
-
-		// Set HTTP status from error
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(predErr.HTTPStatus())
-		json.NewEncoder(w).Encode(resp)
-		return
-	}
-
-	// Success - record with path, status, model_version, feature_version labels
-	resp.PM25 = pm25
-	resp.Source = "inference" // Came from worker inference
-	if globalMetrics != nil {
-		globalMetrics.RequestsTotal.WithLabelValues(path, "success", c.modelVersion, c.featureVersion).Inc()
-	}
-
+	
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	w.WriteHeader(predErr.HTTPStatus())
+	json.NewEncoder(w).Encode(map[string]interface{}{"error": errorResp})
+	log.Printf("[%s] [END] Cache miss (no data within ±1 hour) in %dms", requestID, elapsed)
+	return
 }
 
 // executePredictionWithPath orchestrates cache check, dedup, and computation
@@ -669,7 +625,8 @@ func (c *Coordinator) readPredictionFromCache(
 	requestID string,
 ) (float64, string, error) { // Returns: (pm25, source, error)
 
-	// Step 1: Try Redis cache (hot cache, 2-hour TTL)
+	// Step 1: Try Redis cache first (hot cache, 2-hour TTL)
+	// Try exact match first
 	redisKey := constructRedisCacheKey(gridID, timestampHour)
 	pm25Str, err := c.redisClient.Get(ctx, redisKey).Result()
 	if err == nil {
@@ -683,18 +640,20 @@ func (c *Coordinator) readPredictionFromCache(
 
 	log.Printf("[%s] Redis cache MISS for %s", requestID, redisKey)
 
-	// Step 2: Try DuckDB predictions table (persistent cache)
+	// Step 2: Try DuckDB pm25_observations table (persistent cache)
+	// Serve whatever is there - get the latest PM2.5 value for this grid_id
 	query := `
-		SELECT pm25_prediction 
-		FROM predictions 
-		WHERE grid_id = ? AND timestamp_hour = ?
+		SELECT pm25
+		FROM pm25_observations 
+		WHERE grid_id = ?
+		ORDER BY timestamp DESC
 		LIMIT 1
 	`
 
 	var pm25 float64
-	row := c.duckdbConn.QueryRowContext(ctx, query, gridID, timestampHour)
+	row := c.duckdbConn.QueryRowContext(ctx, query, gridID)
 	if err := row.Scan(&pm25); err == nil {
-		log.Printf("[%s] DuckDB cache HIT for %s:%s (pm25=%.2f)", requestID, gridID, timestampHour, pm25)
+		log.Printf("[%s] DuckDB cache HIT for %s (pm25=%.2f)", requestID, gridID, pm25)
 
 		// Populate Redis for next request (async, fire-and-forget)
 		go func() {
@@ -705,17 +664,8 @@ func (c *Coordinator) readPredictionFromCache(
 		return pm25, "duckdb", nil
 	}
 
-	// Step 3: On-demand inference via orchestrator
-	log.Printf("[%s] Prediction NOT FOUND - requesting on-demand inference for %s:%s", requestID, gridID, timestampHour)
-
-	pm25, err = c.requestInferenceFromOrchestrator(ctx, gridID, timestampHour, requestID)
-	if err == nil {
-		log.Printf("[%s] On-demand inference SUCCEEDED (pm25=%.2f)", requestID, pm25)
-		return pm25, "inference", nil
-	}
-
-	// Step 4: FAIL LOUDLY - on-demand inference failed
-	log.Printf("[%s] On-demand inference FAILED: %v", requestID, err)
+	// Step 3: No data found - return not found
+	log.Printf("[%s] No prediction found for grid %s", requestID, gridID)
 	return 0, "", NewPredictionNotAvailableError(gridID, timestampHour)
 }
 

@@ -17,7 +17,7 @@ import logging
 import time
 import threading
 from typing import Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class LocalMemoryCache(CacheClient):
             
             # Check expiration
             if key in self.expires:
-                if datetime.now() > self.expires[key]:
+                if datetime.now(timezone.utc) > self.expires[key]:
                     del self.data[key]
                     del self.expires[key]
                     return None
@@ -76,7 +76,7 @@ class LocalMemoryCache(CacheClient):
         self.lock.acquire()
         try:
             self.data[key] = value
-            self.expires[key] = datetime.now() + timedelta(seconds=ttl_seconds)
+            self.expires[key] = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
             return True
         finally:
             self.lock.release()

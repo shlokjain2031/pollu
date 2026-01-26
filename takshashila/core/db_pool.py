@@ -13,6 +13,7 @@ import duckdb
 import threading
 import logging
 from collections import deque
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional
@@ -91,7 +92,7 @@ class DuckDBConnectionPool:
         4. Health check acquired connection
         5. Replace if corrupted, retry
         """
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
         
         with self._lock:
             # Try idle connection first
@@ -178,7 +179,7 @@ class DuckDBConnectionPool:
     
     def _record_acquire(self, start_time: datetime) -> None:
         """Record acquire timing metrics."""
-        elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+        elapsed_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         self.metrics.total_acquires += 1
         self.metrics.total_wait_time_ms += elapsed_ms
         self.metrics.max_wait_time_ms = max(self.metrics.max_wait_time_ms, elapsed_ms)

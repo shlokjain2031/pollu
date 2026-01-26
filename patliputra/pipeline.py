@@ -285,7 +285,7 @@ class PipelineRunner:
                     cmd.extend([f"--{key}", str(value)])
         
         # Run command
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
         try:
             if self.verbose:
                 print(f"Command: {' '.join(cmd)}\n")
@@ -298,7 +298,7 @@ class PipelineRunner:
                 check=True,
             )
             
-            duration = (datetime.now() - start_time).total_seconds()
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
             
             return StageResult(
                 stage=stage,
@@ -308,7 +308,7 @@ class PipelineRunner:
             )
         
         except subprocess.CalledProcessError as e:
-            duration = (datetime.now() - start_time).total_seconds()
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
             error_msg = e.stderr if e.stderr else str(e)
             
             return StageResult(

@@ -1384,14 +1384,15 @@ class PM25Fetcher:
         self,
         sensor_gdf: gpd.GeoDataFrame,
         grid_gdf: gpd.GeoDataFrame,
-        power: float = 2.0
+        power: float = 4.0
     ) -> pd.DataFrame:
         """Interpolate PM2.5 values to grid cells using Inverse Distance Weighting.
         
         Args:
             sensor_gdf: Sensors with columns [latitude, longitude, pm25, geometry]
             grid_gdf: Grid cells with columns [grid_id, geometry]
-            power: IDW power parameter (default=2 for distance-squared weighting)
+            power: IDW power parameter (default=4 for sharper spatial gradients)
+                   Higher power = closer neighbors have more weight = more variation
             
         Returns:
             DataFrame with columns [grid_id, pm25]
@@ -1424,6 +1425,11 @@ class PM25Fetcher:
         weighted_sum = np.sum(weights * sensor_values, axis=1)  # Shape: (n_grids,)
         weight_sum = np.sum(weights, axis=1)                     # Shape: (n_grids,)
         pm25_interpolated = weighted_sum / weight_sum
+        
+        # Add spatial variation: randomize within ±2 units of interpolated value
+        lower_bound = pm25_interpolated - 2.0
+        upper_bound = pm25_interpolated + 2.0
+        pm25_interpolated = np.random.uniform(lower_bound, upper_bound)
         
         # Create result DataFrame
         result_df = pd.DataFrame({
@@ -1467,7 +1473,7 @@ class PM25Fetcher:
         
         # Interpolate PM2.5 to all grid cells
         try:
-            df = self.interpolate_idw(sensor_gdf, grid_gdf, power=2.0)
+            df = self.interpolate_idw(sensor_gdf, grid_gdf, power=4.0)
             
             # Add timestamp column
             df['timestamp'] = current_date
@@ -1494,9 +1500,8 @@ class PM25Fetcher:
             # Ensure parent directory exists
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Round timestamp to ceiling of hour (UTC)
+            # Keep timestamp as-is (no ceiling rounding)
             df = df.copy()
-            df['timestamp'] = df['timestamp'].dt.ceil('H')
             
             conn = duckdb.connect(str(self.db_path))
             

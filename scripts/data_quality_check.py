@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -212,7 +212,7 @@ def main():
     print("=" * 80)
     print("DATA QUALITY CHECK - PM2.5 TRAINING DATA")
     print("=" * 80)
-    print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"Project root: {PROJECT_ROOT}")
     print()
     

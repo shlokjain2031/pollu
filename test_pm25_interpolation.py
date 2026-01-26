@@ -102,9 +102,9 @@ def test_pm25_interpolation():
     logger.info("")
     
     # Test IDW interpolation
-    logger.info("Step 3: Testing IDW interpolation (p=2)...")
+    logger.info("Step 3: Testing IDW interpolation (p=4)...")
     try:
-        result_df = fetcher.interpolate_idw(sensor_gdf, grid_gdf, power=2.0)
+        result_df = fetcher.interpolate_idw(sensor_gdf, grid_gdf, power=4.0)
         
         logger.info("")
         logger.info("Step 4: Validating interpolation results...")

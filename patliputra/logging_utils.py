@@ -8,7 +8,7 @@ organized by timestamp in logs/{stream_name}/{timestamp}.log at project root.
 
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -31,7 +31,7 @@ def setup_logging(stream_name: str, logs_root: Path = Path("logs")) -> logging.L
     logs_dir.mkdir(parents=True, exist_ok=True)
     
     # Create timestamp-based log filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     log_file = logs_dir / f"{timestamp}.log"
     
     # Configure logger
