@@ -110,7 +110,7 @@ function getCurrentHourUTC() {
 }
 
 /**
- * Fetch PM2.5 prediction from the coordinator API
+ * Fetch AQI prediction from the coordinator API
  * @param {string} gridId - Grid ID (e.g., "g00000001")
  * @param {string} timestampHour - ISO timestamp (e.g., "2026-01-26T19:00:00Z")
  * @returns {Promise<Object>} - Prediction response {request_id, pm25, source}
@@ -154,7 +154,7 @@ async function fetchPrediction(gridId, timestampHour) {
 }
 
 /**
- * Get PM2.5 prediction for a specific location
+ * Get AQI prediction for a specific location
  * @param {number} lat - Latitude
  * @param {number} lon - Longitude
  * @returns {Promise<Object>} - {pm25: number, source: string, grid_id: string, timestamp: string}

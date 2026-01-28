@@ -107,7 +107,7 @@ body {
     background-color: #f5f5f5;
 }
 
-/* PM2.5 Info Box */
+/* AQI Info Box */
 .pm25-info {
     position: absolute;
     bottom: 20px;

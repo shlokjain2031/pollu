@@ -77,25 +77,25 @@ function placeMarker(lat, lon, locationName = null) {
     // Update search input with lat/long
     searchInput.value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
     
-    // Show PM2.5 info box with loading state
+    // Show AQI info box with loading state
     pm25Info.style.display = 'block';
-    document.getElementById('pm25-value').innerHTML = 'Loading PM<sub>2.5</sub> data...';
+    document.getElementById('pm25-value').innerHTML = 'Loading AQI data...';
     document.getElementById('pm25-category').textContent = 'Please wait';
     
-    // Fetch PM2.5 prediction from API
+    // Fetch AQI prediction from API
     getPM25ForLocation(lat, lon)
         .then(result => {
-            console.log('PM2.5 prediction received:', result);
+            console.log('AQI prediction received:', result);
             updatePM25Display(result.pm25);
             
             // Log additional info
             console.log(`Grid ID: ${result.grid_id}, Source: ${result.source}, Timestamp: ${result.timestamp}`);
         })
         .catch(error => {
-            console.error('Failed to fetch PM2.5 prediction:', error);
+            console.error('Failed to fetch AQI prediction:', error);
             
             // Show error in UI
-            document.getElementById('pm25-value').innerHTML = 'Failed to load PM<sub>2.5</sub> data';
+            document.getElementById('pm25-value').innerHTML = 'Failed to load AQI data';
             document.getElementById('pm25-category').textContent = 'Error';
             document.getElementById('pm25-value').style.color = '#d32f2f';
             document.getElementById('pm25-category').style.color = '#d32f2f';
@@ -105,7 +105,7 @@ function placeMarker(lat, lon, locationName = null) {
     searchResults.innerHTML = '';
 }
 
-// Function to get PM2.5 category and color
+// Function to get AQI category and color
 function getPM25Info(value) {
     let category, color;
     
@@ -132,13 +132,13 @@ function getPM25Info(value) {
     return { category, color };
 }
 
-// Function to update PM2.5 info display
+// Function to update AQI info display
 function updatePM25Display(value) {
     const { category, color } = getPM25Info(value);
     
     // Update heading and caption with dynamic color
-    document.getElementById('pm25-value').textContent = `PM2.5 is ${value} µg/m³ here`;
-    document.getElementById('pm25-value').innerHTML = `PM<sub>2.5</sub> is ${value} µg/m³ here`;
+    document.getElementById('pm25-value').textContent = `AQI is ${value} µg/m³ here`;
+    document.getElementById('pm25-value').innerHTML = `AQI is ${value} µg/m³ here`;
     document.getElementById('pm25-value').style.color = color;
     document.getElementById('pm25-category').textContent = category;
     document.getElementById('pm25-category').style.color = color;

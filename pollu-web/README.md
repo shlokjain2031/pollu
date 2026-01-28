@@ -1,13 +1,13 @@
 # Mumbai Air Quality Heatmap
 
-A simple, static web application to visualize PM2.5 air quality predictions across Mumbai in 30m x 30m grid cells.
+A simple, static web application to visualize AQI air quality predictions across Mumbai in 30m x 30m grid cells.
 
 ## Features
 
 - Interactive map with OpenStreetMap basemap
-- 30m x 30m grid cells colored by PM2.5 levels
+- 30m x 30m grid cells colored by AQI levels
 - AQI color coding (Good → Moderate → Unhealthy → Very Unhealthy → Hazardous)
-- Click on any grid cell to see detailed PM2.5 value
+- Click on any grid cell to see detailed AQI value
 - Mumbai boundary overlay
 
 ## Local Development

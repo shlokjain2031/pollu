@@ -2,7 +2,7 @@
 
 ## Setup Complete ✅
 
-The web app now fetches real-time PM2.5 predictions from the coordinator API!
+The web app now fetches real-time AQI predictions from the coordinator API!
 
 ## Files Modified/Created
 
@@ -22,7 +22,7 @@ The web app now fetches real-time PM2.5 predictions from the coordinator API!
    - Finds nearest grid cell to lat/lon
    - Gets current UTC hour timestamp
    - Calls `/predict` API with grid_id and timestamp
-   - Displays real PM2.5 value
+   - Displays real AQI value
 
 3. **API Endpoint**: 
    ```
@@ -37,7 +37,7 @@ Open `test-api.html` in your browser to test the API integration:
 - Test specific Mumbai locations (Mumbai Central, Bandra)
 
 ### Option 2: Main App
-Open `index.html` and click anywhere on the Mumbai map to get real PM2.5 data!
+Open `index.html` and click anywhere on the Mumbai map to get real AQI data!
 
 ## Current Implementation
 
@@ -46,7 +46,7 @@ Open `index.html` and click anywhere on the Mumbai map to get real PM2.5 data!
 - Mock grid data (509K cells)
 - Lat/lon → Grid ID conversion
 - Current timestamp generation
-- Real PM2.5 values from API
+- Real AQI values from API
 - Error handling
 
 **⚠️ Note:**
