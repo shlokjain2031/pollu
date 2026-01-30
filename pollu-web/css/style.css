@@ -151,6 +151,32 @@ body {
 
 .scale-band {
     height: 100%;
+    flex: 1;
+    min-width: 0;
+}
+
+.scale-band.level-good {
+    background-color: #2ecc71;
+}
+
+.scale-band.level-satisfactory {
+    background-color: #a9d82f;
+}
+
+.scale-band.level-moderate {
+    background-color: #ffd700;
+}
+
+.scale-band.level-poor {
+    background-color: #ff8c00;
+}
+
+.scale-band.level-very-poor {
+    background-color: #e74c3c;
+}
+
+.scale-band.level-severe {
+    background-color: #8b0000;
 }
 
 .scale-indicator {

@@ -32,6 +32,17 @@ const overlayStyle = {
     fillOpacity: 0.5
 };
 
+const AQI_LEVELS = [
+    { max: 35, category: 'Good', color: '#2ecc71' },
+    { max: 75, category: 'Satisfactory', color: '#a9d82f' },
+    { max: 115, category: 'Moderately Polluted', color: '#ffd700' },
+    { max: 150, category: 'Poor', color: '#ff8c00' },
+    { max: 250, category: 'Very Poor', color: '#e74c3c' },
+    { max: 500, category: 'Severe', color: '#8b0000' }
+];
+
+const AQI_LEVEL_WIDTH_PERCENT = 100 / AQI_LEVELS.length;
+
 // North overlay
 L.rectangle([[bounds.getNorth(), -180], [90, 180]], overlayStyle).addTo(map);
 // South overlay
@@ -107,29 +118,9 @@ function placeMarker(lat, lon, locationName = null) {
 
 // Function to get AQI category and color
 function getPM25Info(value) {
-    let category, color;
-    
-    if (value <= 35) {
-        category = 'Good';
-        color = '#2ecc71';
-    } else if (value <= 75) {
-        category = 'Satisfactory';
-        color = '#a9d82f';
-    } else if (value <= 115) {
-        category = 'Moderately Polluted';
-        color = '#ffd700';
-    } else if (value <= 150) {
-        category = 'Poor';
-        color = '#ff8c00';
-    } else if (value <= 250) {
-        category = 'Very Poor';
-        color = '#e74c3c';
-    } else {
-        category = 'Severe';
-        color = '#8b0000';
-    }
-    
-    return { category, color };
+    const normalizedValue = Math.max(0, value);
+    const level = AQI_LEVELS.find(level => normalizedValue <= level.max) || AQI_LEVELS[AQI_LEVELS.length - 1];
+    return { category: level.category, color: level.color };
 }
 
 // Function to update AQI info display
@@ -143,11 +134,27 @@ function updatePM25Display(value) {
     document.getElementById('pm25-category').textContent = category;
     document.getElementById('pm25-category').style.color = color;
     
-    // Update scale indicator position
-    // Scale: 0-500, map to 0-100%
-    const percentage = Math.min((value / 500) * 100, 100);
+    // Update scale indicator position using equal width bands
     const indicator = document.getElementById('scale-indicator');
-    indicator.style.left = `${percentage}%`;
+    const clampedValue = Math.max(0, Math.min(value, AQI_LEVELS[AQI_LEVELS.length - 1].max));
+    let indicatorPercent = 100;
+    let cumulativePercent = 0;
+    let previousMax = 0;
+
+    for (const level of AQI_LEVELS) {
+        if (clampedValue <= level.max) {
+            const levelRange = level.max - previousMax || 1;
+            const levelProgress = Math.min(Math.max(clampedValue - previousMax, 0), levelRange);
+            const fraction = levelProgress / levelRange;
+            indicatorPercent = cumulativePercent + fraction * AQI_LEVEL_WIDTH_PERCENT;
+            break;
+        }
+
+        cumulativePercent += AQI_LEVEL_WIDTH_PERCENT;
+        previousMax = level.max;
+    }
+
+    indicator.style.left = `${Math.min(indicatorPercent, 100)}%`;
     
     // Update timestamp - UTC minutes since start of hour
     const now = new Date();
