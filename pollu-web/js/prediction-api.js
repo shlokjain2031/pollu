@@ -11,7 +11,7 @@
 // Use localhost:8080 for local development, or set to cloudflare tunnel for production
 const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:8080'
-    : 'https://pants-leaf-engage-allow.trycloudflare.com';
+    : 'https://doctrine-remix-urban-officer.trycloudflare.com';
 
 // Grid data cache
 let gridData = null;
