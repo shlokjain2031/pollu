@@ -441,12 +441,14 @@ INVARIANT 4: /predict never blocks on background tasks
 200 OK
   ✓ Found prediction in hot cache or warm/cold cache
   ✓ Found valid prediction in previous cycle (≤1 hour old)
-  Body: { "grid_id": "...", "pm25": 42.5, "age": "0m", "source": "cache" }
+  Body: { "request_id": "...", "pm25": 42.5 }
 
 206 Stale Content
   ✓ Found prediction from previous cycle (>1 hour old)
   ✓ Current cycle failed or incomplete
-  Body: { "grid_id": "...", "pm25": 42.5, "age": "65m", "source": "stale_cache", "warning": "prediction is 65 minutes old" }
+  Body: { "request_id": "...", "pm25": 42.5, "warning": "prediction is 65 minutes old" }
+
+> Note: `/predict` responses now expose only `request_id`/`pm25` (and any error metadata); the previous `source` field has been removed.
 
 503 Service Unavailable
   ✗ No valid prediction available (no cache, all cycles failed)

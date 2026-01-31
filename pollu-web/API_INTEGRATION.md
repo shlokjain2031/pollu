@@ -58,11 +58,12 @@ Open `index.html` and click anywhere on the Mumbai map to get real AQI data!
 
 ```json
 {
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "pm25": 124.91,
-  "source": "duckdb"
+   "request_id": "550e8400-e29b-41d4-a716-446655440000",
+   "pm25": 124.91
 }
 ```
+
+> Note: `/predict` now returns only `request_id` and `pm25` on success; the previous `source` field has been removed from the payload.
 
 ## Next Steps (Optional)
 

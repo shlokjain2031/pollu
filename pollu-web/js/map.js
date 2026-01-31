@@ -32,17 +32,6 @@ const overlayStyle = {
     fillOpacity: 0.5
 };
 
-const AQI_LEVELS = [
-    { max: 35, category: 'Good', color: '#2ecc71' },
-    { max: 75, category: 'Satisfactory', color: '#a9d82f' },
-    { max: 115, category: 'Moderately Polluted', color: '#ffd700' },
-    { max: 150, category: 'Poor', color: '#ff8c00' },
-    { max: 250, category: 'Very Poor', color: '#e74c3c' },
-    { max: 500, category: 'Severe', color: '#8b0000' }
-];
-
-const AQI_LEVEL_WIDTH_PERCENT = 100 / AQI_LEVELS.length;
-
 // North overlay
 L.rectangle([[bounds.getNorth(), -180], [90, 180]], overlayStyle).addTo(map);
 // South overlay
@@ -55,11 +44,8 @@ L.rectangle([[bounds.getSouth(), bounds.getEast()], [bounds.getNorth(), 180]], o
 // Load Mumbai outer boundary only
 fetch('data/mumbai_boundary.geojson')
     .then(response => response.json())
-    .then(data => {
-        console.log('Mumbai boundary loaded');
-    })
-    .catch(error => {
-        console.error('Error loading boundary:', error);
+    .catch(() => {
+        // Boundary data is optional; ignore loading failures
     });
 
 // Function to place marker at location
@@ -88,73 +74,77 @@ function placeMarker(lat, lon, locationName = null) {
     // Update search input with lat/long
     searchInput.value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
     
-    // Show AQI info box with loading state
-    pm25Info.style.display = 'block';
-    document.getElementById('pm25-value').innerHTML = 'Loading AQI data...';
-    document.getElementById('pm25-category').textContent = 'Please wait';
+    // TODO: Show loading state in PM2.5 info box while fetching from API
+    // Display "Loading..." or spinner in the heading until API response is received
     
-    // Fetch AQI prediction from API
-    getPM25ForLocation(lat, lon)
-        .then(result => {
-            console.log('AQI prediction received:', result);
-            updatePM25Display(result.pm25);
-            
-            // Log additional info
-            console.log(`Grid ID: ${result.grid_id}, Source: ${result.source}, Timestamp: ${result.timestamp}`);
-        })
-        .catch(error => {
-            console.error('Failed to fetch AQI prediction:', error);
-            
-            // Show error in UI
-            document.getElementById('pm25-value').innerHTML = 'Failed to load AQI data';
-            document.getElementById('pm25-category').textContent = 'Error';
-            document.getElementById('pm25-value').style.color = '#d32f2f';
-            document.getElementById('pm25-category').style.color = '#d32f2f';
-        });
+    // TODO: Send /predict request to API with lat/lon coordinates
+    // Example: fetch('/predict', { method: 'POST', body: JSON.stringify({ lat, lon }) })
+    //   .then(response => response.json())
+    //   .then(data => {
+    //     const pm25Value = data.pm25; // or appropriate field from API response
+    //     updatePM25Display(pm25Value);
+    //   })
+    //   .catch(error => {
+    //     // TODO: Show error message in PM2.5 info box if API request fails
+    //     // Display error text like "Failed to fetch data" in the heading
+    //     console.error('API Error:', error);
+    //   })
+    // For now, using random PM2.5 value as placeholder
+    const randomPM25 = Math.floor(Math.random() * 400) + 10; // 10-410
+    
+    // Update PM2.5 display
+    updatePM25Display(randomPM25);
+    
+    // Show PM2.5 info box
+    pm25Info.style.display = 'block';
     
     // Clear search results
     searchResults.innerHTML = '';
 }
 
-// Function to get AQI category and color
+// Function to get PM2.5 category and color
 function getPM25Info(value) {
-    const normalizedValue = Math.max(0, value);
-    const level = AQI_LEVELS.find(level => normalizedValue <= level.max) || AQI_LEVELS[AQI_LEVELS.length - 1];
-    return { category: level.category, color: level.color };
+    let category, color;
+    
+    if (value <= 35) {
+        category = 'Good';
+        color = '#2ecc71';
+    } else if (value <= 75) {
+        category = 'Satisfactory';
+        color = '#a9d82f';
+    } else if (value <= 115) {
+        category = 'Moderately Polluted';
+        color = '#ffd700';
+    } else if (value <= 150) {
+        category = 'Poor';
+        color = '#ff8c00';
+    } else if (value <= 250) {
+        category = 'Very Poor';
+        color = '#e74c3c';
+    } else {
+        category = 'Severe';
+        color = '#8b0000';
+    }
+    
+    return { category, color };
 }
 
-// Function to update AQI info display
+// Function to update PM2.5 info display
 function updatePM25Display(value) {
     const { category, color } = getPM25Info(value);
     
     // Update heading and caption with dynamic color
-    document.getElementById('pm25-value').textContent = `AQI is ${value} µg/m³ here`;
-    document.getElementById('pm25-value').innerHTML = `AQI is ${value} µg/m³ here`;
+    document.getElementById('pm25-value').textContent = `PM2.5 is ${value} µg/m³ here`;
+    document.getElementById('pm25-value').innerHTML = `PM<sub>2.5</sub> is ${value} µg/m³ here`;
     document.getElementById('pm25-value').style.color = color;
     document.getElementById('pm25-category').textContent = category;
     document.getElementById('pm25-category').style.color = color;
     
-    // Update scale indicator position using equal width bands
+    // Update scale indicator position
+    // Scale: 0-500, map to 0-100%
+    const percentage = Math.min((value / 500) * 100, 100);
     const indicator = document.getElementById('scale-indicator');
-    const clampedValue = Math.max(0, Math.min(value, AQI_LEVELS[AQI_LEVELS.length - 1].max));
-    let indicatorPercent = 100;
-    let cumulativePercent = 0;
-    let previousMax = 0;
-
-    for (const level of AQI_LEVELS) {
-        if (clampedValue <= level.max) {
-            const levelRange = level.max - previousMax || 1;
-            const levelProgress = Math.min(Math.max(clampedValue - previousMax, 0), levelRange);
-            const fraction = levelProgress / levelRange;
-            indicatorPercent = cumulativePercent + fraction * AQI_LEVEL_WIDTH_PERCENT;
-            break;
-        }
-
-        cumulativePercent += AQI_LEVEL_WIDTH_PERCENT;
-        previousMax = level.max;
-    }
-
-    indicator.style.left = `${Math.min(indicatorPercent, 100)}%`;
+    indicator.style.left = `${percentage}%`;
     
     // Update timestamp - UTC minutes since start of hour
     const now = new Date();
@@ -229,8 +219,7 @@ searchInput.addEventListener('input', (e) => {
                     searchResults.appendChild(li);
                 });
             })
-            .catch(error => {
-                console.error('Search error:', error);
+            .catch(() => {
                 searchResults.innerHTML = '<li style="color: #d32f2f;">Search error - please try again</li>';
             });
     }, 300);

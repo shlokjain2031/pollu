@@ -389,7 +389,6 @@ func constructRedisCacheKey(gridID, timestampHourStr string) string {
 type PredictResponse struct {
 	RequestID string         `json:"request_id"`
 	PM25      float64        `json:"pm25,omitempty"`
-	Source    string         `json:"source,omitempty"` // "redis", "duckdb", or "inference"
 	Error     *ErrorResponse `json:"error,omitempty"`
 }
 
@@ -548,7 +547,6 @@ func (c *Coordinator) handlePredict(w http.ResponseWriter, r *http.Request) {
 		resp := PredictResponse{
 			RequestID: requestID,
 			PM25:      pm25,
-			Source:    source,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)

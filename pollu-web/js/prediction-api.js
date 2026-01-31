@@ -33,7 +33,6 @@ async function loadGridData() {
     
     gridLoading = true;
     try {
-        console.log('Loading grid data...');
         const response = await fetch('grid.parquet');
         if (!response.ok) {
             throw new Error(`Failed to fetch grid.parquet: ${response.statusText}`);
@@ -53,15 +52,12 @@ async function loadGridData() {
         
         // TEMPORARY: Parse using DuckDB WASM or convert to JSON first
         // For this implementation, let's assume we have a JSON version
-        console.warn('Note: Parquet parsing not implemented. Convert grid.parquet to JSON for web use.');
-        
         // Return empty for now - you'll need to convert the parquet to JSON
         gridData = [];
         gridLoading = false;
         
         return gridData;
     } catch (error) {
-        console.error('Failed to load grid data:', error);
         gridLoadError = error;
         gridLoading = false;
         throw error;
@@ -76,7 +72,6 @@ async function loadGridData() {
  */
 function findNearestGridCell(lat, lon) {
     if (!gridData || gridData.length === 0) {
-        console.error('Grid data not loaded');
         return null;
     }
     
@@ -113,13 +108,11 @@ function getCurrentHourUTC() {
  * Fetch AQI prediction from the coordinator API
  * @param {string} gridId - Grid ID (e.g., "g00000001")
  * @param {string} timestampHour - ISO timestamp (e.g., "2026-01-26T19:00:00Z")
- * @returns {Promise<Object>} - Prediction response {request_id, pm25, source}
+ * @returns {Promise<Object>} - Prediction response {request_id, pm25}
  */
 async function fetchPrediction(gridId, timestampHour) {
     const url = `${API_BASE_URL}/predict`;
     
-    console.log(`Fetching prediction from: ${url}`);
-    console.log(`Grid ID: ${gridId}, Timestamp: ${timestampHour}`);
     
     try {
         const response = await fetch(url, {
@@ -133,22 +126,14 @@ async function fetchPrediction(gridId, timestampHour) {
             })
         });
         
-        console.log(`Response status: ${response.status}`);
-        console.log(`Response headers:`, {
-            'content-type': response.headers.get('content-type'),
-            'access-control-allow-origin': response.headers.get('access-control-allow-origin')
-        });
-        
         const data = await response.json();
         
         if (!response.ok) {
             throw new Error(data.error?.message || `API request failed: ${response.statusText}`);
         }
         
-        console.log('Prediction received:', data);
         return data;
     } catch (error) {
-        console.error('Fetch prediction error:', error);
         throw error;
     }
 }
@@ -157,7 +142,7 @@ async function fetchPrediction(gridId, timestampHour) {
  * Get AQI prediction for a specific location
  * @param {number} lat - Latitude
  * @param {number} lon - Longitude
- * @returns {Promise<Object>} - {pm25: number, source: string, grid_id: string, timestamp: string}
+ * @returns {Promise<Object>} - {pm25: number, grid_id: string, timestamp: string, request_id: string}
  */
 async function getPM25ForLocation(lat, lon) {
     // Ensure grid data is loaded
@@ -179,7 +164,6 @@ async function getPM25ForLocation(lat, lon) {
     
     return {
         pm25: Math.round(result.pm25),
-        source: result.source,
         grid_id: gridId,
         timestamp: timestamp,
         request_id: result.request_id
@@ -191,7 +175,6 @@ async function getPM25ForLocation(lat, lon) {
  * This generates a simple grid covering Mumbai
  */
 function useMockGridData() {
-    console.log('Using mock grid data (509,209 cells)');
     
     // Generate mock grid data
     // Mumbai bounds: lat 18.8939-19.2701, lon 72.7763-72.9797
@@ -221,7 +204,6 @@ function useMockGridData() {
         if (gridIdx >= 509209) break;
     }
     
-    console.log(`Generated ${gridData.length} mock grid cells`);
 }
 
 // Auto-initialize with mock data for now
