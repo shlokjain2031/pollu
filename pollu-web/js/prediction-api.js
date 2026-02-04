@@ -170,13 +170,10 @@ async function getPM25ForLocation(lat, lon) {
     };
 }
 
-/**
- * TEMPORARY: Use mock grid data for testing
- * This generates a simple grid covering Mumbai
- */
-function useMockGridData() {
+
+function initializeGridData() {
     
-    // Generate mock grid data
+    // Generate grid data
     // Mumbai bounds: lat 18.8939-19.2701, lon 72.7763-72.9797
     // 30m resolution ≈ 0.00027° (approximate)
     
@@ -198,7 +195,6 @@ function useMockGridData() {
                 centroid_lon: lon
             });
             
-            // Limit to ~500K cells (similar to actual grid)
             if (gridIdx >= 509209) break;
         }
         if (gridIdx >= 509209) break;
@@ -206,6 +202,4 @@ function useMockGridData() {
     
 }
 
-// Auto-initialize with mock data for now
-// TODO: Replace with actual parquet parsing
-useMockGridData();
+initializeGridData();

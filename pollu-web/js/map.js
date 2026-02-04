@@ -50,6 +50,11 @@ fetch('data/mumbai_boundary.geojson')
 
 // Function to place marker at location
 function placeMarker(lat, lon, locationName = null) {
+    // Show loading state
+    pm25Info.style.display = 'block';
+    document.getElementById('pm25-value').innerHTML = `<em>Loading prediction...</em>`;
+    document.getElementById('pm25-category').innerHTML = `<em>Fetching data...</em>`;
+    
     // Remove previous marker if exists
     if (currentMarker) {
         map.removeLayer(currentMarker);
@@ -74,29 +79,19 @@ function placeMarker(lat, lon, locationName = null) {
     // Update search input with lat/long
     searchInput.value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
     
-    // TODO: Show loading state in PM2.5 info box while fetching from API
-    // Display "Loading..." or spinner in the heading until API response is received
-    
-    // TODO: Send /predict request to API with lat/lon coordinates
-    // Example: fetch('/predict', { method: 'POST', body: JSON.stringify({ lat, lon }) })
-    //   .then(response => response.json())
-    //   .then(data => {
-    //     const pm25Value = data.pm25; // or appropriate field from API response
-    //     updatePM25Display(pm25Value);
-    //   })
-    //   .catch(error => {
-    //     // TODO: Show error message in PM2.5 info box if API request fails
-    //     // Display error text like "Failed to fetch data" in the heading
-    //     console.error('API Error:', error);
-    //   })
-    // For now, using random PM2.5 value as placeholder
-    const randomPM25 = Math.floor(Math.random() * 400) + 10; // 10-410
-    
-    // Update PM2.5 display
-    updatePM25Display(randomPM25);
-    
-    // Show PM2.5 info box
-    pm25Info.style.display = 'block';
+    // Fetch actual PM2.5 prediction from API
+    getPM25ForLocation(lat, lon)
+        .then(result => {
+            const pm25Value = result.pm25;
+            
+            // Update PM2.5 display with actual value
+            updatePM25Display(pm25Value);
+        })
+        .catch(error => {
+            // Show error message in PM2.5 info box
+            document.getElementById('pm25-value').innerHTML = `<span style="color: #d32f2f;">Failed to fetch data</span>`;
+            document.getElementById('pm25-category').innerHTML = `<span style="color: #d32f2f;">Please try again</span>`;
+        });
     
     // Clear search results
     searchResults.innerHTML = '';
@@ -152,8 +147,48 @@ function updatePM25Display(value) {
     document.getElementById('pm25-updated').textContent = `Updated ${minutesSinceHour} minutes ago`;
 }
 
-// Handle map clicks
+// Show welcome modal on first visit only
+const welcomeOverlay = document.getElementById('welcome-overlay');
+const welcomeModal = document.getElementById('welcome-modal');
+const randomLocationBtn = document.getElementById('random-location-btn');
+
+if (!localStorage.getItem('pollu-visited')) {
+    welcomeOverlay.style.display = 'block';
+    welcomeModal.style.display = 'block';
+    localStorage.setItem('pollu-visited', 'true');
+}
+
+// Handle random location button
+randomLocationBtn.addEventListener('click', () => {
+    // Generate random coordinates within central Mumbai (land area only)
+    // Constrained to a smaller central area to avoid water/boundaries
+    const minLat = 19.05;
+    const maxLat = 19.20;
+    const minLon = 72.82;
+    const maxLon = 72.95;
+    
+    const randomLat = minLat + Math.random() * (maxLat - minLat);
+    const randomLon = minLon + Math.random() * (maxLon - minLon);
+    
+    // Hide modal and overlay
+    welcomeOverlay.style.display = 'none';
+    welcomeModal.style.display = 'none';
+    
+    // Place marker at random location
+    placeMarker(randomLat, randomLon);
+    
+    // Zoom to random location
+    map.setView([randomLat, randomLon], 15);
+});
+
+// Handle map clicks to close modal
 map.on('click', (e) => {
+    // Hide modal if visible
+    if (welcomeModal.style.display !== 'none') {
+        welcomeOverlay.style.display = 'none';
+        welcomeModal.style.display = 'none';
+    }
+    
     placeMarker(e.latlng.lat, e.latlng.lng);
     map.setView([e.latlng.lat, e.latlng.lng], 15);
 });
@@ -180,24 +215,15 @@ searchInput.addEventListener('input', (e) => {
         const bbox = '72.7763,18.8939,72.9797,19.2701';
         const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&bounded=1&viewbox=${bbox}&limit=5&accept-language=en`;
         
-        // Use CORS proxy to bypass browser restrictions
-        const corsProxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(nominatimUrl)}`;
-        
-        fetch(corsProxyUrl)
+        // Nominatim has CORS enabled, so no proxy needed
+        fetch(nominatimUrl)
             .then(response => {
                 if (!response.ok) {
                     throw new Error(`API error: ${response.status}`);
                 }
                 return response.json();
             })
-            .then(result => {
-                let data;
-                try {
-                    data = JSON.parse(result.contents);
-                } catch (e) {
-                    throw new Error('Failed to parse API response');
-                }
-                
+            .then(data => {
                 searchResults.innerHTML = '';
                 if (!Array.isArray(data) || data.length === 0) {
                     searchResults.innerHTML = '<li>No results found</li>';
