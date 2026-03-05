@@ -170,17 +170,6 @@ Future Enhancements:
 - Distributed fetching across multiple machines
 """
 
-# TODO: Implement MeteoFetcher class
-# TODO: Implement PM25Fetcher class (CPCB API)
-# TODO: Implement SentinelFetcher class (GEE API)
-# TODO: Implement parallel fetch with ThreadPoolExecutor
-# TODO: Implement DuckDB schema creation if tables don't exist
-# TODO: Implement Parallel DuckDB writes, each thread owns one database file
-# TODO: Implement error handling and logging
-# TODO: Implement timeout budgets per fetcher
-# TODO: Implement graceful degradation (partial success)
-# TODO: Implement exit codes and final logging
-
 import sys
 import logging
 import duckdb
