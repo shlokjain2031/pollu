@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mumbai Air Quality Heatmap</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="map"></div>
+    
+    <!-- Pollu Info Box -->
+    <div class="pollu-info-box">
+        <h2 class="pollu-heading">Pollu</h2>
+        <p class="pollu-description">High res (30m x 30m) AQI values at an error of 8µg/m³<br>Click anywhere on the map to drop a pin.</p>
+        <div class="github-links">
+            <a href="https://github.com" target="_blank" rel="noopener noreferrer">GitHub</a><a href="#" target="_blank" rel="noopener noreferrer">How</a>
+        </div>
+    </div>
+    
+    <!-- Search Box -->
+    <div class="search-container">
+        <input 
+            type="text" 
+            id="search-input" 
+            class="search-input" 
+            placeholder="Search location in Mumbai..."
+            autocomplete="off"
+        />
+        <ul id="search-results" class="search-results"></ul>
+    </div>
+    
+    <!-- AQI Info Box -->
+    <div id="pm25-info" class="pm25-info" style="display: none;">
+        <h3 class="pm25-heading" id="pm25-value">AQI is 120 µg/m³ here</h3>
+        <p class="pm25-caption" id="pm25-category">Dangerous</p>
+        
+        <!-- Color Scale -->
+        <div class="pm25-scale">
+            <div class="scale-bar">
+                <div class="scale-band level-good" title="Good: 0-35"></div>
+                <div class="scale-band level-satisfactory" title="Satisfactory: 36-75"></div>
+                <div class="scale-band level-moderate" title="Moderately Polluted: 76-115"></div>
+                <div class="scale-band level-poor" title="Poor: 116-150"></div>
+                <div class="scale-band level-very-poor" title="Very Poor: 151-250"></div>
+                <div class="scale-band level-severe" title="Severe: 250+"></div>
+                <div class="scale-indicator" id="scale-indicator"></div>
+            </div>
+        </div>
+        
+        <p class="pm25-updated" id="pm25-updated">Updated 0 minutes ago</p>
+        <p class="pm25-footer" id="pm25-footer">Data from satellite and ground sensors</p>
+    </div>
+    
+    <!-- Welcome Modal (shows on first visit) -->
+    <div id="welcome-overlay" class="welcome-overlay" style="display: none;"></div>
+    <div id="welcome-modal" class="welcome-modal" style="display: none;">
+        <h2>Welcome to Pollu</h2>
+        <p>You can click anywhere on the map to drop a pin and check air quality.</p>
+        <button id="random-location-btn" class="random-location-btn">Go to a random point in Mumbai</button>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <!-- Prediction API Integration -->
+    <script src="js/prediction-api.js"></script>
+    
+    <!-- Custom JS -->
+    <script src="js/map.js"></script>
+</body>
+</html>
