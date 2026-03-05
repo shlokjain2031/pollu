@@ -34,6 +34,16 @@ Current mission:
 - `dwarka/` (training/evaluation/explainability)
 - `takshashila/` (inference/serving) — has its own `takshashila/CLAUDE.md`
 
+### Design note: constant features in Takshashila
+Do NOT "fix" `local_ndvi_std = 0.0` in `feature_assembler.py`. This constant was frozen during training. Any change here breaks the train-serving contract. If you need to use a non-constant NDVI std in the future, you must retrain the model with the new feature value.
+
+### Non-critical technical debt (intentional trade-offs)
+**Mumbai-only hardcoding:** The system is built for Mumbai only. The hardcoded bbox, CRS (UTM 43N), and artifact paths are intentional, not bugs. Generalizing to another city is out of scope for this phase. When that becomes a requirement, refactor to parameterize the city name.
+
+**iterrows() in ETL:** Several hot-path operations use `iterrows()` (target assembly, EE feature construction). This is suboptimal from a pandas perspective, but time-to-completion was never a constraint, and the ETL latency is dominated by external API calls anyway (Earth Engine, OpenMeteo). Vectorizing these would save seconds, not hours. Refactor when/if ETL becomes a bottleneck.
+
+**Manifest copy-paste:** The manifest module (~1,500 LOC) has significant duplication across 9 files. However, the manifest layer is optional—the core patliputra/nalanda/dwarka pipeline works identically without it. The manifest is purely for production lifecycle tracking and data governance. It's "nice to have" infrastructure, not core ML functionality. Refactor to a base class when scaling to many data sources, but it's not blocking.
+
 ---
 
 ## 2) Mandatory read order

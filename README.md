@@ -123,7 +123,8 @@ LightGBM was chosen so iteration cycles could be fast while testing these altern
 ### `grid_id` and leakage concerns
 You may notice `grid_id` appears in Nalanda’s canonical feature listing.
 In Dwarka training flow, this field is explicitly removed before fitting to reduce location memorization risk during model learning.
-
+### Design decisions: constant features
+`local_ndvi_std` (spatial neighborhood NDVI standard deviation) appears in the frozen feature schema but is computed as a constant `0.0` in [takshashila/core/feature_assembler.py](takshashila/core/feature_assembler.py). This is intentional: the feature was frozen with this constant value during training, so inference must provide the same value to ensure model consistency. This is not a bug or incomplete TODO — it's a documented design choice to maintain the train-serving contract.
 ## Quick navigation map (human-friendly)
 
 If you are new, read in this order:
