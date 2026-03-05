@@ -344,7 +344,7 @@ if not pool.acquire(ESTIMATED_REQUEST_MEMORY):
 
 **Expected**: Light contention (queries <1ms at 1000 users).
 
-**If DuckDB lock timeout occurs** (Kashi refresh blocks readers):
+**If DuckDB lock timeout occurs** (Takshashila refresh blocks readers):
 ```python
 def get_prediction_with_timeout(grid_id, timestamp, db, timeout_sec=2.0):
   try:
@@ -738,21 +738,21 @@ On failure:
 
 **Recovery**:
 1. **Immediate**: Return 503 for all requests (no features available)
-2. **Rollback**: Kashi service falls back to previous OpenMeteo data (2-day cache)
+2. **Rollback**: Takshashila service falls back to previous OpenMeteo data (2-day cache)
 3. **Client**: Polls `/api/health` endpoint until status → green
-4. **Resume**: When OpenMeteo recovers, Kashi re-fetches; inference resumes
+4. **Resume**: When OpenMeteo recovers, Takshashila re-fetches; inference resumes
 
 ### Scenario 2: DuckDB Disk Full
 
-**Symptom**: Kashi refresh fails; writes blocked.
+**Symptom**: Takshashila refresh fails; writes blocked.
 
 **Impact**: Predictions table not updated; feature data stale.
 
 **Recovery**:
 1. Ops team: Clear old data (archive to S3), expand disk
-2. Kashi: Retries refresh with exponential backoff
+2. Takshashila: Retries refresh with exponential backoff
 3. Readers: Continue serving from `current_version` (old but consistent)
-4. Resume: After disk cleared, Kashi catches up
+4. Resume: After disk cleared, Takshashila catches up
 
 ### Scenario 3: All Model Versions Corrupt
 
@@ -814,7 +814,7 @@ MEMORY_PER_REQUEST_BYTES = 2 * 1024**2  # 2MB estimate
 
 ```python
 PM25_IDW_RETRIES = 2
-KASHI_REFRESH_RETRIES = 3
+TAKSHASHILA_REFRESH_RETRIES = 3
 EXPONENTIAL_BACKOFF_BASE_SECONDS = 0.5
 EXPONENTIAL_BACKOFF_MAX_SECONDS = 30
 ```

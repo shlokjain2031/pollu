@@ -127,6 +127,7 @@ def create_landsat8_table(db_path: Path) -> None:
                 timestamp TIMESTAMP NOT NULL,
                 B1 DOUBLE, B2 DOUBLE, B3 DOUBLE, B4 DOUBLE, B5 DOUBLE,
                 B6 DOUBLE, B7 DOUBLE, B8 DOUBLE, B9 DOUBLE, B10 DOUBLE, B11 DOUBLE,
+                scene_cloud_cover DOUBLE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (grid_id, timestamp)
             )

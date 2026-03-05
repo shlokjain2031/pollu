@@ -1,8 +1,8 @@
 """
 WriterJob Worker - Phase 2b
 
-Part of the Kashi batch inference scheduler.
-Spawned by Python orchestrator (kashi/orchestrator.py) @ t=-2m.
+Part of the Takshashila batch inference scheduler.
+Spawned by Python orchestrator (distributed/worker/orchestrator.py) @ t=-2m.
 
 Responsibilities:
 - Fetch meteorological data from OpenMeteo API
@@ -31,7 +31,7 @@ Data Flow:
    - Initialize logging with cycle_id
    - Set up timeout budgets for each fetcher
 
-3. Worker fetches in parallel (ThreadPoolExecutor, max_workers=4):
+3. Worker fetches sequentially:
 
    a. MeteoFetcher (target: 1-2 seconds)
       - Calls OpenMeteo API endpoint
@@ -67,35 +67,30 @@ Data Flow:
       - Timeout: 60 seconds
       - Graceful failure: Missing data OK (use next available)
 
-4. Worker writes to DuckDB (parallel, separate files):
-   - All 4 fetches happen in parallel (max time = slowest, typically Sentinel2)
-   - Then writes happen in parallel via ThreadPoolExecutor (max_workers=4)
-   - Each write thread handles one separate DuckDB file (no locking contention)
+4. Worker writes to DuckDB (sequential, separate files):
+   - Each fetch completes and writes before the next source begins
+   - Each write targets a separate DuckDB file
    - Each write: INSERT into table with fetched data
 
-   a. Write meteo → meteo.duckdb (Thread 1)
+   a. Write meteo → meteo.duckdb
       - 500K rows × ~20 columns
       - Duration: ~2-3 seconds
       - Includes grid_id, timestamp, all meteo fields
-      - Independent file: no locking with other writes
 
-   b. Write PM2.5 → pm25_observations.duckdb (Thread 2)
+   b. Write PM2.5 → pm25_observation.duckdb
       - ~10-26 rows (one per monitoring station)
       - Duration: <1 second
       - Includes latitude, longitude, avg_value, timestamp
-      - Independent file: no locking with other writes
 
-   c. Write Landsat8 → landsat8.duckdb (Thread 3, if available)
+   c. Write Landsat8 → landsat8.duckdb (if available)
       - 500K rows × 11 bands
       - Duration: ~2-3 seconds
       - Includes grid_id, timestamp, B1-B11
-      - Independent file: no locking with other writes
 
-   d. Write Sentinel2 → sentinel2.duckdb (Thread 4, if available)
+   d. Write Sentinel2 → sentinel2.duckdb (if available)
       - 500K rows × 5 bands
       - Duration: ~2-3 seconds
       - Includes grid_id, timestamp, B2, B4, B8, AOT, QA10
-      - Independent file: no locking with other writes
 
 5. Worker exits:
    - All fetches completed (or timed out/failed)
@@ -117,20 +112,20 @@ Performance Targets:
 - CPCB: 2-5 seconds (typical)
 - Landsat8: 0 seconds (unavailable) or 10-15 seconds (available, batch fetch)
 - Sentinel2: 0 seconds (unavailable) or 15-25 seconds (available, batch fetch)
-- DuckDB writes: 2-3 seconds max (parallel, 4 threads, no contention)
-  - Thread 1: meteo write (2-3s)
-  - Thread 2: PM2.5 write (<1s, shorter)
-  - Thread 3: Landsat8 write (2-3s, if available)
-  - Thread 4: Sentinel2 write (2-3s, if available)
-  - Total write time = max(2-3s, <1s, 2-3s, 2-3s) = 2-3 seconds (parallel)
-- **Total WriterJob duration: 20-40 seconds (95% of runs <40 seconds)**
+- DuckDB writes: ~8-10 seconds total (sequential)
+  - meteo write (2-3s)
+  - PM2.5 write (<1s)
+  - Landsat8 write (2-3s, if available)
+  - Sentinel2 write (2-3s, if available)
+  - Total write time = sum of individual writes
+- **Total WriterJob duration: 30-60 seconds (sequential execution)**
 - 120-second window provides 3x buffer
 
 Example Invocation (by orchestrator):
   python3 -m takshashila.distributed.worker.write_job_worker \
     --cycle-id 550e8400-e29b-41d4-a716-446655440000 \
     --timestamp-to-write 2026-01-25T14:00:00Z \
-    --config /path/to/kashi/config.yaml
+    --config /path/to/takshashila/config.yaml
 
 Logging Output:
 All logs to stderr with format:
@@ -138,17 +133,17 @@ All logs to stderr with format:
 
 Example:
   [550e8400-e29b] [2026-01-25 14:00:05] INFO WriterJob starting
-  [550e8400-e29b] [2026-01-25 14:00:05] INFO Fetching from 4 sources in parallel (timeout: 60s)
+  [550e8400-e29b] [2026-01-25 14:00:05] INFO Fetching from 4 sources sequentially (timeout: 60s)
   [550e8400-e29b] [2026-01-25 14:00:07] INFO Fetched meteo: 500000 rows
   [550e8400-e29b] [2026-01-25 14:00:09] INFO Fetched PM2.5: 26 rows
   [550e8400-e29b] [2026-01-25 14:00:15] INFO Landsat8 not available today (expected 1/16 days)
   [550e8400-e29b] [2026-01-25 14:00:32] INFO Fetched Sentinel2: 500000 rows
   [550e8400-e29b] [2026-01-25 14:00:32] INFO All fetches completed in 27.3s
-  [550e8400-e29b] [2026-01-25 14:00:32] INFO Writing to DuckDB (parallel, 4 threads)
-  [550e8400-e29b] [2026-01-25 14:00:35] INFO Written meteo: 500000 rows (2.1s, thread 1)
-  [550e8400-e29b] [2026-01-25 14:00:35] INFO Written PM2.5: 26 rows (0.2s, thread 2)
-  [550e8400-e29b] [2026-01-25 14:00:35] INFO Written Sentinel2: 500000 rows (2.8s, thread 3)
-  [550e8400-e29b] [2026-01-25 14:00:35] INFO All DuckDB writes completed in 2.8s (parallel)
+  [550e8400-e29b] [2026-01-25 14:00:32] INFO Writing to DuckDB (sequential)
+  [550e8400-e29b] [2026-01-25 14:00:35] INFO Written meteo: 500000 rows (2.1s)
+  [550e8400-e29b] [2026-01-25 14:00:36] INFO Written PM2.5: 26 rows (0.2s)
+  [550e8400-e29b] [2026-01-25 14:00:39] INFO Written Sentinel2: 500000 rows (2.8s)
+  [550e8400-e29b] [2026-01-25 14:00:39] INFO All DuckDB writes completed in 7.1s (sequential)
   [550e8400-e29b] [2026-01-25 14:00:35] INFO WriterJob completed successfully (2.8s writes, 30.1s total)
 
 Integration Points:
@@ -156,7 +151,7 @@ Integration Points:
 - CPCB API (data.gov.in)
 - Google Earth Engine API (geemap or ee library)
 - DuckDB (for writing data)
-- kashi.config (for paths, credentials, timeouts)
+- takshashila.core.config (for paths, credentials, timeouts)
 
 Success Criteria:
 - All fetches completed or gracefully failed
@@ -206,6 +201,7 @@ from takshashila.core.config import (
     DUCKDB_SENTINEL2_PATH,
     DUCKDB_METEO_PATH,
     DUCKDB_PM25_PATH,
+    GOOGLE_EARTH_ENGINE_SERVICE_ACCOUNT
 )
 
 import requests
@@ -438,9 +434,8 @@ class LandsatFetcher:
         
         # Initialize Earth Engine with service account credentials
         try:
-            service_account = '771194812335-compute@developer.gserviceaccount.com'
             key_path = '/Users/shlokjain/pollu/takshashila/distributed/worker/pollu-485506-73502dcc4936.json'
-            credentials = ee.ServiceAccountCredentials(service_account, key_path)
+            credentials = ee.ServiceAccountCredentials(GOOGLE_EARTH_ENGINE_SERVICE_ACCOUNT, key_path)
             ee.Initialize(credentials=credentials, project=GEE_PROJECT)
             self.logger.info(f"  ✓ Earth Engine initialized (project: {GEE_PROJECT})")
         except Exception as e:
@@ -506,23 +501,16 @@ class LandsatFetcher:
             
             conn = duckdb.connect(str(self.db_path))
             
-            # Create table if doesn't exist
+            # Create table if doesn't exist (match schema.py)
             conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS landsat8 (
-                    grid_id VARCHAR,
-                    timestamp TIMESTAMP,
-                    B1 DOUBLE,
-                    B2 DOUBLE,
-                    B3 DOUBLE,
-                    B4 DOUBLE,
-                    B5 DOUBLE,
-                    B6 DOUBLE,
-                    B7 DOUBLE,
-                    B8 DOUBLE,
-                    B9 DOUBLE,
-                    B10 DOUBLE,
-                    B11 DOUBLE,
-                    scene_cloud_cover DOUBLE
+                    grid_id VARCHAR NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    B1 DOUBLE, B2 DOUBLE, B3 DOUBLE, B4 DOUBLE, B5 DOUBLE,
+                    B6 DOUBLE, B7 DOUBLE, B8 DOUBLE, B9 DOUBLE, B10 DOUBLE, B11 DOUBLE,
+                    scene_cloud_cover DOUBLE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (grid_id, timestamp)
                 )
             """)
             
@@ -847,16 +835,18 @@ class Sentinel2Fetcher:
             
             conn = duckdb.connect(str(self.db_path))
             
-            # Create table if doesn't exist
+            # Create table if doesn't exist (match schema.py)
             conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS sentinel2 (
-                    grid_id VARCHAR,
-                    timestamp TIMESTAMP,
+                    grid_id VARCHAR NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
                     B2 DOUBLE,
                     B4 DOUBLE,
                     B8 DOUBLE,
                     AOT DOUBLE,
-                    QA10 DOUBLE
+                    QA10 INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (grid_id, timestamp)
                 )
             """)
             
@@ -1247,7 +1237,7 @@ class PM25Fetcher:
             
             # Check if table exists
             table_exists = conn.execute(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'pm25_observations'"
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'pm25_observation'"
             ).fetchone()[0] > 0
             
             if not table_exists:
@@ -1257,7 +1247,7 @@ class PM25Fetcher:
             
             # Get latest timestamp
             result = conn.execute(
-                "SELECT MAX(timestamp) FROM pm25_observations"
+                "SELECT MAX(timestamp) FROM pm25_observation"
             ).fetchone()
             conn.close()
             
@@ -1502,7 +1492,7 @@ class PM25Fetcher:
             
             # Create table if doesn't exist
             conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS pm25_observations (
+                CREATE TABLE IF NOT EXISTS pm25_observation (
                     grid_id VARCHAR NOT NULL,
                     timestamp TIMESTAMP NOT NULL,
                     pm25 DOUBLE,
@@ -1512,7 +1502,7 @@ class PM25Fetcher:
             """)
             
             # Insert data (DuckDB will auto-populate created_at)
-            conn.execute("INSERT INTO pm25_observations (grid_id, timestamp, pm25) SELECT * FROM df")
+            conn.execute("INSERT INTO pm25_observation (grid_id, timestamp, pm25) SELECT * FROM df")
             conn.close()
             
             self.logger.info(f"  ✓ Written {len(df):,} rows to {self.db_path}")

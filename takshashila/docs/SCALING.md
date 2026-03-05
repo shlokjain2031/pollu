@@ -437,7 +437,7 @@ Calculation:
 
 **Implications**:
 - Leave 40% headroom for spikes
-- Room for Kashi refresh jobs (scheduler concurrency)
+- Room for Takshashila refresh jobs (scheduler concurrency)
 - Room for error/exception handling
 
 ### 6.2 Memory Target: 4GB Max

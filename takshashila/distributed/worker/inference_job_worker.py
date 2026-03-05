@@ -1,8 +1,8 @@
 """
 InferenceJob Worker - Phase 2b
 
-Part of the Kashi batch inference scheduler.
-Spawned by Python orchestrator (kashi/orchestrator.py) @ t=0m.
+Part of the batch inference scheduler.
+Spawned by Python orchestrator (orchestrator.py) @ t=0m.
 
 Responsibilities:
 - Accept inference jobs from orchestrator (grid batches, timestamp)
@@ -85,7 +85,7 @@ Integration Points:
 - takshashila.core.inference.InferenceEngine (the inference pipeline)
 - redis.Redis (cache client) or equivalent
 - duckdb (for prediction writes)
-- kashi.config (for configuration)
+- config (for configuration)
 - PersistenceQueue (async sequential DuckDB writer)
 
 Success Criteria:
@@ -203,7 +203,7 @@ from takshashila.core.cache import get_cache_client
 from takshashila.core.db_pool import PoolManager
 
 # Batch size for predict_batch (configurable via env variable)
-BATCH_SIZE = int(os.environ.get("KASHI_BATCH_SIZE", "10000"))  # Increased from 100 for better throughput
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "10000"))  # Increased from 100 for better throughput
 
 # Valid PM2.5 range (µg/m³) - used for sanity checking predictions
 VALID_PM25_MIN = 0.0
@@ -437,7 +437,7 @@ def main():
         "--config",
         type=str,
         default=None,
-        help="Path to kashi/config.yaml"
+        help="Path to config.yaml"
     )
     
     args = parser.parse_args()
@@ -484,7 +484,7 @@ def main():
             return 1
         
         # Initialize connection pool manager (configurable via env)
-        pool_enabled = os.environ.get("KASHI_ENABLE_POOL", "true").lower() == "true"
+        pool_enabled = os.environ.get("ENABLE_POOL", "true").lower() == "true"
         pool_manager = None
         if pool_enabled:
             logger.info("Initializing connection pool manager...")

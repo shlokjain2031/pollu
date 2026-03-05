@@ -3,7 +3,7 @@ Orchestrator - Worker Coordinator
 
 Manages the timing and spawning of WriterJob and InferenceJob workers.
 Runs as a daemon subprocess of the Go Coordinator.
-Implements the Kashi batch inference scheduler logic.
+Implements the batch inference scheduler logic.
 
 Responsibilities:
 - Schedule WriterJob @ t=-2m (2 minutes before hour)
@@ -36,7 +36,7 @@ Orchestrator (Python daemon, started by Go Coordinator)
 
 Main Entry Point:
 - `python3 -m takshashila.distributed.worker.orchestrator`
-- Reads config from environment or kashi/config.yaml
+- Reads config from environment or config.yaml
 - Initializes APScheduler with UTC timezone
 - Registers two jobs: run_writer_job (t=-2m), run_inference_job (t=0m)
 - Runs forever (until SIGTERM from coordinator)
@@ -116,7 +116,7 @@ Graceful Shutdown:
 - Exit with code 0
 
 Configuration:
-- Reads from kashi/config.yaml:
+- Reads from config.yaml:
   - schedule_hour (default: 0)
   - schedule_minute (default: 0)
   - writer_timeout_seconds (default: 300)
@@ -125,9 +125,9 @@ Configuration:
   - grid_batch_size (how many grids per worker)
   - cache_host, cache_port (Redis)
 - Falls back to environment variables:
-  - KASHI_SCHEDULE_HOUR
-  - KASHI_WRITER_TIMEOUT
-  - KASHI_CACHE_HOST
+  - SCHEDULE_HOUR
+  - WRITER_TIMEOUT
+  - CACHE_HOST
   - etc.
 
 Logging:
@@ -224,27 +224,27 @@ def load_config():
     environment variable overrides.
     
     Priority:
-    1. Environment variables (KASHI_*)
+    1. Environment variables (*)
     2. Defaults from takshashila.core.config
     
     Returns:
         dict: Configuration dictionary with all settings
     """
     config = {
-        "schedule_hour": int(os.environ.get("KASHI_SCHEDULE_HOUR", SCHEDULE_HOUR)),
-        "schedule_minute": int(os.environ.get("KASHI_SCHEDULE_MINUTE", SCHEDULE_MINUTE)),
-        "writer_timeout_seconds": int(os.environ.get("KASHI_WRITER_TIMEOUT", WRITER_JOB_TIMEOUT_SECONDS)),
-        "hot_cache_timeout_seconds": int(os.environ.get("KASHI_HOT_CACHE_TIMEOUT", HOT_CACHE_TIMEOUT_SECONDS)),
-        "max_writer_retries": int(os.environ.get("KASHI_MAX_WRITER_RETRIES", MAX_WRITER_JOB_RETRIES)),
-        "max_hot_cache_retries": int(os.environ.get("KASHI_MAX_HOT_RETRIES", MAX_HOT_CACHE_RETRIES)),
-        "cache_host": os.environ.get("KASHI_CACHE_HOST", REDIS_HOST),
-        "cache_port": int(os.environ.get("KASHI_CACHE_PORT", REDIS_PORT)),
-        "num_hot_workers": int(os.environ.get("KASHI_NUM_HOT_WORKERS", NUM_INFERENCE_WORKERS_HOT)),
-        "num_warm_workers": int(os.environ.get("KASHI_NUM_WARM_WORKERS", NUM_INFERENCE_WORKERS_WARM)),
-        "num_cold_workers": int(os.environ.get("KASHI_NUM_COLD_WORKERS", NUM_INFERENCE_WORKERS_COLD)),
-        "grid_batch_size_hot": int(os.environ.get("KASHI_GRID_BATCH_SIZE_HOT", GRID_BATCH_SIZE_HOT)),
-        "grid_batch_size_warm": int(os.environ.get("KASHI_GRID_BATCH_SIZE_WARM", GRID_BATCH_SIZE_WARM)),
-        "grid_batch_size_cold": int(os.environ.get("KASHI_GRID_BATCH_SIZE_COLD", GRID_BATCH_SIZE_COLD)),
+        "schedule_hour": int(os.environ.get("SCHEDULE_HOUR", SCHEDULE_HOUR)),
+        "schedule_minute": int(os.environ.get("SCHEDULE_MINUTE", SCHEDULE_MINUTE)),
+        "writer_timeout_seconds": int(os.environ.get("WRITER_TIMEOUT", WRITER_JOB_TIMEOUT_SECONDS)),
+        "hot_cache_timeout_seconds": int(os.environ.get("HOT_CACHE_TIMEOUT", HOT_CACHE_TIMEOUT_SECONDS)),
+        "max_writer_retries": int(os.environ.get("MAX_WRITER_RETRIES", MAX_WRITER_JOB_RETRIES)),
+        "max_hot_cache_retries": int(os.environ.get("MAX_HOT_RETRIES", MAX_HOT_CACHE_RETRIES)),
+        "cache_host": os.environ.get("CACHE_HOST", REDIS_HOST),
+        "cache_port": int(os.environ.get("CACHE_PORT", REDIS_PORT)),
+        "num_hot_workers": int(os.environ.get("NUM_HOT_WORKERS", NUM_INFERENCE_WORKERS_HOT)),
+        "num_warm_workers": int(os.environ.get("NUM_WARM_WORKERS", NUM_INFERENCE_WORKERS_WARM)),
+        "num_cold_workers": int(os.environ.get("NUM_COLD_WORKERS", NUM_INFERENCE_WORKERS_COLD)),
+        "grid_batch_size_hot": int(os.environ.get("GRID_BATCH_SIZE_HOT", GRID_BATCH_SIZE_HOT)),
+        "grid_batch_size_warm": int(os.environ.get("GRID_BATCH_SIZE_WARM", GRID_BATCH_SIZE_WARM)),
+        "grid_batch_size_cold": int(os.environ.get("GRID_BATCH_SIZE_COLD", GRID_BATCH_SIZE_COLD)),
     }
     return config
 
@@ -1014,7 +1014,7 @@ def main():
         python3 -m takshashila.distributed.worker.orchestrator
     
     Configuration comes from takshashila/core/config.py with optional
-    environment variable overrides (KASHI_*).
+    environment variable overrides (*).
     
     Orchestrator Subprocess Management: IMPLEMENTED
     - Coordinator spawns: exec.Command(python3, '-m', 'takshashila.distributed.worker.orchestrator') ✓
@@ -1034,17 +1034,17 @@ def main():
     """
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
-        description="Kashi Orchestrator - Batch Inference Scheduler",
+        description="Orchestrator - Batch Inference Scheduler",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python3 -m takshashila.distributed.worker.orchestrator
   
 Environment Variables:
-  KASHI_SCHEDULE_HOUR       Hour to schedule jobs (default: 0)
-  KASHI_SCHEDULE_MINUTE     Minute to schedule jobs (default: 0)
-  KASHI_CACHE_HOST          Redis host (default: localhost)
-  KASHI_CACHE_PORT          Redis port (default: 6379)
+  SCHEDULE_HOUR       Hour to schedule jobs (default: 0)
+  SCHEDULE_MINUTE     Minute to schedule jobs (default: 0)
+  CACHE_HOST          Redis host (default: localhost)
+  CACHE_PORT          Redis port (default: 6379)
         """
     )
     args = parser.parse_args()
@@ -1086,8 +1086,8 @@ Environment Variables:
         logger.info("Orchestrator APScheduler started")
         
         # Start Flask server in main thread
-        flask_port = int(os.environ.get("KASHI_ORCHESTRATOR_PORT", 9999))
-        flask_host = os.environ.get("KASHI_ORCHESTRATOR_HOST", "0.0.0.0")
+        flask_port = int(os.environ.get("ORCHESTRATOR_PORT", 9999))
+        flask_host = os.environ.get("ORCHESTRATOR_HOST", "0.0.0.0")
         
         logger.info(f"Starting Flask server on {flask_host}:{flask_port}")
         logger.info("Orchestrator running, press Ctrl+C to stop")

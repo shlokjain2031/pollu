@@ -12,7 +12,7 @@
 - **5 independent pools:** meteo (4 conn), pm25_observations (4 conn), landsat8 (4 conn), sentinel2 (4 conn), predictions (8 conn)
 - **Unified read/write per pool:** No separation (MVCC prevents contention)
 - **Persistent connections:** No idle eviction
-- **Threading model:** `threading.Semaphore` (matches Kashi's sync/thread architecture)
+- **Threading model:** `threading.Semaphore` (matches Takshashila's sync/thread architecture)
 - **Prepared statements:** Cached per file, stable schema
 - **Health checks:** Acquire-time validation with auto-replacement
 - **Lazy initialization:** On-demand connection creation
@@ -26,7 +26,7 @@
 
 ### 1.1 Files to Create
 
-**File:** `kashi/db_pool.py` (NEW, ~200 lines)
+**File:** `distributed/worker/db_pool.py` (NEW, ~200 lines)
 
 ```python
 import threading
@@ -225,7 +225,7 @@ class DuckDBConnectionPool:
 
 class PoolManager:
     """
-    Manage all pools across Kashi.
+    Manage all pools across Takshashila.
     
     Pools:
     - meteo: 4 connections
@@ -306,7 +306,7 @@ class WriterConnection:
 import pytest
 import threading
 import time
-from kashi.db_pool import DuckDBConnectionPool, PoolManager
+from takshashila.db_pool import DuckDBConnectionPool, PoolManager
 import tempfile
 import os
 
@@ -516,7 +516,7 @@ class BatchFeatureAssembler:
 
 ### 2.2 Update InferenceJob
 
-**File:** `kashi/inference.py` (extend, +30 lines)
+**File:** `distributed/worker/inference.py` (extend, +30 lines)
 
 Key changes:
 - Accept `pool_manager` in constructor
@@ -552,7 +552,7 @@ class InferenceJob:
 
 ### 2.3 Update Persistence Layer
 
-**File:** `kashi/persistence.py` (extend, +20 lines)
+**File:** `distributed/worker/persistence.py` (extend, +20 lines)
 
 Key changes:
 - Accept `pool_manager` in constructor
@@ -593,7 +593,7 @@ class CacheStore:
 
 ### 3.1 WriterJob Integration
 
-**File:** `kashi/writer.py` (extend, +40 lines)
+**File:** `distributed/worker/writer.py` (extend, +40 lines)
 
 Key changes:
 - Accept `writer_conn: WriterConnection` for bulk inserts
@@ -643,7 +643,7 @@ class WriterJob:
 import pytest
 import pandas as pd
 import time
-from kashi.db_pool import PoolManager, WriterConnection, DuckDBConnectionPool
+from takshashila.db_pool import PoolManager, WriterConnection, DuckDBConnectionPool
 from nalanda.features import BatchFeatureAssembler
 import tempfile
 import duckdb
@@ -858,14 +858,14 @@ class TestPoolIntegration:
 3. Run tests, verify all pass
 4. Output: Pool metrics baseline, proof of concept
 
-**Deliverable:** `kashi/db_pool.py` + `tests/test_db_pool.py` (both complete, tested)
+**Deliverable:** `distributed/worker/db_pool.py` + `tests/test_db_pool.py` (both complete, tested)
 
 ---
 
 ### **Part 2: Feature Assembly Integration** (~1 day)
 1. Extend `nalanda/features.py` (BatchFeatureAssembler with pool_manager)
-2. Extend `kashi/inference.py` (InferenceJob with pool_manager)
-3. Extend `kashi/persistence.py` (CacheStore with pooled reads/writes)
+2. Extend `distributed/worker/inference.py` (InferenceJob with pool_manager)
+3. Extend `distributed/worker/persistence.py` (CacheStore with pooled reads/writes)
 4. Smoke test: InferenceJob instantiates with pools, can acquire connections
 
 **Deliverable:** Modified files ready to integrate; no breaking changes to existing code
@@ -873,7 +873,7 @@ class TestPoolIntegration:
 ---
 
 ### **Part 3: WriterJob Integration + Performance Testing** (~1 day)
-1. Extend `kashi/writer.py` (WriterJob with dedicated WriterConnection)
+1. Extend `distributed/worker/writer.py` (WriterJob with dedicated WriterConnection)
 2. Create `tests/test_pool_integration.py` (integration tests, benchmarks)
 3. Run integration suite (parallel reads, bulk writes, throughput benchmark)
 4. Verify 10-15% improvement measured
@@ -888,7 +888,7 @@ class TestPoolIntegration:
 - [x] All integration tests pass (parallel reads, bulk writes, cache operations)
 - [x] Pool metrics tracked and reportable
 - [x] Throughput improvement ≥10% measured in benchmarks
-- [x] No breaking changes to existing Kashi code
+- [x] No breaking changes to existing Takshashila code
 - [x] Feature assembly parallelized (4 tables read concurrently)
 - [x] WriterJob uses dedicated non-pooled connection
 - [x] Health checks work (corrupted connections auto-replaced)
@@ -899,7 +899,7 @@ class TestPoolIntegration:
 
 ## Notes
 
-- **No Kashi dependency blocking:** Connection pooling is a pure infrastructure layer, works with stub or real Kashi
+- **No Takshashila dependency blocking:** Connection pooling is a pure infrastructure layer, works with stub or real Takshashila
 - **Parallel feature assembly:** Major win; reduces feature assembly from serial to concurrent I/O
 - **Dedicated WriterConnection:** Bulk inserts stay isolated, don't compete with read pools
 - **Metrics everywhere:** Can identify bottlenecks during Phase 3 optimization

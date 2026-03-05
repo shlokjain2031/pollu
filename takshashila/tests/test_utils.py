@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime, timezone, timedelta
 
-from takshashika.core.utils import (
+from takshashila.core.utils import (
     round_to_hour, validate_grid_id_format
 )
 

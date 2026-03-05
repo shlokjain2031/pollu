@@ -228,7 +228,7 @@ def persistence(test_db_paths):
     
     Uses the predictions database from test_db_paths.
     """
-    from takshashika.core.persistence import PersistenceLayer
+    from takshashila.core.persistence import PersistenceLayer
     return PersistenceLayer(test_db_paths[TABLE_PREDICTIONS])
 
 

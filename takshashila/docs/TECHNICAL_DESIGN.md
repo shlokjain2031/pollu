@@ -1,4 +1,4 @@
-# Kashi: Batch Inference Scheduler - Technical Design Document
+# Takshashila: Batch Inference Scheduler - Technical Design Document
 
 **Status:** Ready for Implementation (Phase 2a)  
 **Language:** Python 3.10+  
@@ -9,7 +9,7 @@
 
 ## **1. OVERVIEW**
 
-Kashi is a Python-based batch inference scheduler that runs inference jobs hourly to populate a prediction cache for 500K grid cells. The system comprises two sequential subprocess jobs:
+Takshashila is a Python-based batch inference scheduler that runs inference jobs hourly to populate a prediction cache for 500K grid cells. The system comprises two sequential subprocess jobs:
 
 1. **WriterJob** (t=-2m): Fetch fresh raw data from 4 sources, write to DuckDB (**20-40 seconds typical**)
 2. **InferenceJob** (t=0m): Assemble features, run LightGBM, populate cache, write predictions (**60 seconds total**)
@@ -30,7 +30,7 @@ Kashi is a Python-based batch inference scheduler that runs inference jobs hourl
 Coordinator (Go)
 ├── /predict handler (uses shared cache)
 ├── /health handler
-└── Kashi subprocess (Python)
+└── Takshashila subprocess (Python)
     ├── Orchestrator (APScheduler)
     ├── WriterJob subprocess
     │   ├── MeteoFetcher (OpenMeteo API)
@@ -49,7 +49,7 @@ Coordinator (Go)
 ### **2.2 Job Lifecycle**
 
 ```
-[Kashi starts]
+[Takshashila starts]
   ↓
 [APScheduler initializes]
   ↓
@@ -230,7 +230,7 @@ Thread: Write predictions to predictions table (separate DuckDB file)
 ResultCache (in Coordinator memory)
 ├─ Structure: Dict[grid_id] → (pm25_prediction, timestamp_created)
 ├─ Capacity: ~500K entries = ~4MB metadata + predictions
-├─ TTL: Infinite (overwritten hourly by Kashi)
+├─ TTL: Infinite (overwritten hourly by Takshashila)
 ├─ Access: /predict requests do direct lookup
 └─ Population Strategy:
     t=0m:05s: Hot grids (5K) queryable
@@ -254,7 +254,7 @@ If Complete Cache Failure (InferenceJob never completes):
 
 ### **4.1 Orchestrator (Main Scheduler)**
 
-**File:** `kashi/orchestrator.py`
+**File:** `distributed/worker/orchestrator.py`
 
 **Class:** `InferenceOrchestrator`
 
@@ -262,7 +262,7 @@ If Complete Cache Failure (InferenceJob never completes):
 class InferenceOrchestrator:
     """Orchestrates WriterJob and InferenceJob scheduling."""
     
-    def __init__(self, config: KashiConfig):
+    def __init__(self, config: Config):
         self.config = config
         self.scheduler = BackgroundScheduler()
         self.retry_metadata = {}  # In-memory retry state
@@ -319,7 +319,7 @@ class InferenceOrchestrator:
         """Spawn WriterJob subprocess, wait for completion."""
         try:
             process = subprocess.Popen(
-                [sys.executable, '-m', 'kashi.writer_job', '--cycle-id', cycle_id],
+                [sys.executable, '-m', 'takshashila.writer_job', '--cycle-id', cycle_id],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=self.config.project_root
@@ -344,7 +344,7 @@ class InferenceOrchestrator:
         """Spawn InferenceJob subprocess, wait for completion."""
         try:
             process = subprocess.Popen(
-                [sys.executable, '-m', 'kashi.inference_job', '--cycle-id', cycle_id],
+                [sys.executable, '-m', 'takshashila.inference_job', '--cycle-id', cycle_id],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=self.config.project_root
@@ -374,7 +374,7 @@ class InferenceOrchestrator:
 
 ### **4.2 WriterJob**
 
-**File:** `kashi/writer_job.py`
+**File:** `distributed/worker/writer_job.py`
 
 **Purpose:** Fetch fresh raw data, write to DuckDB with minimal memory footprint
 
@@ -382,7 +382,7 @@ class InferenceOrchestrator:
 class WriterJob:
     """Fetch and write raw observation data for next inference cycle."""
     
-    def __init__(self, config: KashiConfig, cycle_id: str):
+    def __init__(self, config: Config, cycle_id: str):
         self.config = config
         self.cycle_id = cycle_id
         self.timestamp_to_write = self._compute_write_timestamp()
@@ -520,7 +520,7 @@ class DuckDBWriter:
 
 ### **4.3 InferenceJob**
 
-**File:** `kashi/inference_job.py`
+**File:** `distributed/worker/inference_job.py`
 
 **Purpose:** Load features, run LightGBM, populate cache, write predictions
 
@@ -528,7 +528,7 @@ class DuckDBWriter:
 class InferenceJob:
     """Run batch inference for 500K grids."""
     
-    def __init__(self, config: KashiConfig, cycle_id: str, cache_provider):
+    def __init__(self, config: Config, cycle_id: str, cache_provider):
         self.config = config
         self.cycle_id = cycle_id
         self.cache = cache_provider  # Injected from Coordinator
@@ -674,7 +674,7 @@ class InferenceJob:
 
 ### **4.4 BatchFeatureAssembler**
 
-**File:** `kashi/batch_feature_assembler.py`
+**File:** `distributed/worker/batch_feature_assembler.py`
 
 **Purpose:** Load features for all 500K grids at once (minimal memory management)
 
@@ -682,7 +682,7 @@ class InferenceJob:
 class BatchFeatureAssembler:
     """Assemble features for all 500K grids at once."""
     
-    def __init__(self, config: KashiConfig):
+    def __init__(self, config: Config):
         self.config = config
         self.feature_schema = self._load_feature_schema()
         self.grid_ids = self._load_grid_ids()
@@ -754,7 +754,7 @@ class BatchFeatureAssembler:
 
 ### **4.5 Cache Provider Interface**
 
-**File:** `kashi/cache.py`
+**File:** `distributed/worker/cache.py`
 
 ```python
 class CacheProvider:
@@ -835,18 +835,18 @@ class JobStateManager:
 
 ## **6. CONFIGURATION**
 
-**File:** `kashi/config.py`
+**File:** `distributed/worker/config.py`
 
 ```python
-class KashiConfig:
-    """Kashi scheduler configuration."""
+class Config:
+    """Takshashila scheduler configuration."""
     
     # Paths
     project_root: Path = Path(__file__).parent.parent
     duckdb_path: Path = project_root / "duckdb" / "takshashila.duckdb"
     model_path: Path = project_root / "dwarka" / "model.pkl"
     feature_schema_path: Path = project_root / "artifacts" / "feature_schema.json"
-    config_file: Path = project_root / "kashi" / "config.yaml"
+    config_file: Path = project_root / "takshashila" / "config.yaml"
     
     # Scheduling
     schedule_hour: int = 0  # Start at top of hour (UTC)
@@ -860,7 +860,7 @@ class KashiConfig:
     schema_hash: str = "abc123"  # Read from config file
     
     @classmethod
-    def load_from_file(cls, config_file: Path) -> 'KashiConfig':
+    def load_from_file(cls, config_file: Path) -> 'Config':
         """Load config from YAML file."""
         with open(config_file) as f:
             data = yaml.safe_load(f)
@@ -870,10 +870,10 @@ class KashiConfig:
         return config
 ```
 
-**File:** `kashi/config.yaml`
+**File:** `distributed/worker/config.yaml`
 
 ```yaml
-# Kashi Configuration
+# Takshashila Configuration
 
 # Model versioning
 model_version: "1.0.0"
@@ -903,7 +903,7 @@ cache:
 logging:
   level: INFO
   format: JSON
-  file: /var/log/kashi/kashi.log
+  file: /var/log/distributed/worker/takshashila.log
 
 # API Credentials (sourced from environment)
 openmeteo:
@@ -929,9 +929,9 @@ gee:
 ## **7. FILE STRUCTURE**
 
 ```
-/Users/shlokjain/pollu/kashi/
+/Users/shlokjain/pollu/distributed/worker/
 ├── __init__.py
-├── __main__.py                 # Entry point: python -m kashi
+├── __main__.py                 # Entry point: python -m takshashila
 ├── orchestrator.py             # Main scheduler (WriterJob + InferenceJob coordination)
 ├── writer_job.py               # Fetch raw data, write to DuckDB
 ├── inference_job.py            # Load features, infer, cache, write predictions
@@ -961,7 +961,7 @@ gee:
 │   └── conftest.py             # Pytest fixtures
 │
 └── logs/
-    └── kashi.log               # Rotating log file
+    └── takshashila.log               # Rotating log file
 ```
 
 ---
@@ -979,14 +979,14 @@ func main() {
         log.Fatal(err)
     }
     
-    // Start Kashi subprocess
-    kashiCmd := exec.Command(
+    // Start Takshashila subprocess
+    coordinatorCmd := exec.Command(
         "python",
-        "-m", "kashi",
+        "-m", "takshashila",
     )
-    kashiCmd.Stdout = os.Stdout
-    kashiCmd.Stderr = os.Stderr
-    err = kashiCmd.Start()
+    coordinatorCmd.Stdout = os.Stdout
+    coordinatorCmd.Stderr = os.Stderr
+    err = coordinatorCmd.Start()
     if err != nil {
         log.Fatal(err)
     }
@@ -1001,12 +1001,12 @@ func main() {
 
 ### **8.2 Cache Sharing (TBD)**
 
-**Question:** How is in-memory cache shared between Kashi subprocess and Coordinator?
+**Question:** How is in-memory cache shared between Takshashila subprocess and Coordinator?
 
 **Options:**
-1. **Redis:** Both Kashi and Coordinator write/read from Redis
+1. **Redis:** Both Takshashila and Coordinator write/read from Redis
 2. **Shared memory:** Python `multiprocessing.shared_memory`
-3. **File-based:** Kashi writes predictions to file, Coordinator reads
+3. **File-based:** Takshashila writes predictions to file, Coordinator reads
 4. **IPC socket:** Custom protocol between processes
 
 **Recommendation for MVP:** Use option 1 (Redis) for simplicity.
@@ -1048,28 +1048,28 @@ func (c *Coordinator) getFromCache(gridID string) (float64, bool) {
 
 ```python
 # Prometheus metrics
-kashi_writer_job_duration_seconds = Histogram(
-    'kashi_writer_job_duration_seconds',
+takshashila_writer_job_duration_seconds = Histogram(
+    'takshashila_writer_job_duration_seconds',
     'Duration of writer job'
 )
-kashi_inference_job_duration_seconds = Histogram(
-    'kashi_inference_job_duration_seconds',
+takshashila_inference_job_duration_seconds = Histogram(
+    'takshashila_inference_job_duration_seconds',
     'Duration of inference job'
 )
-kashi_feature_assembly_duration_seconds = Histogram(
-    'kashi_feature_assembly_duration_seconds',
+takshashila_feature_assembly_duration_seconds = Histogram(
+    'takshashila_feature_assembly_duration_seconds',
     'Time to assemble all 500K features'
 )
-kashi_predictions_cached_total = Counter(
-    'kashi_predictions_cached_total',
+takshashila_predictions_cached_total = Counter(
+    'takshashila_predictions_cached_total',
     'Number of predictions written to cache'
 )
-kashi_predictions_written_total = Counter(
-    'kashi_predictions_written_total',
+takshashila_predictions_written_total = Counter(
+    'takshashila_predictions_written_total',
     'Number of predictions written to DuckDB'
 )
-kashi_job_failures_total = Counter(
-    'kashi_job_failures_total',
+takshashila_job_failures_total = Counter(
+    'takshashila_job_failures_total',
     'Number of failed jobs',
     ['job_type']
 )
@@ -1095,7 +1095,7 @@ All log messages include `cycle_id` for traceability:
 ### **10.1 Unit Tests**
 
 ```python
-# kashi/tests/test_batch_assembler.py
+# distributed/worker/tests/test_batch_assembler.py
 def test_assemble_all_returns_correct_shape():
     """Feature matrix should be [500K × 64]."""
     assembler = BatchFeatureAssembler(test_config)
@@ -1113,7 +1113,7 @@ def test_assemble_handles_missing_features():
 ### **10.2 Integration Tests**
 
 ```python
-# kashi/tests/test_inference_job.py
+# distributed/worker/tests/test_inference_job.py
 def test_inference_job_end_to_end():
     """Full inference job: load → infer → cache → write."""
     # Use mock DuckDB with 1000 test grids
@@ -1124,7 +1124,7 @@ def test_inference_job_end_to_end():
 ### **10.3 Load Tests**
 
 ```bash
-# kashi/tests/load_test.py
+# distributed/worker/tests/load_test.py
 # Simulate 500K grids with realistic feature loading latency
 # Measure: total duration, cache population timing, memory usage
 ```

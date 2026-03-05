@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime, timezone
 
-from takshashika.core.errors import (
+from takshashila.core.errors import (
     InferenceError, FeatureAssemblyError, ModelInferenceError,
     PersistenceError, TimeoutError, InvalidRequestError
 )

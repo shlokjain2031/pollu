@@ -391,13 +391,13 @@ CREATE TABLE pm25_observations (
 
 **Data**:
 - **Source**: CPCB (Central Pollution Control Board) + OpenAQ API
-- **Update frequency**: Hourly (by Kashi service)
+- **Update frequency**: Hourly (by Takshashila service)
 - **Retention**: 24+ hours (backfill requirement)
 - **Records**: ~31 sensors × 24 hours = ~744 rows
 
 **Assumptions**:
 - Table populated **before service startup**
-- Kashi maintains 24+ hour rolling window
+- Takshashila maintains 24+ hour rolling window
 - ~1-2 new rows per sensor per hour
 
 ### 6.2 Sensor Metadata

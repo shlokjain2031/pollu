@@ -194,20 +194,20 @@ def daily_flush_old_predictions(db: DuckDB):
   db.execute("VACUUM")
 ```
 
-**Trigger**: APScheduler cron job (same Kashi service)
+**Trigger**: APScheduler cron job (same Takshashila service)
 
 ---
 
 ## 4. Cache Invalidation
 
-### 4.1 Invalidation Trigger: Kashi Refresh
+### 4.1 Invalidation Trigger: Takshashila Refresh
 
-When Kashi refreshes feature data (OpenMeteo hourly, satellite every 5-16 days):
+When Takshashila refreshes feature data (OpenMeteo hourly, satellite every 5-16 days):
 
 **Current Strategy**: **TTL-based only** (no event-based invalidation)
 
 ```python
-# Kashi publishes refresh to Redis (for Go server awareness)
+# Takshashila publishes refresh to Redis (for Go server awareness)
 redis_client.publish(f"refresh:openmeteo:2026-01-19T10:00:00Z", {
   "source": "openmeteo",
   "timestamp": "2026-01-19T10:00:00Z",
@@ -216,20 +216,20 @@ redis_client.publish(f"refresh:openmeteo:2026-01-19T10:00:00Z", {
 
 # Python inference service does NOT listen
 # Instead: relies on TTL expiry to invalidate cache
-# Predictions for T computed before Kashi refresh are stale after 1h anyway
+# Predictions for T computed before Takshashila refresh are stale after 1h anyway
 ```
 
 **Rationale**: 
 - Simple (no cache coherence complexity)
 - Predictions auto-expire 1h → guaranteed freshness window
-- Kashi refresh at T:00 → predictions stale at T:01 onward → force recompute
+- Takshashila refresh at T:00 → predictions stale at T:01 onward → force recompute
 
 ### 4.2 Invalidation Semantics
 
 | Scenario | Action |
 |---|---|
-| Kashi fetches meteo at 10:00; Python predicts 10:05 | Cache hit; serve fresh prediction |
-| Kashi fetches meteo at 10:00; user requests at 11:05 | L2 stale (>1h); recompute with new meteo |
+| Takshashila fetches meteo at 10:00; Python predicts 10:05 | Cache hit; serve fresh prediction |
+| Takshashila fetches meteo at 10:00; user requests at 11:05 | L2 stale (>1h); recompute with new meteo |
 | Landsat data refreshed (16-day cycle) | Predictions auto-stale after 1h anyway |
 | Manual cache clear (ops intervention) | Flush entire L1 via admin endpoint |
 
@@ -363,7 +363,7 @@ def get_prediction(grid_id: str, timestamp: str):
 
 ### 7.1 PM2.5 Sensor Data (L2 Only)
 
-**Storage**: `pm25_observations` DuckDB table (updated hourly by Kashi)
+**Storage**: `pm25_observations` DuckDB table (updated hourly by Takshashila)
 
 **No L1 caching** — accessed only during IDW computation for features
 
@@ -693,7 +693,7 @@ Replace Python dict with Redis for:
 ### 14.3 Adaptive TTL
 
 Adjust 1h TTL based on data freshness:
-- If Kashi refresh delayed → extend TTL automatically
+- If Takshashila refresh delayed → extend TTL automatically
 - If user requests >1h old → serve stale + flag
 
 ---

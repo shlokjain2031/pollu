@@ -27,7 +27,7 @@ try:
 except ImportError:
     PoolManager = None
     POOL_AVAILABLE = False
-    logger.warning("Connection pooling not available (kashi.db_pool not found)")
+    logger.warning("Connection pooling not available (db_pool not found)")
 
 # Retry configuration for read operations during concurrent writes
 MAX_READ_RETRIES = 5
@@ -50,7 +50,7 @@ class PersistenceLayer:
         
         Args:
             db_path: Path to DuckDB file
-            pool_manager: Optional PoolManager for connection pooling (from kashi.db_pool)
+            pool_manager: Optional PoolManager for connection pooling (from db_pool)
         """
         self.db_path = Path(db_path)
         self._write_lock = threading.Lock()

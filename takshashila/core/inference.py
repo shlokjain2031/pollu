@@ -28,7 +28,7 @@ try:
 except ImportError:
     PoolManager = None
     POOL_AVAILABLE = False
-    logger.warning("Connection pooling not available (kashi.db_pool not found)")
+    logger.warning("Connection pooling not available (db_pool not found)")
 
 
 class InferenceEngine:
@@ -66,7 +66,7 @@ class InferenceEngine:
                 }
             model_path: Path to LightGBM model.txt
             feature_schema_path: Path to feature_schema.json
-            pool_manager: Optional PoolManager for connection pooling (from kashi.db_pool)
+            pool_manager: Optional PoolManager for connection pooling (from db_pool)
         """
         # Use default paths if not provided
         if db_paths is None:

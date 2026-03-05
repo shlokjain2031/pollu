@@ -1,9 +1,9 @@
-# Kashi Fault Tolerance Implementation Plan
+# Takshashila Fault Tolerance Implementation Plan
 
 **Finalized:** January 24, 2026  
 **Architecture:** Complete re-execution from failure point (no mid-cycle resume)  
 **State Persistence:** DuckDB with minimal cycle metadata  
-**Timeout Strategy:** Hard deadline on Kashi startup per schedule, aggressive restart  
+**Timeout Strategy:** Hard deadline on Takshashila startup per schedule, aggressive restart  
 
 ---
 
@@ -35,7 +35,7 @@ t = 1m:15s → Cycle complete, next cycle scheduled for t=1h
 | InferenceJob crashes mid-execution | Process exit code check | Treat as inference failure, serve stale cache | Use 1-hour-old cache if available, else notify |
 | InferenceJob hangs >90s | Timeout at t=1m:30s | Kill process, don't retry; serve stale | Preserve availability: use old cache |
 | Cache write partial/corrupted | Commit marker missing or checksum fails | Discard entry, recompute if needed | Safe degradation: no partial cache entries |
-| Kashi subprocess crashes repeatedly | Retry count exceeds limit (TBD, likely 2-3) | Timeout remaining until next cycle, close coordinator | Stop API server, notify owner |
+| Takshashila subprocess crashes repeatedly | Retry count exceeds limit (TBD, likely 2-3) | Timeout remaining until next cycle, close coordinator | Stop API server, notify owner |
 
 ---
 
@@ -380,15 +380,15 @@ if not completed by timeout:
     // Notify if cache is >1 hour old
 ```
 
-### 6.3 Kashi Startup Timeout
+### 6.3 Takshashila Startup Timeout
 
 ```
-spawn Kashi subprocess at t = -5m:00s (just before WriterJob)
+spawn Takshashila subprocess at t = -5m:00s (just before WriterJob)
 timeout = check every 10 seconds until t = 0m:00s
 
-if Kashi not ready (health check fails) by t = 0m:00s:
+if Takshashila not ready (health check fails) by t = 0m:00s:
     close coordinator
-    log("FATAL: Kashi failed to start before next scheduled job, coordinator shutting down")
+    log("FATAL: Takshashila failed to start before next scheduled job, coordinator shutting down")
     notify owner
     return 503 on /predict requests
     
@@ -402,7 +402,7 @@ Goal: Maximize availability within hard constraints
 
 WriterJob failures: Restart immediately without backoff (seconds matter)
 InferenceJob failures: Don't restart; serve stale cache (inference is not required)
-Kashi crashes: Restart once per schedule window, then fail hard
+Takshashila crashes: Restart once per schedule window, then fail hard
 /predict timeouts: Serve cache or 503
 
 No exponential backoff; no cascading retries; time is the circuit breaker
@@ -450,7 +450,7 @@ INVARIANT 4: /predict never blocks on background tasks
 
 503 Service Unavailable
   ✗ No valid prediction available (no cache, all cycles failed)
-  ✗ Kashi startup timeout exceeded
+  ✗ Takshashila startup timeout exceeded
   Body: { "error": "No valid predictions available", "last_success": "2026-01-24T14:35:00Z" }
 ```
 
@@ -488,7 +488,7 @@ INVARIANT 4: /predict never blocks on background tasks
 - [ ] Update Orchestrator to use cycle_states
 - [ ] Add WriterJob timeout (60s, aggressive restart)
 - [ ] Add InferenceJob timeout (90s, fail soft)
-- [ ] Add Kashi startup health check timeout
+- [ ] Add Takshashila startup health check timeout
 - [ ] Add process exit code checking
 - [ ] Integrate retry logic from Phase 2b
 - **Effort:** 2 days
@@ -509,7 +509,7 @@ INVARIANT 4: /predict never blocks on background tasks
 - [ ] Add structured logging with cycle_id
 - [ ] Add Prometheus metrics (cycle status, job durations, cache age)
 - [ ] Add health check endpoint (reports last_success_ts, cache status)
-- [ ] Add coordinator shutdown logic (Kashi startup timeout)
+- [ ] Add coordinator shutdown logic (Takshashila startup timeout)
 - [ ] Add owner notification mechanism (email, Slack, etc.)
 - **Effort:** 2 days
 - **Dependencies:** Phase 2a-2e
@@ -585,7 +585,7 @@ Rationale:
 
 ### **9.6 Coordinator Shutdown (Hard Stop)**
 
-If Kashi doesn't start before next scheduled job (t=0m):
+If Takshashila doesn't start before next scheduled job (t=0m):
 ```
 close coordinator
 return 503 on all /predict requests
@@ -649,16 +649,16 @@ t = -4m:30s  → Retry WriterJob (fresh, all 5 sources)
 t = -4m:05s  → All 5 files now valid, cycle proceeds
 ```
 
-### **Scenario 4: Kashi Process Crashes Repeatedly**
+### **Scenario 4: Takshashila Process Crashes Repeatedly**
 
 ```
-t = -5m:00s  → Kashi spawned, starts initializing
-t = -4m:50s  → Kashi crashes (out of memory, segfault, etc.)
+t = -5m:00s  → Takshashila spawned, starts initializing
+t = -4m:50s  → Takshashila crashes (out of memory, segfault, etc.)
 t = -4m:50s  → Coordinator detects crash, restarts aggressively
-t = -4m:45s  → Kashi crashes again
+t = -4m:45s  → Takshashila crashes again
 t = -4m:40s  → Coordinator detects, restarts again
 ... (repeats)
-t = 0m:00s   → Health check: Kashi still not ready
+t = 0m:00s   → Health check: Takshashila still not ready
 t = 0m:00s   → HARD STOP
                → Close coordinator
                → All /predict return 503
@@ -679,8 +679,8 @@ t = 0m:00s   → HARD STOP
 - [x] /predict never computes on-demand; always cache or 503
 - [x] /predict serves stale cache if ≤1 hour old
 - [x] /predict returns 503 if cache >2 hours old
-- [x] Kashi startup health check with hard deadline at t=0m
-- [x] Coordinator shutdown if Kashi doesn't start by next scheduled job
+- [x] Takshashila startup health check with hard deadline at t=0m
+- [x] Coordinator shutdown if Takshashila doesn't start by next scheduled job
 - [x] Operator notification on coordinator shutdown
 - [x] All failures logged with cycle_id for traceability
 - [x] No mid-cycle resume; all failures trigger fresh re-execution

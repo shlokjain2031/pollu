@@ -32,12 +32,12 @@ class TestInferenceJobWorkerSetup:
         assert logger.name == "takshashila.distributed.worker.inference_job_worker"
     
     def test_batch_size_env_variable(self):
-        """Test KASHI_BATCH_SIZE environment variable."""
+        """Test BATCH_SIZE environment variable."""
         import os
         
         # Test default
-        if "KASHI_BATCH_SIZE" in os.environ:
-            del os.environ["KASHI_BATCH_SIZE"]
+        if "BATCH_SIZE" in os.environ:
+            del os.environ["BATCH_SIZE"]
         
         from importlib import reload
         import takshashila.distributed.worker.inference_job_worker as worker_module
@@ -46,12 +46,12 @@ class TestInferenceJobWorkerSetup:
         assert hasattr(worker_module, 'BATCH_SIZE')
         
         # Test custom value
-        os.environ["KASHI_BATCH_SIZE"] = "50"
+        os.environ["BATCH_SIZE"] = "50"
         reload(worker_module)
         assert worker_module.BATCH_SIZE == 50
         
         # Cleanup
-        del os.environ["KASHI_BATCH_SIZE"]
+        del os.environ["BATCH_SIZE"]
 
 
 class TestArgumentParsing:
@@ -141,7 +141,7 @@ class TestBatchPrediction:
     def test_batch_with_configurable_size(self, mock_queue_class, mock_redis, mock_engine_class):
         """Test batch processing with different batch sizes."""
         import os
-        os.environ["KASHI_BATCH_SIZE"] = "100"
+        os.environ["BATCH_SIZE"] = "100"
         
         # Setup mocks
         mock_engine = MagicMock()
@@ -179,7 +179,7 @@ class TestBatchPrediction:
         assert mock_engine.predict_batch.call_count == 3
         
         # Cleanup
-        del os.environ["KASHI_BATCH_SIZE"]
+        del os.environ["BATCH_SIZE"]
 
 
 class TestCaching:
@@ -360,7 +360,7 @@ class TestBatchProcessing:
     def test_process_full_grid_range(self, mock_queue_class, mock_redis, mock_engine_class):
         """Test processing a full range of grids."""
         import os
-        os.environ["KASHI_BATCH_SIZE"] = "10"
+        os.environ["BATCH_SIZE"] = "10"
         
         mock_engine = MagicMock()
         mock_engine_class.return_value = mock_engine
@@ -401,7 +401,7 @@ class TestBatchProcessing:
         assert mock_engine.predict_batch.call_count == 10
         
         # Cleanup
-        del os.environ["KASHI_BATCH_SIZE"]
+        del os.environ["BATCH_SIZE"]
 
 
 class TestTimestampHandling:

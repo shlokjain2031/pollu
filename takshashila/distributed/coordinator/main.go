@@ -61,7 +61,7 @@ func NewOrchestratorManager() *OrchestratorManager {
 		}
 	}
 
-	orchURL := os.Getenv("KASHI_ORCHESTRATOR_URL")
+	orchURL := os.Getenv("ORCHESTRATOR_URL")
 	if orchURL == "" {
 		orchURL = "http://localhost:9999"
 	}
@@ -417,7 +417,7 @@ func NewCoordinator(config *Config) (*Coordinator, error) {
 	}
 
 	// NEW: Initialize Orchestrator HTTP client
-	orchestratorURL := os.Getenv("KASHI_ORCHESTRATOR_URL")
+	orchestratorURL := os.Getenv("ORCHESTRATOR_URL")
 	if orchestratorURL == "" {
 		orchestratorURL = "http://localhost:9999" // Default
 	}

@@ -1,5 +1,5 @@
 """
-Connection pooling for DuckDB files in Kashi.
+Connection pooling for DuckDB files in Takshashila.
 
 Part 1 of 3-part implementation:
 - 5 independent pools (meteo, pm25_observations, landsat8, sentinel2, predictions)
@@ -211,7 +211,7 @@ class DuckDBConnectionPool:
 
 class PoolManager:
     """
-    Manage all pools across Kashi.
+    Manage all pools across Takshashila.
     
     Pools:
     - grid: 2 connections (static data, rarely accessed)

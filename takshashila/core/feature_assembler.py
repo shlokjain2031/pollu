@@ -45,7 +45,7 @@ try:
 except ImportError:
     PoolManager = None
     POOL_AVAILABLE = False
-    logger.warning("Connection pooling not available (kashi.db_pool not found)")
+    logger.warning("Connection pooling not available (db_pool not found)")
 
 # Freshness thresholds (in seconds)
 FRESHNESS_THRESHOLDS = {
@@ -86,7 +86,7 @@ class FeatureAssembler:
                     "sentinel2": "/path/to/sentinel2.duckdb"
                 }
             feature_schema: Loaded feature_schema.json dict
-            pool_manager: Optional PoolManager for connection pooling (from kashi.db_pool)
+            pool_manager: Optional PoolManager for connection pooling (from db_pool)
         """
         self.db_paths = {k: Path(v) for k, v in db_paths.items()}
         self.required_features = feature_schema["feature_list"]
@@ -299,8 +299,7 @@ class FeatureAssembler:
             # Thread 1: PM2.5 observations
             # Thread 2: Meteorological data
             # Thread 3: Satellite data (Landsat8 + Sentinel2)
-            # Configurable via env: KASHI_FEATURE_THREADS (default: 3)
-            max_workers = int(os.environ.get("KASHI_FEATURE_THREADS", "3"))
+            max_workers = 3
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit parallel tasks
                 pm25_future = executor.submit(self._compute_pm25_lags_batch, grids_to_compute, timestamp_hour)
