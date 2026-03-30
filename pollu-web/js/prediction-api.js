@@ -11,7 +11,7 @@
 // Use localhost:8080 for local development, or set to cloudflare tunnel for production
 const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:8080'
-    : 'https://tries-satellite-extra-configuring.trycloudflare.com';
+    : 'https://treated-fred-encountered-supplied.trycloudflare.com';
 
 // Grid data cache
 let gridData = null;
