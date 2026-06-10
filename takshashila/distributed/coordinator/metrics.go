@@ -5,370 +5,104 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// Custom histogram buckets aligned to 1s SLO
-// Tightly resolves sub-100ms cache paths and 1s timeout edge
-var histogramBuckets = []float64{0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25}
+var globalMetrics *Metrics
 
-// Metrics holds all Prometheus metrics for the coordinator
+// Buckets resolve sub-100ms cache paths and the multi-second inference edge.
+var histogramBuckets = []float64{0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0}
+
+// Metrics holds all Prometheus metrics for the coordinator.
 type Metrics struct {
-	// Request Metrics
-	// requests_total: Counter with path={cache|dedup|compute}, status={success|error}
+	// requests_total: path={cache|redis|dedup|inference|resolve|validation}, status={success|error}
 	RequestsTotal *prometheus.CounterVec
+	ErrorsTotal   *prometheus.CounterVec // error_type, model_version, feature_version
 
-	// Latency Metrics (separate histograms per path, success-only)
-	CacheHitLatencySeconds      prometheus.Histogram // Hit path only
-	DedupWaitLatencySeconds     prometheus.Histogram // Follower wait time
-	LeaderComputeLatencySeconds prometheus.Histogram // Leader computation
-	RequestLatencySeconds       prometheus.Histogram // All requests end-to-end
+	RequestLatencySeconds       prometheus.Histogram
+	CacheHitLatencySeconds      prometheus.Histogram
+	DedupWaitLatencySeconds     prometheus.Histogram
+	LeaderComputeLatencySeconds prometheus.Histogram
 
-	// Cache Metrics
-	CacheHitsTotal     *prometheus.CounterVec // Labels: cache_result
-	CacheMissesTotal   *prometheus.CounterVec // Labels: cache_result
-	CacheEvictionTotal *prometheus.CounterVec // Labels: reason
-	CacheEvictions     prometheus.Counter     // Total evictions (aggregate)
+	CacheHitsTotal     *prometheus.CounterVec
+	CacheMissesTotal   *prometheus.CounterVec
+	CacheEvictionTotal *prometheus.CounterVec
 	CacheEntriesGauge  prometheus.Gauge
 
-	// Async Write Metrics (Phase 1 prediction cache)
-	CacheWriteSuccessTotal   prometheus.Counter
-	CacheWriteFailureTotal   prometheus.Counter
-	CacheWriteRetryTotal     prometheus.Counter
-	CacheWriteLatencySeconds prometheus.Histogram
-
-	// Dedup Metrics
 	DedupLeadersTotal          prometheus.Counter
 	DedupFollowersTotal        prometheus.Counter
 	DedupCleanupTotal          prometheus.Counter
 	DedupActiveEntriesGauge    prometheus.Gauge
-	InflightLeaderComputations prometheus.Gauge // Current leaders executing
-
-	// Deduped Requests Counter (followers only)
-	DedupedRequestsTotal prometheus.Counter
-
-	// Error Metrics
-	ErrorsTotal *prometheus.CounterVec // Labels: error_type
-
-	// Worker Pool & Queue Metrics
-	QueueDepthGauge          prometheus.Gauge
-	QueueWaitLatencySeconds  prometheus.Histogram
-	JobsQueuedTotal          prometheus.Counter
-	JobsCompletedTotal       prometheus.Counter
-	JobsTimedOutTotal        prometheus.Counter
-	WorkersActiveGauge       prometheus.Gauge
-	WorkerRestartsTotal      prometheus.Counter
-	WorkerErrorsTotal        prometheus.Counter
-	WorkerJobDurationSeconds prometheus.Histogram
-
-	// Health Check Metrics (Part 1)
-	WorkerHealthStatus              *prometheus.GaugeVec     // Labels: worker_id (1=Healthy, 0=Unhealthy)
-	WorkerHealthChecksTotal         *prometheus.CounterVec   // Labels: worker_id
-	WorkerHealthCheckFailuresTotal  *prometheus.CounterVec   // Labels: worker_id
-	WorkerHealthCheckLatencySeconds *prometheus.HistogramVec // Labels: worker_id
+	DedupedRequestsTotal       prometheus.Counter
+	InflightLeaderComputations prometheus.Gauge
 }
 
-// NewMetrics creates and registers all Prometheus metrics
+// NewMetrics creates and registers all Prometheus metrics.
+// Must be called at most once per process (prometheus panics on re-registration).
 func NewMetrics() *Metrics {
-	m := &Metrics{
-		// Request metrics with path, status, model_version, feature_version labels
-		// Item 26: model_version and feature_version allow tracking model/feature rollouts
-		// Note: Low-cardinality labels only (typically 2-3 active model versions)
-		RequestsTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "requests_total",
-				Help: "Total prediction requests by path (cache|dedup|compute), status (success|error), model_version, and feature_version",
-			},
-			[]string{"path", "status", "model_version", "feature_version"},
-		),
+	return &Metrics{
+		RequestsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "requests_total",
+			Help: "Prediction requests by serving path, status, model_version, feature_version",
+		}, []string{"path", "status", "model_version", "feature_version"}),
 
-		// Latency histograms - separate per path, success-only
-		CacheHitLatencySeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "cache_hit_latency_seconds",
-				Help:    "Cache hit latency (cache_result=hit path only)",
-				Buckets: histogramBuckets,
-			},
-		),
+		ErrorsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "errors_total",
+			Help: "Errors by type, model_version, feature_version",
+		}, []string{"error_type", "model_version", "feature_version"}),
 
-		DedupWaitLatencySeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "dedup_wait_latency_seconds",
-				Help:    "Follower wait time from join to completion",
-				Buckets: histogramBuckets,
-			},
-		),
+		RequestLatencySeconds: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name: "request_latency_seconds", Help: "End-to-end /predict latency", Buckets: histogramBuckets,
+		}),
+		CacheHitLatencySeconds: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name: "cache_hit_latency_seconds", Help: "Result cache hit latency", Buckets: histogramBuckets,
+		}),
+		DedupWaitLatencySeconds: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name: "dedup_wait_latency_seconds", Help: "Follower wait time from join to completion", Buckets: histogramBuckets,
+		}),
+		LeaderComputeLatencySeconds: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name: "leader_compute_latency_seconds", Help: "Leader inference call duration", Buckets: histogramBuckets,
+		}),
 
-		LeaderComputeLatencySeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "leader_compute_latency_seconds",
-				Help:    "Leader computation time (from acquire to result)",
-				Buckets: histogramBuckets,
-			},
-		),
+		CacheHitsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_hits_total", Help: "Result cache hits",
+		}, []string{"cache_result"}),
+		CacheMissesTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_misses_total", Help: "Result cache misses",
+		}, []string{"cache_result"}),
+		CacheEvictionTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_evictions_total", Help: "Result cache evictions by reason",
+		}, []string{"reason"}),
+		CacheEntriesGauge: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_entries", Help: "Current result cache entries",
+		}),
 
-		RequestLatencySeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "request_latency_seconds",
-				Help:    "End-to-end request latency (all outcomes)",
-				Buckets: histogramBuckets,
-			},
-		),
-
-		// Cache metrics
-		CacheHitsTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "cache_hits_total",
-				Help: "Cache hits by result type",
-			},
-			[]string{"cache_result"},
-		),
-
-		CacheMissesTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "cache_misses_total",
-				Help: "Cache misses",
-			},
-			[]string{"cache_result"},
-		),
-
-		CacheEvictionTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "cache_evictions_total",
-				Help: "Cache evictions by reason (ttl_expired, manual_invalidate)",
-			},
-			[]string{"reason"},
-		),
-
-		CacheEvictions: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "cache_evictions",
-				Help: "Total cache evictions (aggregate)",
-			},
-		),
-
-		CacheEntriesGauge: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "cache_entries",
-				Help: "Current number of entries in the result cache",
-			},
-		),
-
-		// Async write metrics (Phase 1 prediction cache)
-		CacheWriteSuccessTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "cache_write_success_total",
-				Help: "Total successful async DB writes from cache",
-			},
-		),
-
-		CacheWriteFailureTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "cache_write_failure_total",
-				Help: "Total failed async DB writes from cache",
-			},
-		),
-
-		CacheWriteRetryTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "cache_write_retry_total",
-				Help: "Total async DB write retry attempts",
-			},
-		),
-
-		CacheWriteLatencySeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "cache_write_latency_seconds",
-				Help:    "Async DB write latency from cache",
-				Buckets: histogramBuckets,
-			},
-		),
-
-		// Dedup metrics
-		DedupLeadersTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "dedup_leaders_total",
-				Help: "Total leader acquisitions",
-			},
-		),
-
-		DedupFollowersTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "dedup_followers_total",
-				Help: "Total follower joinings",
-			},
-		),
-
-		DedupCleanupTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "dedup_cleanup_total",
-				Help: "Total dedup entries cleaned up after completion",
-			},
-		),
-
-		DedupActiveEntriesGauge: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "dedup_active_entries",
-				Help: "Current number of active dedup entries in flight",
-			},
-		),
-
-		InflightLeaderComputations: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "inflight_leader_computations",
-				Help: "Current number of leader computations in flight",
-			},
-		),
-
-		// Deduped requests (followers only)
-		DedupedRequestsTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "deduped_requests_total",
-				Help: "Total requests that were deduplicated (followers)",
-			},
-		),
-
-		// Error metrics with error_type, model_version, feature_version labels
-		// Item 26: model_version and feature_version for debugging model/feature issues
-		ErrorsTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "errors_total",
-				Help: "Total errors by type, model_version, and feature_version",
-			},
-			[]string{"error_type", "model_version", "feature_version"},
-		),
-
-		// Worker pool & queue metrics
-		QueueDepthGauge: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "queue_depth",
-				Help: "Current number of jobs in the queue",
-			},
-		),
-
-		QueueWaitLatencySeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "queue_wait_latency_seconds",
-				Help:    "Time job waits in queue before worker picks it up",
-				Buckets: histogramBuckets,
-			},
-		),
-
-		JobsQueuedTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "jobs_queued_total",
-				Help: "Total jobs queued",
-			},
-		),
-
-		JobsCompletedTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "jobs_completed_total",
-				Help: "Total jobs completed successfully",
-			},
-		),
-
-		JobsTimedOutTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "jobs_timed_out_total",
-				Help: "Total jobs that exceeded execution deadline (Item 25, distinct from worker_restarts_total)",
-			},
-		),
-
-		WorkersActiveGauge: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "workers_active",
-				Help: "Current number of active workers (Item 25)",
-			},
-		),
-
-		// Item 25: worker_restarts_total increments ONLY on crash/health-check failure,
-		// NOT on job-level timeouts (those are tracked in jobs_timed_out_total)
-		WorkerRestartsTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "worker_restarts_total",
-				Help: "Total worker process restarts due to crash or health-check failure (Item 25)",
-			},
-		),
-
-		// Item 25: worker_errors_total counts errors returned by worker (inference exceptions, etc.)
-		// Does NOT count crashes (those are worker_restarts_total)
-		WorkerErrorsTotal: promauto.NewCounter(
-			prometheus.CounterOpts{
-				Name: "worker_errors_total",
-				Help: "Total worker errors (non-crash exceptions) (Item 25)",
-			},
-		),
-
-		WorkerJobDurationSeconds: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "worker_job_duration_seconds",
-				Help:    "End-to-end job processing time in worker",
-				Buckets: histogramBuckets,
-			},
-		),
-
-		// Health Check Metrics (Part 1)
-		WorkerHealthStatus: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "worker_health_status",
-				Help: "Current health status of worker (1=Healthy, 0=Unhealthy)",
-			},
-			[]string{"worker_id"},
-		),
-
-		WorkerHealthChecksTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "worker_health_checks_total",
-				Help: "Total health checks performed on worker",
-			},
-			[]string{"worker_id"},
-		),
-
-		WorkerHealthCheckFailuresTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "worker_health_check_failures_total",
-				Help: "Total health check failures for worker",
-			},
-			[]string{"worker_id"},
-		),
-
-		WorkerHealthCheckLatencySeconds: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "worker_health_check_latency_seconds",
-				Help:    "Health check request/response latency",
-				Buckets: histogramBuckets,
-			},
-			[]string{"worker_id"},
-		),
-	}
-
-	return m
-}
-
-// MetricsWithLabels wraps metrics (for backwards compatibility with tests)
-type MetricsWithLabels struct {
-	*Metrics
-}
-
-// NewMetricsWithLabels creates metrics with label support
-func NewMetricsWithLabels() *MetricsWithLabels {
-	return &MetricsWithLabels{
-		Metrics: NewMetrics(),
+		DedupLeadersTotal: promauto.NewCounter(prometheus.CounterOpts{
+			Name: "dedup_leaders_total", Help: "Total leader acquisitions",
+		}),
+		DedupFollowersTotal: promauto.NewCounter(prometheus.CounterOpts{
+			Name: "dedup_followers_total", Help: "Total follower joins",
+		}),
+		DedupCleanupTotal: promauto.NewCounter(prometheus.CounterOpts{
+			Name: "dedup_cleanup_total", Help: "Total dedup entries cleaned up",
+		}),
+		DedupActiveEntriesGauge: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "dedup_active_entries", Help: "In-flight dedup entries",
+		}),
+		DedupedRequestsTotal: promauto.NewCounter(prometheus.CounterOpts{
+			Name: "deduped_requests_total", Help: "Requests served as dedup followers",
+		}),
+		InflightLeaderComputations: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "inflight_leader_computations", Help: "In-flight kashi calls",
+		}),
 	}
 }
 
-// CacheResult enum for label values
+// Label values for cache metrics.
 const (
 	CacheResultHit  = "hit"
 	CacheResultMiss = "miss"
 )
 
-// EvictionReason enum for label values
+// Label values for eviction reasons.
 const (
 	EvictionReasonTTLExpired       = "ttl_expired"
 	EvictionReasonManualInvalidate = "manual_invalidate"
-)
-
-// DedupRole enum for label values
-const (
-	DedupRoleLeader   = "leader"
-	DedupRoleFollower = "follower"
 )

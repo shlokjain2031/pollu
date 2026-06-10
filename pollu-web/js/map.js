@@ -1,14 +1,14 @@
-// Initialize map with Mumbai bounding box
-// BBOX: "72.7763,18.8939,72.9797,19.2701"
-const southWest = L.latLng(18.8939, 72.7763);
-const northEast = L.latLng(19.2701, 72.9797);
+// Initialize map with Delhi bounding box (matches the backend grid)
+// BBOX: "76.8318,28.3911,77.3887,28.9094"
+const southWest = L.latLng(28.3911, 76.8318);
+const northEast = L.latLng(28.9094, 77.3887);
 const bounds = L.latLngBounds(southWest, northEast);
 
 const map = L.map('map', {
     maxBounds: bounds,
     maxBoundsViscosity: 1.0,
-    minZoom: 12
-}).fitBounds(bounds, { maxZoom: 13 });
+    minZoom: 10
+}).fitBounds(bounds, { maxZoom: 12 });
 
 // Add OpenStreetMap tiles
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -41,12 +41,6 @@ L.rectangle([[bounds.getSouth(), -180], [bounds.getNorth(), bounds.getWest()]], 
 // East overlay
 L.rectangle([[bounds.getSouth(), bounds.getEast()], [bounds.getNorth(), 180]], overlayStyle).addTo(map);
 
-// Load Mumbai outer boundary only
-fetch('data/mumbai_boundary.geojson')
-    .then(response => response.json())
-    .catch(() => {
-        // Boundary data is optional; ignore loading failures
-    });
 
 // Function to place marker at location
 function placeMarker(lat, lon, locationName = null) {
@@ -83,14 +77,17 @@ function placeMarker(lat, lon, locationName = null) {
     getPM25ForLocation(lat, lon)
         .then(result => {
             const pm25Value = result.pm25;
-            
+
             // Update PM2.5 display with actual value
             updatePM25Display(pm25Value);
         })
         .catch(error => {
-            // Show error message in PM2.5 info box
-            document.getElementById('pm25-value').innerHTML = `<span style="color: #d32f2f;">Failed to fetch data</span>`;
-            document.getElementById('pm25-category').innerHTML = `<span style="color: #d32f2f;">Please try again</span>`;
+            const headline = error.errorType === 'NotInCoverage'
+                ? 'Outside the Delhi coverage area'
+                : 'Could not fetch prediction';
+            const hint = error.retryable ? 'Temporary — please try again shortly' : (error.message || 'Please try a point within Delhi');
+            document.getElementById('pm25-value').innerHTML = `<span style="color: #d32f2f;">${headline}</span>`;
+            document.getElementById('pm25-category').innerHTML = `<span style="color: #d32f2f;">${hint}</span>`;
         });
     
     // Clear search results
@@ -160,12 +157,11 @@ if (!localStorage.getItem('pollu-visited')) {
 
 // Handle random location button
 randomLocationBtn.addEventListener('click', () => {
-    // Generate random coordinates within central Mumbai (land area only)
-    // Constrained to a smaller central area to avoid water/boundaries
-    const minLat = 19.05;
-    const maxLat = 19.20;
-    const minLon = 72.82;
-    const maxLon = 72.95;
+    // Generate random coordinates within central Delhi
+    const minLat = 28.50;
+    const maxLat = 28.75;
+    const minLon = 77.05;
+    const maxLon = 77.30;
     
     const randomLat = minLat + Math.random() * (maxLat - minLat);
     const randomLon = minLon + Math.random() * (maxLon - minLon);
@@ -211,8 +207,8 @@ searchInput.addEventListener('input', (e) => {
     
     // Debounce search
     searchTimeout = setTimeout(() => {
-        // Search within Mumbai bbox
-        const bbox = '72.7763,18.8939,72.9797,19.2701';
+        // Search within the Delhi bbox
+        const bbox = '76.8318,28.3911,77.3887,28.9094';
         const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&bounded=1&viewbox=${bbox}&limit=5&accept-language=en`;
         
         // Nominatim has CORS enabled, so no proxy needed

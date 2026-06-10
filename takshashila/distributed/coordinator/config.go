@@ -1,38 +1,61 @@
 package main
 
-import "time"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
-// Config holds all configuration for the Phase 2a coordinator
+// Config holds coordinator configuration, read from environment with defaults.
 type Config struct {
-	// HTTP server
 	ServerPort string
 
-	// Worker management
-	NumWorkers       int
-	PythonWorkerPath string
-
-	// Queue settings
-	QueueCapacity int
-
-	// Timeouts (for Phase 2b, but defined now)
-	RequestTimeout time.Duration
-
-	// NEW: Redis configuration
 	RedisAddr string
+	RedisTTL  time.Duration // TTL for predictions written to Redis
 
-	// NEW: DuckDB PM2.5 observations path
-	DuckDBPredictionsPath string
+	InferenceURL           string        // kashi inference service base URL
+	InferenceTimeout       time.Duration // per-call budget for kashi requests
+	MaxConcurrentInference int           // bound on in-flight kashi calls
+
+	RequestTimeout time.Duration // total budget for one /predict request
+	ResultCacheTTL time.Duration // in-memory result cache TTL
 }
 
-// DefaultConfig returns hardcoded defaults for Phase 2a
+func envStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func envDur(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// DefaultConfig returns the production configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		ServerPort:            "8080",
-		NumWorkers:            0, // Phase 3: on-demand inference via orchestrator, no local workers needed
-		PythonWorkerPath:      "",
-		QueueCapacity:         100,
-		RequestTimeout:        1 * time.Second,
-		RedisAddr:             "localhost:6379",
-		DuckDBPredictionsPath: "takshashila/duckdb/pm25_observations.duckdb",
+		ServerPort:             envStr("PORT", "8080"),
+		RedisAddr:              envStr("REDIS_ADDR", "localhost:6379"),
+		RedisTTL:               envDur("REDIS_TTL", time.Hour),
+		InferenceURL:           envStr("KASHI_URL", "http://localhost:9999"),
+		InferenceTimeout:       envDur("INFERENCE_TIMEOUT", 10*time.Second),
+		MaxConcurrentInference: envInt("MAX_CONCURRENT_INFERENCE", 256),
+		RequestTimeout:         envDur("REQUEST_TIMEOUT", 15*time.Second),
+		ResultCacheTTL:         envDur("RESULT_CACHE_TTL", 5*time.Minute),
 	}
 }

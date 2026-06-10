@@ -5,12 +5,10 @@ import (
 	"time"
 )
 
-var globalMetrics *MetricsWithLabels
-
 // CacheKey uniquely identifies a cached prediction
 // MUST match DedupKey exactly (no request_id)
 type CacheKey struct {
-	GridID         string
+	Location       string // canonical "lat,lon"
 	TimestampHour  string
 	ModelVersion   string
 	FeatureVersion string
@@ -18,7 +16,7 @@ type CacheKey struct {
 
 // String returns a stable string representation for map keys
 func (ck CacheKey) String() string {
-	return ck.GridID + ":" + ck.TimestampHour + ":" + ck.ModelVersion + ":" + ck.FeatureVersion
+	return ck.Location + ":" + ck.TimestampHour + ":" + ck.ModelVersion + ":" + ck.FeatureVersion
 }
 
 // CacheEntry holds a cached prediction or error with TTL

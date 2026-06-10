@@ -31,12 +31,12 @@ func TestErrorInvalidRequest(t *testing.T) {
 	}
 }
 
-// Test 2: GridNotFound error properties
-func TestErrorGridNotFound(t *testing.T) {
-	err := NewGridNotFoundError("g99999999")
+// Test 2: NotInCoverage error properties
+func TestErrorNotInCoverage(t *testing.T) {
+	err := NewNotInCoverageError("g99999999")
 
-	if err.Type() != ErrorTypeGridNotFound {
-		t.Errorf("Expected type GridNotFound, got %v", err.Type())
+	if err.Type() != ErrorTypeNotInCoverage {
+		t.Errorf("Expected type NotInCoverage, got %v", err.Type())
 	}
 
 	if err.HTTPStatus() != 404 {
@@ -44,11 +44,11 @@ func TestErrorGridNotFound(t *testing.T) {
 	}
 
 	if err.Retryable() {
-		t.Error("GridNotFound should not be retryable")
+		t.Error("NotInCoverage should not be retryable")
 	}
 
 	if !err.Cacheable() {
-		t.Error("GridNotFound should be cacheable")
+		t.Error("NotInCoverage should be cacheable")
 	}
 
 	if err.CacheTTL() != 5*time.Minute {
@@ -165,7 +165,7 @@ func TestClassifyErrorTimeout(t *testing.T) {
 
 // Test 8: ClassifyError for already classified error
 func TestClassifyErrorPreserves(t *testing.T) {
-	original := NewGridNotFoundError("g00000001")
+	original := NewNotInCoverageError("g00000001")
 
 	classified := ClassifyError(original)
 
@@ -173,8 +173,8 @@ func TestClassifyErrorPreserves(t *testing.T) {
 		t.Error("ClassifyError should preserve PredictionError as-is")
 	}
 
-	if classified.Type() != ErrorTypeGridNotFound {
-		t.Errorf("Expected GridNotFound, got %v", classified.Type())
+	if classified.Type() != ErrorTypeNotInCoverage {
+		t.Errorf("Expected NotInCoverage, got %v", classified.Type())
 	}
 }
 
@@ -215,12 +215,12 @@ func TestErrorResponseRetryable(t *testing.T) {
 
 // Test 10: ErrorResponse structure for non-retryable error
 func TestErrorResponseNonRetryable(t *testing.T) {
-	err := NewGridNotFoundError("g99999999")
+	err := NewNotInCoverageError("g99999999")
 
 	resp := NewErrorResponse(err)
 
-	if resp.ErrorType != "GridNotFound" {
-		t.Errorf("Expected error_type=GridNotFound, got %s", resp.ErrorType)
+	if resp.ErrorType != "NotInCoverage" {
+		t.Errorf("Expected error_type=NotInCoverage, got %s", resp.ErrorType)
 	}
 
 	if resp.HTTPStatus != 404 {
@@ -231,31 +231,31 @@ func TestErrorResponseNonRetryable(t *testing.T) {
 		t.Error("Expected retryable=false")
 	}
 
-	// GridNotFound is cacheable but non-retryable, so no retry_after
+	// NotInCoverage is cacheable but non-retryable, so no retry_after
 	if resp.RetryAfter != nil {
 		t.Error("Expected retry_after to be nil for non-retryable error")
 	}
 }
 
-// Test 11: Cache stores GridNotFound with 5 minute TTL
-func TestCacheErrorGridNotFound(t *testing.T) {
+// Test 11: Cache stores NotInCoverage with 5 minute TTL
+func TestCacheErrorNotInCoverage(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key := CacheKey{
-		GridID:         "g99999999",
+		Location:       "g99999999",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
 	}
 
-	err := NewGridNotFoundError("g99999999")
+	err := NewNotInCoverageError("g99999999")
 	cache.SetError(key, err)
 
 	// Retrieve from cache
 	pm25, cachedErr, hit := cache.Get(key)
 
 	if !hit {
-		t.Fatal("Expected cache hit for GridNotFound error")
+		t.Fatal("Expected cache hit for NotInCoverage error")
 	}
 
 	if pm25 != 0 {
@@ -266,8 +266,8 @@ func TestCacheErrorGridNotFound(t *testing.T) {
 		t.Fatal("Expected cached error, got nil")
 	}
 
-	if cachedErr.Type() != ErrorTypeGridNotFound {
-		t.Errorf("Expected GridNotFound error, got %v", cachedErr.Type())
+	if cachedErr.Type() != ErrorTypeNotInCoverage {
+		t.Errorf("Expected NotInCoverage error, got %v", cachedErr.Type())
 	}
 
 	// Verify TTL is 5 minutes
@@ -281,7 +281,7 @@ func TestCacheErrorNotCached(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -309,7 +309,7 @@ func TestDedupErrorPropagation(t *testing.T) {
 	dedup := NewDeduplicator()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -371,27 +371,11 @@ func TestDedupErrorPropagation(t *testing.T) {
 
 // Test 14: Timeout error converts to ComputationTimeout
 func TestTimeoutClassification(t *testing.T) {
-	mc := NewMockCoordinator(func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		// Simulate long computation
-		<-ctx.Done() // Block until context is cancelled
-		return 0, ctx.Err()
-	})
-
-	// Create context with 100ms timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
+	<-ctx.Done()
 
-	gridID := "g00000001"
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	_, err := mc.executePrediction(ctx, gridID, timestampHour, "req-timeout")
-
-	if err == nil {
-		t.Fatal("Expected timeout error, got nil")
-	}
-
-	// Classify the error
-	predErr := ClassifyError(err)
+	predErr := ClassifyError(ctx.Err())
 
 	if predErr.Type() != ErrorTypeComputationTimeout {
 		t.Errorf("Expected ComputationTimeout, got %v", predErr.Type())
@@ -407,7 +391,7 @@ func TestDataMissingCacheTTL(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -442,7 +426,7 @@ func TestComputationTimeoutCacheTTL(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -467,7 +451,7 @@ func TestLeaderTimeoutUnblocksFollowers(t *testing.T) {
 	dedup := NewDeduplicator()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -528,73 +512,5 @@ func TestLeaderTimeoutUnblocksFollowers(t *testing.T) {
 
 	if predErr.Type() != ErrorTypeComputationTimeout {
 		t.Errorf("Expected ComputationTimeout, got %v", predErr.Type())
-	}
-}
-
-// Test 18: convertWorkerError maps error types correctly
-func TestConvertWorkerError(t *testing.T) {
-	c := &Coordinator{}
-
-	testCases := []struct {
-		name         string
-		result       WorkerResult
-		expectedType ErrorType
-		expectedHTTP int
-	}{
-		{
-			name:         "InvalidRequest",
-			result:       WorkerResult{Error: "Invalid input", ErrorType: "InvalidRequest"},
-			expectedType: ErrorTypeInvalidRequest,
-			expectedHTTP: 400,
-		},
-		{
-			name:         "GridNotFound",
-			result:       WorkerResult{Error: "Grid not found", ErrorType: "GridNotFound"},
-			expectedType: ErrorTypeGridNotFound,
-			expectedHTTP: 404,
-		},
-		{
-			name:         "DataMissing",
-			result:       WorkerResult{Error: "Data missing", ErrorType: "DataMissing"},
-			expectedType: ErrorTypeDataMissing,
-			expectedHTTP: 503,
-		},
-		{
-			name:         "WorkerError",
-			result:       WorkerResult{Error: "Worker failed", ErrorType: "WorkerError"},
-			expectedType: ErrorTypeWorkerError,
-			expectedHTTP: 500,
-		},
-		{
-			name:         "Unknown",
-			result:       WorkerResult{Error: "Unknown error", ErrorType: "Unknown"},
-			expectedType: ErrorTypeUnknown,
-			expectedHTTP: 500,
-		},
-		{
-			name:         "UnknownType",
-			result:       WorkerResult{Error: "Some error", ErrorType: ""},
-			expectedType: ErrorTypeUnknown,
-			expectedHTTP: 500,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := c.convertWorkerError(tc.result)
-
-			predErr, ok := err.(PredictionError)
-			if !ok {
-				t.Fatalf("Expected PredictionError, got %T", err)
-			}
-
-			if predErr.Type() != tc.expectedType {
-				t.Errorf("Expected type %v, got %v", tc.expectedType, predErr.Type())
-			}
-
-			if predErr.HTTPStatus() != tc.expectedHTTP {
-				t.Errorf("Expected HTTP %d, got %d", tc.expectedHTTP, predErr.HTTPStatus())
-			}
-		})
 	}
 }

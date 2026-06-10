@@ -1,224 +1,35 @@
 package main
 
 import (
+	"os"
 	"testing"
-	"time"
 )
 
-// TestHistogramBucketsCustom verifies histogram uses SLO-aligned buckets
-func TestHistogramBucketsCustom(t *testing.T) {
-	// Verify custom buckets are used
-	expectedBuckets := []float64{0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25}
-
-	// Check that bucket order matches expectations
-	if len(expectedBuckets) != len(histogramBuckets) {
-		t.Errorf("expected %d buckets, got %d", len(expectedBuckets), len(histogramBuckets))
-	}
-
-	for i, expected := range expectedBuckets {
-		if i >= len(histogramBuckets) {
-			t.Errorf("bucket %d missing", i)
-			break
-		}
-		if histogramBuckets[i] != expected {
-			t.Errorf("bucket %d: expected %f, got %f", i, expected, histogramBuckets[i])
-		}
-	}
+// TestMain initializes the shared metrics once: prometheus panics on
+// duplicate registration, so tests must not call NewMetrics themselves.
+func TestMain(m *testing.M) {
+	globalMetrics = NewMetrics()
+	os.Exit(m.Run())
 }
 
-// TestCacheHitLatencyHistogram verifies cache hit latency is recorded correctly
-func TestCacheHitLatencyHistogram(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
+// TestMetricsSmoke exercises every metric used on the request path.
+func TestMetricsSmoke(t *testing.T) {
+	m := globalMetrics
 
-	startTime := time.Now()
-	time.Sleep(10 * time.Millisecond)
-	duration := time.Since(startTime).Seconds()
-
-	globalMetrics.CacheHitLatencySeconds.Observe(duration)
-}
-
-// TestRequestLatencyAllOutcomes verifies request latency tracks all requests
-func TestRequestLatencyAllOutcomes(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.RequestLatencySeconds.Observe(0.05)
-	globalMetrics.RequestLatencySeconds.Observe(0.5)
-	globalMetrics.RequestLatencySeconds.Observe(1.0)
-}
-
-// TestRequestsTotal_PathStatus verifies requests_total has correct labels including model/feature versions
-// Item 26: Verify model_version and feature_version labels are recorded
-func TestRequestsTotal_PathStatus(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	// Item 26: Record with all labels (path, status, model_version, feature_version)
-	globalMetrics.RequestsTotal.WithLabelValues("cache", "success", "prod_v1", "v1").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("cache", "error", "prod_v1", "v1").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "success", "prod_v1", "v1").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "error", "prod_v1", "v1").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "success", "prod_v1", "v1").Inc()
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "error", "prod_v1", "v1").Inc()
-}
-
-// TestDedupedRequestsTotal verifies deduped requests are tracked
-func TestDedupedRequestsTotal(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.DedupedRequestsTotal.Inc()
-	globalMetrics.DedupedRequestsTotal.Inc()
-	globalMetrics.DedupedRequestsTotal.Inc()
-}
-
-// TestInflightLeaderComputations verifies in-flight gauge
-func TestInflightLeaderComputations(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.InflightLeaderComputations.Set(1)
-	globalMetrics.InflightLeaderComputations.Inc()
-	globalMetrics.InflightLeaderComputations.Dec()
-	globalMetrics.InflightLeaderComputations.Set(0)
-}
-
-// TestWorkerPoolMetrics verifies worker pool and queue metrics
-func TestWorkerPoolMetrics(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.QueueDepthGauge.Set(5)
-	globalMetrics.JobsQueuedTotal.Inc()
-	globalMetrics.JobsCompletedTotal.Inc()
-	globalMetrics.JobsTimedOutTotal.Inc()
-	globalMetrics.WorkersActiveGauge.Set(3)
-	globalMetrics.WorkerRestartsTotal.Inc()
-	globalMetrics.WorkerErrorsTotal.Inc()
-	globalMetrics.WorkerJobDurationSeconds.Observe(0.25)
-	globalMetrics.WorkerJobDurationSeconds.Observe(0.5)
-}
-
-// TestQueueWaitLatency verifies queue wait latency histogram
-func TestQueueWaitLatency(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.QueueWaitLatencySeconds.Observe(0.001)
-	globalMetrics.QueueWaitLatencySeconds.Observe(0.01)
-	globalMetrics.QueueWaitLatencySeconds.Observe(0.1)
-}
-
-// TestErrorMetricsTotal verifies error type classification with model/feature versions
-// Item 26: Verify model_version and feature_version labels on errors_total
-func TestErrorMetricsTotal(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	// Item 26: Record with all labels (error_type, model_version, feature_version)
-	globalMetrics.ErrorsTotal.WithLabelValues("InvalidRequest", "prod_v1", "v1").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("GridNotFound", "prod_v1", "v1").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("DataMissing", "prod_v1", "v1").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("ComputationTimeout", "prod_v1", "v1").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("WorkerError", "prod_v1", "v1").Inc()
-	globalMetrics.ErrorsTotal.WithLabelValues("Unknown", "prod_v1", "v1").Inc()
-}
-
-// TestCacheMetricsVectorized verifies cache result labels
-func TestCacheMetricsVectorized(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.CacheHitsTotal.WithLabelValues("hit").Inc()
-	globalMetrics.CacheMissesTotal.WithLabelValues("miss").Inc()
-	globalMetrics.CacheEvictionTotal.WithLabelValues("ttl_expired").Inc()
-	globalMetrics.CacheEvictionTotal.WithLabelValues("manual_invalidate").Inc()
-}
-
-// TestDedupMetricsNew verifies dedup-specific metrics
-func TestDedupMetricsNew(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.DedupLeadersTotal.Inc()
-	globalMetrics.DedupFollowersTotal.Add(5)
-	globalMetrics.DedupActiveEntriesGauge.Set(3)
-	globalMetrics.DedupCleanupTotal.Add(2)
-	globalMetrics.DedupWaitLatencySeconds.Observe(0.01)
-	globalMetrics.DedupWaitLatencySeconds.Observe(0.05)
-}
-
-// TestThreadSafety verifies metrics can be used concurrently with model/feature version labels
-// Item 26: Verify thread safety with model_version and feature_version labels
-func TestThreadSafety(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	done := make(chan bool, 3)
-
-	go func() {
-		for i := 0; i < 50; i++ {
-			globalMetrics.RequestsTotal.WithLabelValues("cache", "success", "prod_v1", "v1").Inc()
-			globalMetrics.RequestLatencySeconds.Observe(0.01)
-		}
-		done <- true
-	}()
-
-	go func() {
-		for i := 0; i < 50; i++ {
-			globalMetrics.WorkersActiveGauge.Inc()
-			globalMetrics.WorkerJobDurationSeconds.Observe(0.05)
-		}
-		done <- true
-	}()
-
-	go func() {
-		for i := 0; i < 50; i++ {
-			globalMetrics.DedupFollowersTotal.Inc()
-			globalMetrics.DedupWaitLatencySeconds.Observe(0.02)
-		}
-		done <- true
-	}()
-
-	<-done
-	<-done
-	<-done
-}
-
-// TestLeaderComputeLatency tests leader_compute_latency_seconds histogram
-func TestLeaderComputeLatency(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	latencies := []float64{0.01, 0.05, 0.1, 0.5, 0.99, 1.2}
-	for _, lat := range latencies {
-		globalMetrics.LeaderComputeLatencySeconds.Observe(lat)
-	}
-}
-
-// TestPathSpecificMetrics verifies path label tracking with model/feature versions
-// Item 26: Verify path tracking includes model_version and feature_version
-func TestPathSpecificMetrics(t *testing.T) {
-	if globalMetrics == nil {
-		globalMetrics = NewMetricsWithLabels()
-	}
-
-	globalMetrics.RequestsTotal.WithLabelValues("cache", "success", "prod_v1", "v1").Add(10)
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "success", "prod_v1", "v1").Add(5)
-	globalMetrics.RequestsTotal.WithLabelValues("dedup", "error", "prod_v1", "v1").Add(1)
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "success", "prod_v1", "v1").Add(3)
-	globalMetrics.RequestsTotal.WithLabelValues("compute", "error", "prod_v1", "v1").Add(2)
+	m.RequestsTotal.WithLabelValues("cache", "success", "test", "test").Inc()
+	m.ErrorsTotal.WithLabelValues("NotInCoverage", "test", "test").Inc()
+	m.RequestLatencySeconds.Observe(0.05)
+	m.CacheHitLatencySeconds.Observe(0.001)
+	m.DedupWaitLatencySeconds.Observe(0.01)
+	m.LeaderComputeLatencySeconds.Observe(0.5)
+	m.CacheHitsTotal.WithLabelValues(CacheResultHit).Inc()
+	m.CacheMissesTotal.WithLabelValues(CacheResultMiss).Inc()
+	m.CacheEvictionTotal.WithLabelValues(EvictionReasonTTLExpired).Inc()
+	m.CacheEntriesGauge.Set(1)
+	m.DedupLeadersTotal.Inc()
+	m.DedupFollowersTotal.Inc()
+	m.DedupCleanupTotal.Inc()
+	m.DedupActiveEntriesGauge.Set(0)
+	m.DedupedRequestsTotal.Inc()
+	m.InflightLeaderComputations.Set(0)
 }

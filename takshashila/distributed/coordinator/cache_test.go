@@ -11,7 +11,7 @@ func TestCacheMiss(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -37,7 +37,7 @@ func TestCacheHit(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -68,7 +68,7 @@ func TestCacheExpiry(t *testing.T) {
 	cache := NewResultCache(ttl)
 
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -110,7 +110,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 
 			key := CacheKey{
-				GridID:         "g00000001",
+				Location:       "g00000001",
 				TimestampHour:  "2026-01-21T12:00:00Z",
 				ModelVersion:   "prod_v1",
 				FeatureVersion: "v1",
@@ -127,7 +127,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 
 			key := CacheKey{
-				GridID:         "g00000001",
+				Location:       "g00000001",
 				TimestampHour:  "2026-01-21T12:00:00Z",
 				ModelVersion:   "prod_v1",
 				FeatureVersion: "v1",
@@ -142,7 +142,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 	// No race detector failures = success
 	// Final value should be from one of the writes
 	key := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -162,7 +162,7 @@ func TestCacheEvictExpired(t *testing.T) {
 	// Set 5 entries
 	for i := 0; i < 5; i++ {
 		key := CacheKey{
-			GridID:         "g0000000" + string(rune('1'+i)),
+			Location:       "g0000000" + string(rune('1'+i)),
 			TimestampHour:  "2026-01-21T12:00:00Z",
 			ModelVersion:   "prod_v1",
 			FeatureVersion: "v1",
@@ -198,14 +198,14 @@ func TestCacheInvalidate(t *testing.T) {
 	cache := NewResultCache(5 * time.Minute)
 
 	key1 := CacheKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
 	}
 
 	key2 := CacheKey{
-		GridID:         "g00000002",
+		Location:       "g00000002",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -251,7 +251,7 @@ func TestCacheClear(t *testing.T) {
 	// Set multiple entries
 	for i := 0; i < 10; i++ {
 		key := CacheKey{
-			GridID:         "g0000000" + string(rune('1'+i)),
+			Location:       "g0000000" + string(rune('1'+i)),
 			TimestampHour:  "2026-01-21T12:00:00Z",
 			ModelVersion:   "prod_v1",
 			FeatureVersion: "v1",
@@ -277,7 +277,7 @@ func TestCacheClear(t *testing.T) {
 	// Verify all keys are gone
 	for i := 0; i < 10; i++ {
 		key := CacheKey{
-			GridID:         "g0000000" + string(rune('1'+i)),
+			Location:       "g0000000" + string(rune('1'+i)),
 			TimestampHour:  "2026-01-21T12:00:00Z",
 			ModelVersion:   "prod_v1",
 			FeatureVersion: "v1",

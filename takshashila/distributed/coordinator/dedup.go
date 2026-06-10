@@ -10,7 +10,7 @@ import (
 // DedupKey uniquely identifies a prediction computation
 // Does NOT include request_id (many requests can map to same computation)
 type DedupKey struct {
-	GridID         string
+	Location       string // canonical "lat,lon"
 	TimestampHour  string
 	ModelVersion   string
 	FeatureVersion string
@@ -18,7 +18,7 @@ type DedupKey struct {
 
 // String returns a stable string representation for map keys
 func (dk DedupKey) String() string {
-	return fmt.Sprintf("%s:%s:%s:%s", dk.GridID, dk.TimestampHour, dk.ModelVersion, dk.FeatureVersion)
+	return fmt.Sprintf("%s:%s:%s:%s", dk.Location, dk.TimestampHour, dk.ModelVersion, dk.FeatureVersion)
 }
 
 // DedupEntry tracks a single in-flight computation
