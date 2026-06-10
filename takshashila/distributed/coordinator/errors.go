@@ -10,11 +10,12 @@ type ErrorType int
 
 const (
 	ErrorTypeInvalidRequest ErrorType = iota
-	ErrorTypeGridNotFound
+	ErrorTypeNotInCoverage
 	ErrorTypeDataMissing
 	ErrorTypeComputationTimeout
 	ErrorTypeWorkerError
 	ErrorTypePredictionNotAvailable
+	ErrorTypeServiceUnavailable
 	ErrorTypeUnknown
 )
 
@@ -23,8 +24,8 @@ func (e ErrorType) String() string {
 	switch e {
 	case ErrorTypeInvalidRequest:
 		return "InvalidRequest"
-	case ErrorTypeGridNotFound:
-		return "GridNotFound"
+	case ErrorTypeNotInCoverage:
+		return "NotInCoverage"
 	case ErrorTypeDataMissing:
 		return "DataMissing"
 	case ErrorTypeComputationTimeout:
@@ -33,6 +34,8 @@ func (e ErrorType) String() string {
 		return "WorkerError"
 	case ErrorTypePredictionNotAvailable:
 		return "PredictionNotAvailable"
+	case ErrorTypeServiceUnavailable:
+		return "ServiceUnavailable"
 	case ErrorTypeUnknown:
 		return "Unknown"
 	default:
@@ -104,15 +107,29 @@ func NewInvalidRequestError(message string) PredictionError {
 	}
 }
 
-// NewGridNotFoundError creates a 404 non-retryable error (cached 5 minutes)
-func NewGridNotFoundError(gridID string) PredictionError {
+// NewNotInCoverageError creates a 404 non-retryable error (cached 5 minutes)
+// for a coordinate outside the model's coverage area.
+func NewNotInCoverageError(message string) PredictionError {
 	return &predictionError{
-		errType:    ErrorTypeGridNotFound,
-		message:    fmt.Sprintf("Grid %s not found", gridID),
+		errType:    ErrorTypeNotInCoverage,
+		message:    message,
 		httpStatus: 404,
 		retryable:  false,
 		cacheable:  true,
 		cacheTTL:   5 * time.Minute,
+	}
+}
+
+// NewServiceUnavailableError creates a 503 retryable error (cached 10s to
+// shed load while the inference service is down or restarting)
+func NewServiceUnavailableError(message string) PredictionError {
+	return &predictionError{
+		errType:    ErrorTypeServiceUnavailable,
+		message:    message,
+		httpStatus: 503,
+		retryable:  true,
+		cacheable:  true,
+		cacheTTL:   10 * time.Second,
 	}
 }
 

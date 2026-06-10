@@ -15,7 +15,7 @@ func TestDedupLeaderCreation(t *testing.T) {
 	ctx := context.Background()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -48,7 +48,7 @@ func TestDedupFollowersJoining(t *testing.T) {
 	ctx := context.Background()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -102,7 +102,7 @@ func TestDedupCleanupAfterCompletion(t *testing.T) {
 	ctx := context.Background()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -158,7 +158,7 @@ func TestDedupFollowerWaitSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -217,7 +217,7 @@ func TestDedupFollowerWaitError(t *testing.T) {
 	ctx := context.Background()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -269,7 +269,7 @@ func TestDedupFollowerTimeout(t *testing.T) {
 	dedup := NewDeduplicator()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",
@@ -304,7 +304,7 @@ func TestDedupConcurrentBurst(t *testing.T) {
 	dedup := NewDeduplicator()
 
 	key := DedupKey{
-		GridID:         "g00000001",
+		Location:       "g00000001",
 		TimestampHour:  "2026-01-21T12:00:00Z",
 		ModelVersion:   "prod_v1",
 		FeatureVersion: "v1",

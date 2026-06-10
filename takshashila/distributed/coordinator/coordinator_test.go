@@ -1,392 +1,323 @@
 package main
 
 import (
-	"context"
-	"fmt"
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// MockComputeFunc simulates the computation (replaces worker pool)
-type MockComputeFunc func(ctx context.Context, gridID, timestampHour string) (float64, error)
-
-// MockCoordinator wraps coordinator logic for testing without HTTP/worker pool
-type MockCoordinator struct {
-	dedup        *Deduplicator
-	cache        *ResultCache
-	computeFunc  MockComputeFunc
-	computeCount int32 // Track number of actual computations
+// mockKashi imitates the kashi inference service. inferenceCalls counts
+// /inference hits so dedup behaviour can be asserted.
+type mockKashi struct {
+	server         *httptest.Server
+	inferenceCalls atomic.Int64
+	failWith       atomic.Int32 // HTTP status to fail /inference with; 0 = succeed
+	delay          time.Duration
 }
 
-func NewMockCoordinator(computeFunc MockComputeFunc) *MockCoordinator {
-	return &MockCoordinator{
-		dedup:       NewDeduplicator(),
-		cache:       NewResultCache(5 * time.Minute),
-		computeFunc: computeFunc,
-	}
-}
-
-// executePrediction mimics the real coordinator's executePrediction
-func (mc *MockCoordinator) executePrediction(ctx context.Context, gridID, timestampHour, requestID string) (float64, error) {
-	// Construct dedup/cache key
-	key := DedupKey{
-		GridID:         gridID,
-		TimestampHour:  timestampHour,
-		ModelVersion:   "prod_v1",
-		FeatureVersion: "v1",
-	}
-
-	// Step 1: Check cache
-	cacheKey := CacheKey{
-		GridID:         key.GridID,
-		TimestampHour:  key.TimestampHour,
-		ModelVersion:   key.ModelVersion,
-		FeatureVersion: key.FeatureVersion,
-	}
-
-	if pm25, cachedErr, hit := mc.cache.Get(cacheKey); hit {
-		if cachedErr != nil {
-			return 0, cachedErr
+func newMockKashi(t *testing.T) *mockKashi {
+	mk := &mockKashi{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/meta", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"point_count": 65736, "model_version": "delhi_test", "feature_version": "v_test",
+		})
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+	})
+	mux.HandleFunc("/inference", func(w http.ResponseWriter, r *http.Request) {
+		mk.inferenceCalls.Add(1)
+		if mk.delay > 0 {
+			time.Sleep(mk.delay)
 		}
-		return pm25, nil
-	}
-
-	// Step 2: Attempt to acquire leader
-	entry, isLeader := mc.dedup.AcquireLeader(ctx, key, requestID)
-
-	if !isLeader {
-		// We're a follower - wait for leader
-		result, err := mc.dedup.WaitForResult(ctx, entry)
-		if err != nil {
-			return 0, err
+		if code := mk.failWith.Load(); code != 0 {
+			w.WriteHeader(int(code))
+			json.NewEncoder(w).Encode(map[string]string{"detail": "induced failure"})
+			return
 		}
-		return result.PM25, result.Error
-	}
-
-	// We're the leader - execute computation
-	atomic.AddInt32(&mc.computeCount, 1)
-	pm25, err := mc.computeFunc(ctx, gridID, timestampHour)
-
-	// Complete dedup
-	dedupResult := &DedupResult{
-		PM25:  pm25,
-		Error: err,
-	}
-	mc.dedup.Complete(key, dedupResult)
-
-	// Cache result only if successful
-	if err == nil {
-		mc.cache.Set(cacheKey, pm25)
-	}
-
-	return pm25, err
-}
-
-// Test 1: Cache hit avoids computation
-func TestCoordinatorCacheHit(t *testing.T) {
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		return 50.0, nil
-	}
-
-	mc := NewMockCoordinator(computeFunc)
-
-	ctx := context.Background()
-	gridID := "g00000001"
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	// First request - cache miss, computes
-	pm25_1, err := mc.executePrediction(ctx, gridID, timestampHour, "req-001")
-	if err != nil {
-		t.Fatalf("First request failed: %v", err)
-	}
-	if pm25_1 != 50.0 {
-		t.Errorf("Expected pm25=50.0, got %.2f", pm25_1)
-	}
-
-	// Second request - cache hit, no computation
-	pm25_2, err := mc.executePrediction(ctx, gridID, timestampHour, "req-002")
-	if err != nil {
-		t.Fatalf("Second request failed: %v", err)
-	}
-	if pm25_2 != 50.0 {
-		t.Errorf("Expected pm25=50.0, got %.2f", pm25_2)
-	}
-
-	// Verify only 1 computation happened
-	if mc.computeCount != 1 {
-		t.Errorf("Expected 1 computation, got %d", mc.computeCount)
-	}
-}
-
-// Test 2: Dedup reduces concurrent identical requests to single computation
-func TestCoordinatorDedupBurst(t *testing.T) {
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		// Simulate slow computation
-		time.Sleep(100 * time.Millisecond)
-		return 75.5, nil
-	}
-
-	mc := NewMockCoordinator(computeFunc)
-
-	ctx := context.Background()
-	gridID := "g00000001"
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	numRequests := 50
-	var wg sync.WaitGroup
-	results := make([]float64, numRequests)
-
-	// Launch 50 concurrent identical requests
-	for i := 0; i < numRequests; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-
-			requestID := fmt.Sprintf("req-%03d", idx)
-			pm25, err := mc.executePrediction(ctx, gridID, timestampHour, requestID)
-			if err != nil {
-				t.Errorf("Request %s failed: %v", requestID, err)
+		var req struct {
+			Coords [][2]float64 `json:"coords"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		// Reject coordinates far outside Delhi, like the real service.
+		for _, c := range req.Coords {
+			if c[0] < 28 || c[0] > 29 || c[1] < 76 || c[1] > 78 {
+				w.WriteHeader(404)
+				json.NewEncoder(w).Encode(map[string]string{"detail": "outside the Delhi coverage area"})
+				return
 			}
-			results[idx] = pm25
+		}
+		preds := make([]float64, len(req.Coords))
+		for i := range preds {
+			preds[i] = 123.45
+		}
+		json.NewEncoder(w).Encode(map[string]any{"predictions": preds})
+	})
+	mk.server = httptest.NewServer(mux)
+	t.Cleanup(mk.server.Close)
+	return mk
+}
+
+func newTestCoordinator(t *testing.T, mk *mockKashi) *Coordinator {
+	cfg := DefaultConfig()
+	cfg.InferenceURL = mk.server.URL
+	cfg.InferenceTimeout = 2 * time.Second
+	cfg.RequestTimeout = 3 * time.Second
+	// redis nil: tier skipped in tests
+	return NewCoordinator(cfg, nil, NewInferenceClient(cfg))
+}
+
+func doPredict(t *testing.T, c *Coordinator, body string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/predict", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	c.handlePredict(rec, req)
+	var parsed map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &parsed)
+	return rec, parsed
+}
+
+func TestPredictSuccess(t *testing.T) {
+	c := newTestCoordinator(t, newMockKashi(t))
+	rec, resp := doPredict(t, c, `{"lat":28.6315,"lon":77.2167,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+
+	if rec.Code != 200 {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if resp["pm25"] != 123.45 {
+		t.Errorf("want pm25=123.45, got %v", resp["pm25"])
+	}
+	if resp["source"] != "inference" {
+		t.Errorf("want source=inference, got %v", resp["source"])
+	}
+	if resp["lat"] != 28.6315 || resp["lon"] != 77.2167 {
+		t.Errorf("want echoed lat/lon, got %v/%v", resp["lat"], resp["lon"])
+	}
+}
+
+func TestPredictCacheHitSecondCall(t *testing.T) {
+	mk := newMockKashi(t)
+	c := newTestCoordinator(t, mk)
+
+	doPredict(t, c, `{"lat":28.60,"lon":77.10,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+	rec, resp := doPredict(t, c, `{"lat":28.60,"lon":77.10,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+
+	if rec.Code != 200 || resp["source"] != "cache" {
+		t.Fatalf("want cached 200, got %d source=%v", rec.Code, resp["source"])
+	}
+	if mk.inferenceCalls.Load() != 1 {
+		t.Errorf("want 1 inference call, got %d", mk.inferenceCalls.Load())
+	}
+}
+
+func TestPredictCoordinateRounding(t *testing.T) {
+	mk := newMockKashi(t)
+	c := newTestCoordinator(t, mk)
+
+	// Coordinates within ~1m round to the same canonical location → one call.
+	for _, body := range []string{
+		`{"lat":28.612345,"lon":77.201111,"timestamp_hour":"2026-06-09T14:00:00Z"}`,
+		`{"lat":28.612346,"lon":77.201119,"timestamp_hour":"2026-06-09T14:00:00Z"}`,
+		`{"lat":28.6123,"lon":77.2011,"timestamp_hour":"2026-06-09T14:00:00Z"}`,
+	} {
+		if rec, _ := doPredict(t, c, body); rec.Code != 200 {
+			t.Fatalf("body %s: want 200, got %d", body, rec.Code)
+		}
+	}
+	if mk.inferenceCalls.Load() != 1 {
+		t.Errorf("want 1 inference call for coords sharing a 4-decimal key, got %d", mk.inferenceCalls.Load())
+	}
+}
+
+func TestPredictTimestampNormalization(t *testing.T) {
+	mk := newMockKashi(t)
+	c := newTestCoordinator(t, mk)
+
+	// Same hour expressed three ways must produce one inference call.
+	for _, ts := range []string{
+		"2026-06-09T14:00:00Z",
+		"2026-06-09T14:37:22Z",
+		"2026-06-09T19:30:00+05:30",
+	} {
+		rec, _ := doPredict(t, c, `{"lat":28.55,"lon":77.15,"timestamp_hour":"`+ts+`"}`)
+		if rec.Code != 200 {
+			t.Fatalf("ts %q: want 200, got %d: %s", ts, rec.Code, rec.Body.String())
+		}
+	}
+	if mk.inferenceCalls.Load() != 1 {
+		t.Errorf("want 1 inference call across equivalent timestamps, got %d", mk.inferenceCalls.Load())
+	}
+}
+
+func TestPredictDedupConcurrent(t *testing.T) {
+	mk := newMockKashi(t)
+	mk.delay = 100 * time.Millisecond
+	c := newTestCoordinator(t, mk)
+
+	const n = 50
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec, _ := doPredict(t, c, `{"lat":28.61,"lon":77.21,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+			codes[i] = rec.Code
 		}(i)
 	}
-
 	wg.Wait()
 
-	// Verify all requests got same result
-	for i, pm25 := range results {
-		if pm25 != 75.5 {
-			t.Errorf("Request %d got wrong result: %.2f", i, pm25)
+	for i, code := range codes {
+		if code != 200 {
+			t.Errorf("request %d: want 200, got %d", i, code)
 		}
 	}
-
-	// Verify only 1 computation happened (dedup worked)
-	if mc.computeCount != 1 {
-		t.Errorf("Expected 1 computation (dedup), got %d", mc.computeCount)
+	if calls := mk.inferenceCalls.Load(); calls != 1 {
+		t.Errorf("want exactly 1 inference call for 50 concurrent identical requests, got %d", calls)
 	}
 }
 
-// Test 3: Different grid IDs bypass dedup
-func TestCoordinatorDifferentGrids(t *testing.T) {
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		// Return different values per grid
-		if gridID == "g00000001" {
-			return 10.0, nil
+func TestPredictValidation(t *testing.T) {
+	c := newTestCoordinator(t, newMockKashi(t))
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"empty body", ``, 400},
+		{"invalid json", `{not json`, 400},
+		{"missing everything", `{}`, 400},
+		{"missing timestamp", `{"lat":28.6,"lon":77.2}`, 400},
+		{"bad timestamp", `{"lat":28.6,"lon":77.2,"timestamp_hour":"banana"}`, 400},
+		{"year too old", `{"lat":28.6,"lon":77.2,"timestamp_hour":"1999-01-01T00:00:00Z"}`, 400},
+		{"year too far", `{"lat":28.6,"lon":77.2,"timestamp_hour":"2099-01-01T00:00:00Z"}`, 400},
+		{"lat without lon", `{"lat":28.6,"timestamp_hour":"2026-06-09T14:00:00Z"}`, 400},
+		{"lon without lat", `{"lon":77.2,"timestamp_hour":"2026-06-09T14:00:00Z"}`, 400},
+		{"lat out of range", `{"lat":91,"lon":77.2,"timestamp_hour":"2026-06-09T14:00:00Z"}`, 400},
+		{"lon out of range", `{"lat":28.6,"lon":181,"timestamp_hour":"2026-06-09T14:00:00Z"}`, 400},
+		{"outside coverage", `{"lat":19.0,"lon":72.8,"timestamp_hour":"2026-06-09T14:00:00Z"}`, 404},
+	}
+	for _, tc := range cases {
+		rec, _ := doPredict(t, c, tc.body)
+		if rec.Code != tc.want {
+			t.Errorf("%s: want %d, got %d (%s)", tc.name, tc.want, rec.Code, rec.Body.String())
 		}
-		return 20.0, nil
-	}
-
-	mc := NewMockCoordinator(computeFunc)
-
-	ctx := context.Background()
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	// Request for grid 1
-	pm25_1, err := mc.executePrediction(ctx, "g00000001", timestampHour, "req-001")
-	if err != nil {
-		t.Fatalf("Grid 1 request failed: %v", err)
-	}
-	if pm25_1 != 10.0 {
-		t.Errorf("Expected grid1 pm25=10.0, got %.2f", pm25_1)
-	}
-
-	// Request for grid 2
-	pm25_2, err := mc.executePrediction(ctx, "g00000002", timestampHour, "req-002")
-	if err != nil {
-		t.Fatalf("Grid 2 request failed: %v", err)
-	}
-	if pm25_2 != 20.0 {
-		t.Errorf("Expected grid2 pm25=20.0, got %.2f", pm25_2)
-	}
-
-	// Verify 2 computations (different grids = different keys)
-	if mc.computeCount != 2 {
-		t.Errorf("Expected 2 computations, got %d", mc.computeCount)
 	}
 }
 
-// Test 4: Computation error not cached
-func TestCoordinatorErrorNotCached(t *testing.T) {
-	callCount := 0
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		callCount++
-		if callCount == 1 {
-			return 0, fmt.Errorf("grid not found")
+func TestPredictMethodNotAllowed(t *testing.T) {
+	c := newTestCoordinator(t, newMockKashi(t))
+	req := httptest.NewRequest(http.MethodGet, "/predict", nil)
+	rec := httptest.NewRecorder()
+	c.handlePredict(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+func TestPredictBodyTooLarge(t *testing.T) {
+	c := newTestCoordinator(t, newMockKashi(t))
+	huge := `{"lat":28.6,"lon":77.2,"pad":"` + strings.Repeat("x", maxRequestBodyBytes+1) + `"}`
+	rec, _ := doPredict(t, c, huge)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("want 413, got %d", rec.Code)
+	}
+}
+
+func TestPredictInferenceDown(t *testing.T) {
+	mk := newMockKashi(t)
+	c := newTestCoordinator(t, mk)
+	mk.server.Close() // kill kashi
+
+	rec, _ := doPredict(t, c, `{"lat":28.62,"lon":77.22,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+	if rec.Code != 503 {
+		t.Fatalf("want 503 when inference down, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("want Retry-After header on 503")
+	}
+}
+
+func TestPredictInferenceErrorCached(t *testing.T) {
+	mk := newMockKashi(t)
+	c := newTestCoordinator(t, mk)
+	mk.failWith.Store(500)
+
+	doPredict(t, c, `{"lat":28.63,"lon":77.23,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+	callsAfterFirst := mk.inferenceCalls.Load()
+	rec, _ := doPredict(t, c, `{"lat":28.63,"lon":77.23,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+
+	if rec.Code != 503 {
+		t.Fatalf("want 503, got %d", rec.Code)
+	}
+	if mk.inferenceCalls.Load() != callsAfterFirst {
+		t.Errorf("second request should be served from the error cache, not hit kashi")
+	}
+}
+
+func TestPredictRecoversAfterFailure(t *testing.T) {
+	mk := newMockKashi(t)
+	c := newTestCoordinator(t, mk)
+
+	mk.failWith.Store(500)
+	rec, _ := doPredict(t, c, `{"lat":28.64,"lon":77.24,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+	if rec.Code != 503 {
+		t.Fatalf("want 503 during outage, got %d", rec.Code)
+	}
+
+	mk.failWith.Store(0)
+	// The ServiceUnavailable error is cached briefly; invalidate to simulate TTL expiry.
+	model, feature, _ := c.versions()
+	c.cache.Invalidate(CacheKey{Location: canonicalLocation(28.64, 77.24), TimestampHour: "2026-06-09T14:00:00Z", ModelVersion: model, FeatureVersion: feature})
+
+	rec, resp := doPredict(t, c, `{"lat":28.64,"lon":77.24,"timestamp_hour":"2026-06-09T14:00:00Z"}`)
+	if rec.Code != 200 {
+		t.Fatalf("want 200 after recovery, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if resp["pm25"] != 123.45 {
+		t.Errorf("want pm25 after recovery, got %v", resp["pm25"])
+	}
+}
+
+func TestCanonicalLocation(t *testing.T) {
+	cases := map[[2]float64]string{
+		{28.6315, 77.2167}:     "28.6315,77.2167",
+		{28.612345, 77.201119}: "28.6123,77.2011",
+		{28.0, 77.0}:           "28.0000,77.0000",
+	}
+	for in, want := range cases {
+		if got := canonicalLocation(in[0], in[1]); got != want {
+			t.Errorf("canonicalLocation(%v) = %q, want %q", in, got, want)
 		}
-		return 60.0, nil
-	}
-
-	mc := NewMockCoordinator(computeFunc)
-
-	ctx := context.Background()
-	gridID := "g00000001"
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	// First request - error
-	_, err := mc.executePrediction(ctx, gridID, timestampHour, "req-001")
-	if err == nil {
-		t.Fatal("Expected error from first request")
-	}
-
-	// Second request - should recompute (error wasn't cached)
-	pm25_2, err := mc.executePrediction(ctx, gridID, timestampHour, "req-002")
-	if err != nil {
-		t.Fatalf("Second request failed: %v", err)
-	}
-	if pm25_2 != 60.0 {
-		t.Errorf("Expected pm25=60.0, got %.2f", pm25_2)
-	}
-
-	// Verify 2 computations happened (error not cached)
-	if mc.computeCount != 2 {
-		t.Errorf("Expected 2 computations, got %d", mc.computeCount)
 	}
 }
 
-// Test 5: Cache expiry forces recomputation
-func TestCoordinatorCacheExpiry(t *testing.T) {
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		return 30.0, nil
+func TestCanonicalHour(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"2026-06-09T14:37:22Z", "2026-06-09T14:00:00Z"},
+		{"2026-06-09T19:30:00+05:30", "2026-06-09T14:00:00Z"},
+		{"2026-06-09T14:00:00", "2026-06-09T14:00:00Z"},
+	} {
+		got, err := canonicalHour(tc.in)
+		if err != nil {
+			t.Errorf("canonicalHour(%q) error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("canonicalHour(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
-
-	// Create coordinator with short TTL
-	mc := &MockCoordinator{
-		dedup:       NewDeduplicator(),
-		cache:       NewResultCache(200 * time.Millisecond),
-		computeFunc: computeFunc,
-	}
-
-	ctx := context.Background()
-	gridID := "g00000001"
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	// First request - computes and caches
-	pm25_1, err := mc.executePrediction(ctx, gridID, timestampHour, "req-001")
-	if err != nil {
-		t.Fatalf("First request failed: %v", err)
-	}
-	if pm25_1 != 30.0 {
-		t.Errorf("Expected pm25=30.0, got %.2f", pm25_1)
-	}
-
-	// Second request immediately - cache hit
-	_, err = mc.executePrediction(ctx, gridID, timestampHour, "req-002")
-	if err != nil {
-		t.Fatalf("Second request failed: %v", err)
-	}
-	if mc.computeCount != 1 {
-		t.Errorf("Expected 1 computation after immediate request, got %d", mc.computeCount)
-	}
-
-	// Wait for cache expiry
-	time.Sleep(250 * time.Millisecond)
-
-	// Third request - cache expired, recomputes
-	pm25_3, err := mc.executePrediction(ctx, gridID, timestampHour, "req-003")
-	if err != nil {
-		t.Fatalf("Third request failed: %v", err)
-	}
-	if pm25_3 != 30.0 {
-		t.Errorf("Expected pm25=30.0, got %.2f", pm25_3)
-	}
-
-	// Verify recomputation happened
-	if mc.computeCount != 2 {
-		t.Errorf("Expected 2 computations after expiry, got %d", mc.computeCount)
-	}
-}
-
-// Test 6: Context timeout propagates to followers
-func TestCoordinatorFollowerTimeout(t *testing.T) {
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		// Simulate very slow computation
-		time.Sleep(5 * time.Second)
-		return 100.0, nil
-	}
-
-	mc := NewMockCoordinator(computeFunc)
-
-	gridID := "g00000001"
-	timestampHour := "2026-01-21T12:00:00Z"
-
-	// Leader starts (long timeout)
-	leaderCtx, leaderCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer leaderCancel()
-
-	leaderDone := make(chan struct{})
-	go func() {
-		mc.executePrediction(leaderCtx, gridID, timestampHour, "req-leader")
-		close(leaderDone)
-	}()
-
-	// Give leader time to acquire lock
-	time.Sleep(50 * time.Millisecond)
-
-	// Follower with short timeout
-	followerCtx, followerCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer followerCancel()
-
-	_, err := mc.executePrediction(followerCtx, gridID, timestampHour, "req-follower")
-
-	// Follower should timeout
-	if err != context.DeadlineExceeded {
-		t.Errorf("Expected context.DeadlineExceeded, got %v", err)
-	}
-
-	// Leader should still be running
-	select {
-	case <-leaderDone:
-		// Leader finished (or we'll cancel it below)
-	case <-time.After(100 * time.Millisecond):
-		// Expected - leader still running
-	}
-
-	// Cancel leader to avoid test hanging
-	leaderCancel()
-}
-
-// Test 7: Stats reflect dedup and cache state
-func TestCoordinatorStats(t *testing.T) {
-	computeFunc := func(ctx context.Context, gridID, timestampHour string) (float64, error) {
-		time.Sleep(50 * time.Millisecond)
-		return 80.0, nil
-	}
-
-	mc := NewMockCoordinator(computeFunc)
-
-	ctx := context.Background()
-
-	// Initial stats
-	dedupStats := mc.dedup.Stats()
-	cacheStats := mc.cache.Stats()
-
-	if dedupStats.ActiveComputations != 0 {
-		t.Errorf("Expected 0 active computations initially, got %d", dedupStats.ActiveComputations)
-	}
-	if cacheStats.TotalEntries != 0 {
-		t.Errorf("Expected 0 cache entries initially, got %d", cacheStats.TotalEntries)
-	}
-
-	// Execute prediction
-	pm25, err := mc.executePrediction(ctx, "g00000001", "2026-01-21T12:00:00Z", "req-001")
-	if err != nil {
-		t.Fatalf("Request failed: %v", err)
-	}
-	if pm25 != 80.0 {
-		t.Errorf("Expected pm25=80.0, got %.2f", pm25)
-	}
-
-	// After completion, dedup should be cleaned up, cache should have 1 entry
-	dedupStats = mc.dedup.Stats()
-	cacheStats = mc.cache.Stats()
-
-	if dedupStats.ActiveComputations != 0 {
-		t.Errorf("Expected 0 active computations after completion, got %d", dedupStats.ActiveComputations)
-	}
-
-	if cacheStats.TotalEntries != 1 {
-		t.Errorf("Expected 1 cache entry, got %d", cacheStats.TotalEntries)
+	for _, bad := range []string{"", "banana", "2026-13-45T99:00:00Z", "1999-01-01T00:00:00Z"} {
+		if _, err := canonicalHour(bad); err == nil {
+			t.Errorf("canonicalHour(%q) should fail", bad)
+		}
 	}
 }
