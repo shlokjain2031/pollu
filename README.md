@@ -2,10 +2,9 @@
 
 Pollu is a PM2.5 modeling and serving codebase for hyperlocal city-scale pollution intelligence.
 
-You can find end-to-end documentation on the machine learning specific part of the project here: [High Resolution PM2.5 Estimation at Hourly Temporal and 30m Spatial Resolution Using LightGBM
-](https://gist.github.com/shlokjain2031/f37a5af9108d0ffd40f6e3d0e25c4b27)
+[Research Paper (Delhi, PDF)](./pollu_ieee_research_paper_delhi.pdf)
 
-Some organic feedback from [reddit](https://www.reddit.com/r/mumbai/comments/1qpjh0a/built_a_high_res_30m_x_30m_pollution_predictor/?utm_source=share&utm_medium=web3x&utm_name=web3xcss&utm_term=1&utm_content=share_button)
+Organic feedback from [reddit](https://www.reddit.com/r/mumbai/comments/1qpjh0a/built_a_high_res_30m_x_30m_pollution_predictor/?utm_source=share&utm_medium=web3x&utm_name=web3xcss&utm_term=1&utm_content=share_button)
 
 ## Scope of this README
 
